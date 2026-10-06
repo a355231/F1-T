@@ -1,0 +1,674 @@
+// -*- mode: java; c-basic-offset: 2; -*-
+// Copyright 2009-2011 Google, All Rights reserved
+// Copyright 2011-2018 MIT, All rights reserved
+// Released under the Apache License, Version 2.0
+// http://www.apache.org/licenses/LICENSE-2.0
+
+package com.google.appinventor.components.runtime;
+
+import android.animation.StateListAnimator;
+import android.content.res.ColorStateList;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.ShapeDrawable;
+import android.graphics.drawable.shapes.OvalShape;
+import android.graphics.drawable.shapes.RectShape;
+import android.graphics.drawable.shapes.RoundRectShape;
+import android.os.Build;
+import android.util.Log;
+import android.view.View;
+import android.view.View.OnClickListener;
+import android.view.View.OnFocusChangeListener;
+import android.view.View.OnLongClickListener;
+import android.view.ViewOutlineProvider;
+import com.google.appinventor.components.annotations.DesignerProperty;
+import com.google.appinventor.components.annotations.IsColor;
+import com.google.appinventor.components.annotations.Options;
+import com.google.appinventor.components.annotations.PropertyCategory;
+import com.google.appinventor.components.annotations.SimpleEvent;
+import com.google.appinventor.components.annotations.SimpleObject;
+import com.google.appinventor.components.annotations.SimpleProperty;
+import com.google.appinventor.components.annotations.UsesPermissions;
+import com.google.appinventor.components.common.ButtonShape;
+import com.google.appinventor.components.common.FontTypeface;
+import com.google.appinventor.components.common.PropertyTypeConstants;
+import com.google.appinventor.components.common.TextAlignment;
+import com.google.appinventor.components.runtime.util.IceCreamSandwichUtil;
+import com.google.appinventor.components.runtime.util.KitkatUtil;
+import com.google.appinventor.components.runtime.util.TextViewUtil;
+import com.google.appinventor.components.runtime.util.ViewUtil;
+
+/**
+ * Underlying base class for click-based components, not directly accessible to Simple programmers.
+ *
+ */
+@SimpleObject
+@UsesPermissions(permissionNames = "android.permission.INTERNET")
+public abstract class ButtonBase extends TouchComponent<android.widget.Button>
+    implements OnClickListener, OnFocusChangeListener, OnLongClickListener, AccessibleComponent {
+
+  private static final String LOG_TAG = "ButtonBase";
+
+  // Constant for shape
+  // 10px is the radius of the rounded corners.
+  // 10px was chosen for esthetic reasons.
+  private static final float ROUNDED_CORNERS_RADIUS = 10f;
+  private static final float[] ROUNDED_CORNERS_ARRAY = new float[] { ROUNDED_CORNERS_RADIUS,
+      ROUNDED_CORNERS_RADIUS, ROUNDED_CORNERS_RADIUS, ROUNDED_CORNERS_RADIUS,
+      ROUNDED_CORNERS_RADIUS, ROUNDED_CORNERS_RADIUS, ROUNDED_CORNERS_RADIUS,
+      ROUNDED_CORNERS_RADIUS };
+
+  // Constant background color for buttons with a Shape other than default
+  private static final int SHAPED_DEFAULT_BACKGROUND_COLOR = Color.LTGRAY;
+
+  // Backing for text alignment
+  private int textAlignment;
+
+  // Backing for font typeface
+  private String fontTypeface;
+
+  // Backing for font bold
+  private boolean bold;
+
+  // Backing for font italic
+  private boolean italic;
+
+  // Backing for text color
+  private int textColor;
+
+  // Backing for button shape
+  private int shape;
+
+  private Drawable myBackgroundDrawable = null;
+
+  // This is our handle in Android's default button color states;
+  private ColorStateList defaultColorStateList;
+
+  // This is the original outline provider created for the button.
+  private Object defaultOutlineProvider;
+
+  // This is the original state animator created for the button.
+  private Object defaultStateAnimator;
+
+  //Whether or not the button is in high contrast mode
+  private boolean isHighContrast = false;
+
+  //Whether or not the button is in big text mode
+  private boolean isBigText = false;
+
+  /**
+   * The minimum width of a button for the current theme.
+   *
+   * We store this statically because it should be constant across all buttons in the app.
+   */
+  private static int defaultButtonMinWidth = 0;
+
+  /**
+   * The minimum height of a button for the current theme.
+   *
+   * We store this statically because it should be constant across all buttons in the app.
+   */
+  private static int defaultButtonMinHeight = 0;
+
+  /**
+   * Creates a new ButtonBase component.
+   *
+   * @param container  container, component will be placed in
+   */
+  public ButtonBase(ComponentContainer container) {
+    super(container);
+    view = new android.widget.Button(container.$context());
+
+    // Save the default values in case the user wants them back later.
+    defaultColorStateList = view.getTextColors();
+    defaultButtonMinWidth = KitkatUtil.getMinWidth(view);
+    defaultButtonMinHeight = KitkatUtil.getMinHeight(view);
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+      defaultOutlineProvider = view.getOutlineProvider();
+      defaultStateAnimator = view.getStateListAnimator();
+    }
+
+    // Initialize TouchComponent attributes
+    initToggle();
+
+    // Listen to clicks and focus changes
+    view.setOnClickListener(this);
+    view.setOnFocusChangeListener(this);
+    view.setOnLongClickListener(this);
+    IceCreamSandwichUtil.setAllCaps(view, false);
+
+    // Default property values
+    TextAlignment(Component.ALIGNMENT_CENTER);
+    fontTypeface = Component.TYPEFACE_DEFAULT;
+    TextViewUtil.setFontTypeface(container.$form(), view, fontTypeface, bold, italic);
+    FontSize(Component.FONT_DEFAULT_SIZE);
+    Text("");
+    TextColor(Component.COLOR_DEFAULT);
+    Shape(Component.BUTTON_SHAPE_DEFAULT);
+  }
+
+  public void Initialize(){
+    updateAppearance();
+  }
+
+  /**
+   * Indicates the cursor moved over the `%type%` so it is now possible
+   * to click it.
+   */
+  @SimpleEvent(description = "Indicates the cursor moved over the %type% so " +
+      "it is now possible to click it.")
+  public void GotFocus() {
+    EventDispatcher.dispatchEvent(this, "GotFocus");
+  }
+
+  /**
+   * Indicates the cursor moved away from the `%type%` so it is now no
+   * longer possible to click it.
+   */
+  @SimpleEvent(description = "Indicates the cursor moved away from " +
+      "the %type% so it is now no longer possible to click it.")
+  public void LostFocus() {
+    EventDispatcher.dispatchEvent(this, "LostFocus");
+  }
+
+  /**
+   * Returns the alignment of the `%type%`'s text: center, normal
+   * (e.g., left-justified if text is written left to right), or
+   * opposite (e.g., right-justified if text is written left to right).
+   *
+   * @return  one of {@link Component#ALIGNMENT_NORMAL},
+   *          {@link Component#ALIGNMENT_CENTER} or
+   *          {@link Component#ALIGNMENT_OPPOSITE}
+   */
+  @SimpleProperty(
+      category = PropertyCategory.APPEARANCE,
+      description = "Left, center, or right.")
+  public @Options(TextAlignment.class) int TextAlignment() {
+    return textAlignment;
+  }
+
+  /**
+   * Specifies the alignment of the `%type%`'s text. Valid values are:
+   * `0` (normal; e.g., left-justified if text is written left to right),
+   * `1` (center), or
+   * `2` (opposite; e.g., right-justified if text is written left to right).
+   *
+   * @param alignment  one of {@link Component#ALIGNMENT_NORMAL},
+   *                   {@link Component#ALIGNMENT_CENTER} or
+   *                   {@link Component#ALIGNMENT_OPPOSITE}
+   */
+  @DesignerProperty(editorType = PropertyTypeConstants.PROPERTY_TYPE_TEXTALIGNMENT,
+                    defaultValue = Component.ALIGNMENT_CENTER + "")
+  @SimpleProperty
+  public void TextAlignment(@Options(TextAlignment.class) int alignment) {
+    this.textAlignment = alignment;
+    TextViewUtil.setAlignment(view, alignment, true);
+  }
+
+  /**
+   * Returns the style of the `%type%`.
+   *
+   * @return  one of {@link Component#BUTTON_SHAPE_DEFAULT},
+   *          {@link Component#BUTTON_SHAPE_ROUNDED},
+   *          {@link Component#BUTTON_SHAPE_RECT} or
+   *          {@link Component#BUTTON_SHAPE_OVAL}
+   */
+  @SimpleProperty(
+      category = PropertyCategory.APPEARANCE)
+  public @Options(ButtonShape.class) int Shape() {
+    return shape;
+  }
+
+  /**
+   * Specifies the shape of the `%type%`. The valid values for this property are `0` (default),
+   * `1` (rounded), `2` (rectangle), and `3` (oval). The `Shape` will not be visible if an
+   * {@link #Image()} is used.
+   *
+   * @internaldoc
+   * This does not check that the argument is a legal value.
+   *
+   * @param shape one of {@link Component#BUTTON_SHAPE_DEFAULT},
+   *          {@link Component#BUTTON_SHAPE_ROUNDED},
+   *          {@link Component#BUTTON_SHAPE_RECT} or
+   *          {@link Component#BUTTON_SHAPE_OVAL}
+   *
+   * @throws IllegalArgumentException if shape is not a legal value.
+   */
+  @DesignerProperty(editorType = PropertyTypeConstants.PROPERTY_TYPE_BUTTON_SHAPE,
+      defaultValue = Component.BUTTON_SHAPE_DEFAULT + "")
+  @SimpleProperty(description = "Specifies the shape of the %type% (default, rounded," +
+      " rectangular, oval). The shape will not be visible if an Image is being displayed.")
+  public void Shape(@Options(ButtonShape.class) int shape) {
+    this.shape = shape;
+    updateAppearance();
+  }
+
+  // Update appearance based on values of backgroundImageDrawable, backgroundColor and shape.
+  // Images take precedence over background colors.
+  @Override
+  protected void updateAppearance() {
+    // If there is no background image,
+    // the appearance depends solely on the background color and shape.
+    if (backgroundImageDrawable == null) {
+      if (shape == Component.BUTTON_SHAPE_DEFAULT) {
+        if (backgroundColor == Component.COLOR_DEFAULT) {
+          // If there is no background image and color is default,
+          // restore original 3D bevel appearance.
+          if (isHighContrast || container.$form().HighContrast()) {
+            ViewUtil.setBackgroundDrawable(view, null);
+            ViewUtil.setBackgroundDrawable(view, getSafeBackgroundDrawable());
+            view.getBackground().setColorFilter(Component.COLOR_BLACK, PorterDuff.Mode.SRC_ATOP);
+          }
+          else {
+            super.updateAppearance();
+          }
+        } else {
+          super.updateAppearance();
+        }
+      } else {
+        // If there is no background image and the shape is something other than default,
+        // create a drawable with the appropriate shape and color.
+        setShape();
+      }
+      TextViewUtil.setMinSize(view, defaultButtonMinWidth, defaultButtonMinHeight);
+    } else {
+      if ((shape == Component.BUTTON_SHAPE_DEFAULT)) {
+        super.updateAppearance();
+        TextViewUtil.setMinSize(view, 0, 0);
+      } else {
+        Paint paint = new Paint();
+        paint.setAntiAlias(true);
+
+        Bitmap backgroundBitmap = ((BitmapDrawable) backgroundImageDrawable).getBitmap();
+        float displayDensity = view.getContext().getResources().getDisplayMetrics().density;
+        int shapeHeight = Math.round(backgroundImageDrawable.getIntrinsicHeight() * displayDensity);
+        int shapeWidth = Math.round(backgroundImageDrawable.getIntrinsicWidth() * displayDensity);
+
+        Bitmap result = Bitmap.createBitmap(shapeWidth, shapeHeight, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(result);
+
+        switch (shape) {
+          case Component.BUTTON_SHAPE_ROUNDED:
+            canvas.drawRoundRect(new RectF(0, 0,shapeWidth, shapeHeight), 100f, 100f, paint);
+            //100f was used because the rounded feature could not be seen with 10f in companion, emulator, and phone.
+            break;
+          case Component.BUTTON_SHAPE_RECT:
+            canvas.drawRect(new RectF(0, 0, shapeWidth, shapeHeight), paint);
+            break;
+          case Component.BUTTON_SHAPE_OVAL:
+            canvas.drawOval(new RectF(0, 0, shapeWidth, shapeHeight), paint);
+            break;
+          default:
+            throw new IllegalArgumentException();
+        }
+
+        paint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
+
+        canvas.drawBitmap(backgroundBitmap, null, new Rect(0, 0, shapeWidth, shapeHeight), paint);
+
+        ViewUtil.setBackgroundImage(view, new BitmapDrawable(result));
+      }
+    }
+  }
+
+  private Drawable getSafeBackgroundDrawable() {
+    if (myBackgroundDrawable == null) {
+      Drawable.ConstantState state = defaultDrawable.getConstantState();
+      if (state != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.GINGERBREAD_MR1) {
+        try {
+          myBackgroundDrawable = state.newDrawable().mutate();
+        } catch (NullPointerException e) {
+          // We see this on SDK 7, but given we can't easily test every version
+          // this is meant as a safeguard.
+          Log.e(LOG_TAG, "Unable to clone button drawable", e);
+          myBackgroundDrawable = defaultDrawable;
+        }
+      } else {
+        // Since we can't make a copy of the default we'll just use it directly
+        myBackgroundDrawable = defaultDrawable;
+      }
+    }
+    return myBackgroundDrawable;
+  }
+
+  private ColorStateList createRippleState () {
+
+    int[][] states = new int[][] { new int[] { android.R.attr.state_enabled} };
+    int enabled_color = defaultColorStateList.getColorForState(view.getDrawableState(), android.R.attr.state_enabled);
+    int[] colors = new int[] { Color.argb(70, Color.red(enabled_color), Color.green(enabled_color),
+            Color.blue(enabled_color)) };
+
+    return new ColorStateList(states, colors);
+  }
+
+  // Throw IllegalArgumentException if shape has illegal value.
+  private void setShape() {
+    ShapeDrawable drawable = new ShapeDrawable();
+
+    // Set shape of drawable.
+    switch (shape) {
+      case Component.BUTTON_SHAPE_ROUNDED:
+        drawable.setShape(new RoundRectShape(ROUNDED_CORNERS_ARRAY, null, null));
+        break;
+      case Component.BUTTON_SHAPE_RECT:
+        drawable.setShape(new RectShape());
+        break;
+      case Component.BUTTON_SHAPE_OVAL:
+        drawable.setShape(new OvalShape());
+        break;
+      default:
+        throw new IllegalArgumentException();
+    }
+
+    if (backgroundColor != Component.COLOR_DEFAULT && !container.$form().HighContrast()) {
+      drawable.getPaint().setColor(backgroundColor);
+    }
+
+    // Set drawable to the background of the button.
+    if (!AppInventorCompatActivity.isClassicMode() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+      ViewUtil.setBackgroundDrawable(view, new RippleDrawable(createRippleState(), drawable, drawable));
+    } else {
+      ViewUtil.setBackgroundDrawable(view, drawable);
+    }
+
+    // Hides the button shadow on Material UI if the background is NONE
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+      if (backgroundColor == Component.COLOR_NONE) {
+        view.setOutlineProvider(null);
+        view.setStateListAnimator(null);
+      } else {
+        view.setOutlineProvider((ViewOutlineProvider) defaultOutlineProvider);
+        view.setStateListAnimator((StateListAnimator) defaultStateAnimator);
+      }
+    }
+
+    if (backgroundColor == Component.COLOR_NONE) {
+      view.getBackground().setColorFilter(backgroundColor, PorterDuff.Mode.CLEAR);
+    } else if (backgroundColor == Component.COLOR_DEFAULT) {
+      if (isHighContrast || container.$form().HighContrast()) {
+        view.getBackground().setColorFilter(Component.COLOR_BLACK, PorterDuff.Mode.SRC_ATOP);
+      } else {
+        view.getBackground().setColorFilter(SHAPED_DEFAULT_BACKGROUND_COLOR, PorterDuff.Mode.SRC_ATOP);
+      }
+    } else {
+      view.getBackground().setColorFilter(backgroundColor, PorterDuff.Mode.SRC_ATOP);
+    }
+
+    view.invalidate();
+  }
+
+  /**
+   * If set, the text of the `%type%` will attempt to use a bold font.
+   * If bold has been requested, this property will return `true`{:.logic.block}, even if the
+   * {@link #FontTypeface()} does not support bold.
+   *
+   * @return  {@code true} indicates bold, {@code false} normal
+   */
+  @SimpleProperty(
+      category = PropertyCategory.APPEARANCE,
+      description = "If set, %type% text is displayed in bold.")
+  public boolean FontBold() {
+    return bold;
+  }
+
+  /**
+   * Specifies whether the text of the `%type%` should be bold.
+   * Some fonts do not support bold.
+   *
+   * @param bold  {@code true} indicates bold, {@code false} normal
+   */
+  @DesignerProperty(editorType = PropertyTypeConstants.PROPERTY_TYPE_BOOLEAN,
+      defaultValue = "False")
+  @SimpleProperty(
+      category = PropertyCategory.APPEARANCE)
+  public void FontBold(boolean bold) {
+    this.bold = bold;
+    TextViewUtil.setFontTypeface(container.$form(), view, fontTypeface, bold, italic);
+  }
+
+  /**
+   * If set, the text of the `%type%` will attempt to use an italic font.
+   * If italic has been requested, this property will return `true`{:.logic.block}, even if the
+   * font does not support italic.
+   *
+   * @return  {@code true} indicates italic, {@code false} normal
+   */
+  @SimpleProperty(
+      category = PropertyCategory.APPEARANCE,
+      description = "If set, %type% text is displayed in italics.")
+  public boolean FontItalic() {
+    return italic;
+  }
+
+  /**
+   * Specifies whether the text of the `%type%` should be italic.
+   * Some fonts do not support italic.
+   *
+   * @param italic  {@code true} indicates italic, {@code false} normal
+   */
+  @DesignerProperty(editorType = PropertyTypeConstants.PROPERTY_TYPE_BOOLEAN,
+      defaultValue = "False")
+  @SimpleProperty(
+      category = PropertyCategory.APPEARANCE)
+  public void FontItalic(boolean italic) {
+    this.italic = italic;
+    TextViewUtil.setFontTypeface(container.$form(), view, fontTypeface, bold, italic);
+  }
+
+  /**
+   * The size of the font used for rendering the {@link #Text(String)}.
+   *
+   * @internaldoc
+   * Returns the text font size of the `%type%`, measured in sp(scale-independent pixels).
+   *
+   * @return  font size in sp(scale-independent pixels).
+   */
+  @SimpleProperty(
+      category = PropertyCategory.APPEARANCE,
+      description = "Point size for %type% text.")
+  public float FontSize() {
+    return TextViewUtil.getFontSize(view, container.$context());
+  }
+
+  /**
+   * Specifies the text font size of the `%type%`, measured in sp(scale-independent pixels).
+   *
+   * @param size  font size in sp(scale-independent pixels)
+   */
+  @DesignerProperty(editorType = PropertyTypeConstants.PROPERTY_TYPE_NON_NEGATIVE_FLOAT,
+      defaultValue = Component.FONT_DEFAULT_SIZE + "")
+  @SimpleProperty(
+      category = PropertyCategory.APPEARANCE)
+  public void FontSize(float size) {
+    if (size == FONT_DEFAULT_SIZE && container.$form().BigDefaultText()) {
+      TextViewUtil.setFontSize(view, 24);
+    } else {
+      TextViewUtil.setFontSize(view, size);
+    }
+  }
+
+  /**
+   * The text font face of the `%type%`. Valid values are default, serif, sans serif, monospace,
+   * and .ttf or .otf font file.
+   *
+   * @return  one of {@link Component#TYPEFACE_DEFAULT},
+   *          {@link Component#TYPEFACE_SERIF},
+   *          {@link Component#TYPEFACE_SANSSERIF} or
+   *          {@link Component#TYPEFACE_MONOSPACE}
+   */
+  @SimpleProperty(
+      category = PropertyCategory.APPEARANCE,
+      description = "Font family for %type% text.")
+  public @Options(FontTypeface.class) String FontTypeface() {
+    return fontTypeface;
+  }
+
+  /**
+   * Specifies the text font face of the `%type%` as default, serif, sans
+   * serif, monospace, or custom font typeface. To add a custom typeface,
+   * upload a .ttf file to the project's media.
+   *
+   * @param typeface  one of {@link Component#TYPEFACE_DEFAULT},
+   *                  {@link Component#TYPEFACE_SERIF},
+   *                  {@link Component#TYPEFACE_SANSSERIF} or
+   *                  {@link Component#TYPEFACE_MONOSPACE}
+   */
+  @DesignerProperty(editorType = PropertyTypeConstants.PROPERTY_TYPE_TYPEFACE,
+      defaultValue = Component.TYPEFACE_DEFAULT + "")
+  @SimpleProperty
+  public void FontTypeface(@Options(FontTypeface.class) String typeface) {
+    fontTypeface = typeface;
+    TextViewUtil.setFontTypeface(container.$form(), view, fontTypeface, bold, italic);
+  }
+
+  /**
+   * Returns the text displayed by the `%type%`.
+   *
+   * @return  button caption
+   */
+  @SimpleProperty(
+      category = PropertyCategory.APPEARANCE,
+      description = "Text to display on %type%.")
+  public String Text() {
+    return TextViewUtil.getText(view);
+  }
+
+  /**
+   * Specifies the text displayed by the `%type%`.
+   *
+   * @param text  new caption for button
+   */
+  @DesignerProperty(editorType = PropertyTypeConstants.PROPERTY_TYPE_STRING,
+      defaultValue = "")
+  @SimpleProperty
+  public void Text(String text) {
+    TextViewUtil.setText(view, text);
+  }
+
+  /**
+   * Returns the text color of the `%type%` as an alpha-red-green-blue
+   * integer.
+   *
+   * @return  text RGB color with alpha
+   */
+  @SimpleProperty(
+      category = PropertyCategory.APPEARANCE,
+      description = "Color for button text.")
+  @IsColor
+  public int TextColor() {
+    return textColor;
+  }
+
+  /**
+   * Specifies the text color of the `%type%` as an alpha-red-green-blue
+   * integer.
+   *
+   * @param argb  text RGB color with alpha
+   */
+  @DesignerProperty(editorType = PropertyTypeConstants.PROPERTY_TYPE_COLOR,
+      defaultValue = Component.DEFAULT_VALUE_COLOR_DEFAULT)
+  @SimpleProperty
+  public void TextColor(int argb) {
+    // TODO(user): I think there is a way of only setting the color for the enabled state
+    textColor = argb;
+    if (argb != Component.COLOR_DEFAULT) {
+      TextViewUtil.setTextColor(view, argb);
+    } else {
+      if (isHighContrast || container.$form().HighContrast()){
+        TextViewUtil.setTextColor(view, Color.WHITE);
+      }
+      else {
+        TextViewUtil.setTextColors(view, defaultColorStateList);
+      }
+    }
+  }
+
+  public abstract void click();
+
+  // Override this if your component actually will consume a long
+  // click.  A 'false' returned from this function will cause a long
+  // click to be interpreted as a click (and the click function will
+  // be called).
+  public boolean longClick() {
+    return false;
+  }
+
+  // OnClickListener implementation
+
+  @Override
+  public void onClick(View view) {
+    click();
+  }
+
+  // OnFocusChangeListener implementation
+
+  @Override
+  public void onFocusChange(View previouslyFocused, boolean gainFocus) {
+    if (gainFocus) {
+      GotFocus();
+    } else {
+      LostFocus();
+    }
+  }
+
+  // OnLongClickListener implementation
+
+  @Override
+  public boolean onLongClick(View view) {
+    return longClick();
+  }
+
+  @Override
+  public void setHighContrast(boolean isHighContrast) {
+    //background of button
+    if (backgroundImageDrawable == null && shape == Component.BUTTON_SHAPE_DEFAULT && backgroundColor == Component.COLOR_DEFAULT) {
+      if (isHighContrast) {
+        ViewUtil.setBackgroundDrawable(view, null);
+        ViewUtil.setBackgroundDrawable(view, getSafeBackgroundDrawable());
+        view.getBackground().setColorFilter(Component.COLOR_BLACK, PorterDuff.Mode.SRC_ATOP);
+      } else {
+        ViewUtil.setBackgroundDrawable(view, defaultDrawable);
+      }
+    }
+
+    //color of text
+    if (textColor == Component.COLOR_DEFAULT) {
+      if (isHighContrast) {
+        TextViewUtil.setTextColor(view, Color.WHITE);
+      } else {
+        TextViewUtil.setTextColors(view, defaultColorStateList);
+      }
+    }
+  }
+
+  @Override
+  public boolean getHighContrast() {
+    return isHighContrast;
+  }
+
+  @Override
+  public void setLargeFont(boolean isLargeFont) {
+    if (TextViewUtil.getFontSize(view, container.$context()) == 24.0 || TextViewUtil.getFontSize(view, container.$context()) == Component.FONT_DEFAULT_SIZE) {
+      if (isLargeFont) {
+        TextViewUtil.setFontSize(view, 24);
+      } else {
+        TextViewUtil.setFontSize(view, Component.FONT_DEFAULT_SIZE);
+      }
+    }
+  }
+
+  @Override
+  public boolean getLargeFont() {
+    return isBigText;
+  }
+
+}

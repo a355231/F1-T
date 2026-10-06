@@ -1,0 +1,228 @@
+// -*- mode: java; c-basic-offset: 2; -*-
+// Copyright 2009-2011 Google, All Rights reserved
+// Copyright 2011-2025 MIT, All rights reserved
+// Released under the Apache License, Version 2.0
+// http://www.apache.org/licenses/LICENSE-2.0
+
+package com.google.appinventor.client.editor.simple.palette;
+
+import com.google.appinventor.client.editor.simple.components.i18n.ComponentTranslationTable;
+import com.google.appinventor.client.editor.simple.SimpleEditor;
+
+import com.google.appinventor.client.editor.simple.components.MockComponent;
+import com.google.appinventor.client.editor.simple.components.MockComponentsUtil;
+import com.google.appinventor.client.editor.simple.components.MockContainer;
+import com.google.appinventor.client.editor.simple.components.MockForm;
+import com.google.appinventor.client.editor.simple.components.MockVisibleComponent;
+import com.google.appinventor.client.utils.ImageAccessibility;
+import com.google.appinventor.client.widgets.dnd.DragSourcePanel;
+import com.google.appinventor.client.widgets.dnd.DragSourceSupport;
+import com.google.appinventor.client.widgets.dnd.DropTarget;
+import com.google.gwt.event.dom.client.DoubleClickEvent;
+import com.google.gwt.event.dom.client.DoubleClickHandler;
+import com.google.gwt.event.dom.client.FocusEvent;
+import com.google.gwt.event.dom.client.FocusHandler;
+import com.google.gwt.event.dom.client.KeyCodes;
+import com.google.gwt.event.dom.client.KeyDownEvent;
+import com.google.gwt.event.dom.client.KeyDownHandler;
+import com.google.gwt.event.dom.client.MouseDownEvent;
+import com.google.gwt.event.dom.client.MouseDownHandler;
+import com.google.gwt.event.dom.client.TouchStartEvent;
+import com.google.gwt.event.dom.client.TouchStartHandler;
+import com.google.gwt.user.client.ui.FlowPanel;
+import com.google.gwt.user.client.ui.Image;
+import com.google.gwt.user.client.ui.Label;
+import com.google.gwt.user.client.ui.Widget;
+
+/**
+ * This class represents a component on the component palette panel.
+ *
+ */
+public class SimplePaletteItem extends DragSourcePanel {
+  // The editor that will receive instances of the component represented by this item.
+  private SimpleEditor activeEditor;
+
+  // Component descriptor (needed for mock component instantiation)
+  private SimpleComponentDescriptor scd;
+
+  //It is here to keep the selected panel item
+  private static Widget selectedPaletteItemWidget;
+
+  /**
+   * Creates a new palette item.
+   *
+   * @param scd component descriptor for palette item
+   */
+  public SimplePaletteItem(SimpleComponentDescriptor scd) {
+    this.scd = scd;
+
+    // Initialize palette item UI
+    FlowPanel panel = new FlowPanel();
+    panel.setStylePrimaryName("ode-SimplePaletteItem");
+
+    Image image = new Image(scd.getImage().getUrl());
+    image.setStylePrimaryName("ode-SimplePaletteItem-icon");
+    String altText = ComponentTranslationTable.getComponentName(scd.getName()) + " component";
+    ImageAccessibility.setAltText(image, altText);
+    panel.add(image);
+
+    Label label = new Label(ComponentTranslationTable.getComponentName(scd.getName()));
+    label.addStyleName("ode-SimplePaletteItem-caption");
+    panel.add(label);
+
+    FlowPanel optPanel = new FlowPanel();
+    optPanel.addStyleName("ode-SimplePaletteItem-options");
+
+    ComponentHelpWidget helpImage = new ComponentHelpWidget(scd);
+    optPanel.add(helpImage);
+
+    if (scd.getExternal()) {
+      ComponentRemoveWidget deleteImage = new ComponentRemoveWidget(scd);
+      optPanel.add(deleteImage);
+    }
+
+    panel.add(optPanel);
+
+    panel.setWidth("100%");
+    add(panel);
+    setWidth("100%");
+
+    getElement().setAttribute("role", "listitem");
+    getElement().setAttribute("aria-label", ComponentTranslationTable.getComponentName(scd.getName()));
+
+    addHandlers();
+  }
+
+  /**
+   * Selects (sets the background to green of) a palette item when it is clicked.
+   *
+   * @param paletteItemWidget the Widget of the panel item to be selected
+   */
+  private static void select(Widget paletteItemWidget) {
+    if (selectedPaletteItemWidget != null) {
+      selectedPaletteItemWidget.removeStyleName("ode-SimplePaletteItem-Selected");
+    }
+    selectedPaletteItemWidget = paletteItemWidget;
+    selectedPaletteItemWidget.addStyleName("ode-SimplePaletteItem-Selected");
+  }
+
+  private void addHandlers() {
+    addMouseDownHandler(new MouseDownHandler() {
+      @Override
+      public void onMouseDown(MouseDownEvent arg0) {
+        select(getWidget());
+      }
+    });
+    addTouchStartHandler(new TouchStartHandler() {
+      @Override
+      public void onTouchStart(TouchStartEvent event) {
+        select(getWidget());
+      }
+    });
+    addFocusHandler(new FocusHandler() {
+      @Override
+      public void onFocus(FocusEvent event) {
+          select(getWidget());
+      }
+    });
+    addKeyDownHandler(new KeyDownHandler() {
+      @Override
+      public void onKeyDown (KeyDownEvent event) {
+        if (event.getNativeKeyCode() == KeyCodes.KEY_ENTER) {
+          addComponent();
+        }
+      }
+    });
+    addDoubleClickHandler(new DoubleClickHandler() {
+      public void onDoubleClick (DoubleClickEvent event) {
+        addComponent();
+      }
+    });
+  }
+
+  private void addComponent() {
+    MockComponent component = createMockComponent();
+    MockVisibleComponent mockVisibleComponent = (MockVisibleComponent) activeEditor.getDropTargetProvider().getDropTargets()[0];
+    MockForm form = mockVisibleComponent.getForm();
+    MockComponent selectedComponent = form.getLastSelectedComponent();
+    if (selectedComponent instanceof MockContainer && ((MockContainer) selectedComponent).willAcceptComponentType(component.getType()) && component.isVisibleComponent()) {
+      ((MockContainer) selectedComponent).addComponent(component);
+    } else if (form.willAcceptComponentType(component.getType()) && component.isVisibleComponent()) {
+      form.addComponent(component);
+    } else if (form.willAcceptComponentType(component.getType()) && !component.isVisibleComponent()) {
+      form.addComponent(component);
+      form.getNonVisibleComponentsPanel().addComponent(component);
+    }
+  }
+
+  /**
+   * Returns a new mock component for the palette item.
+   *
+   * <p>The caller is assumed to take ownership of the returned component.
+   *
+   * @return mock component
+   */
+  public MockComponent createMockComponent() {
+    return scd.createMockComponentFromPalette();
+  }
+
+  /**
+   * Returns whether this palette item creates components with a visual representation.
+   */
+  public boolean isVisibleComponent() {
+    return !scd.getNonVisible();
+  }
+
+  // DragSource implementation
+
+  @Override
+  public void onDragStart() {
+    // no action
+  }
+
+  @Override
+  public Widget createDragWidget(int x, int y) {
+    MockComponent component = createMockComponent();
+    // Some components override getPreferredWidth/Height because getOffsetWidth/Height (which is
+    // what MockComponentsUtil.getPreferredSizeOfDetachedWidget uses) returns very inaccurate
+    // values. These components can give us the width/height even when the component is not
+    // attached.
+    int width = component.getPreferredWidth();
+    int height = component.getPreferredHeight();
+    if (width <= 0 && height <= 0) {
+      // Other components don't override getPreferredWidth/Height, which means that we'll get 0 (or
+      // less) because the component is not attached. So, we use getPreferredSizeOfDetachedWidget.
+      int[] size = MockComponentsUtil.getPreferredSizeOfDetachedWidget(component);
+      width = size[0];
+      height = size[1];
+    }
+    component.setPixelSize(width, height);
+    DragSourceSupport.configureDragWidgetToAppearWithCursorAt(component, width / 2, height / 2);
+    return component;
+  }
+
+  @Override
+  public Widget getDragWidget() {
+    return dragSourceSupport.getDragWidget();
+  }
+
+  @Override
+  public DropTarget[] getDropTargets() {
+    return activeEditor.getDropTargetProvider().getDropTargets();
+  }
+
+  @Override
+  public void onDragEnd() {
+    // no action
+  }
+
+  // Utility methods
+
+  public String getName() {
+    return scd.getName();
+  }
+
+  public void setActiveEditor(SimpleEditor editor) {
+    this.activeEditor = editor;
+  }
+}

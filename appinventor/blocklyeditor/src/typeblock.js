@@ -1,0 +1,528 @@
+//Copyright © 2013-2016 Massachusetts Institute of Technology. All rights reserved.
+
+/**
+ * @fileoverview File to handle 'Type Blocking'. When the user starts typing the
+ * name of a Block in the workspace, a series of suggestions will appear. Upon
+ * selecting one (enter key), the chosen block will be created in the workspace
+ * This file needs additional configuration through the inject method.
+ * @author josmasflores@gmail.com (Jose Dominguez)
+ */
+'use strict';
+
+goog.provide('AI.Blockly.TypeBlock');
+
+/**
+ * Main Type Block function for configuration.
+ * @param {Blockly.WorkspaceSvg} workspace The workspace targeted by the TypeBlock
+ */
+AI.Blockly.TypeBlock = function(workspace) {
+  this.workspace_ = workspace;
+  /**
+   * Used as an optimisation trick to avoid reloading components and built-ins unless there is a real
+   * need to do so. needsReload.components can be set to true when a component changes.
+   * Defaults to true so that it loads the first time (set to null after loading in lazyLoadOfOptions_())
+   * @type {{
+   *         components: boolean,
+   *         screens: boolean
+   *       }}
+   */
+  this.needsReload = {
+    components: true,
+    screens: true,
+    assets: true,
+  };
+};
+
+/**
+ * Mapping of options to show in the auto-complete panel. This maps the
+ * canonical name of the block, needed to create a new Blockly.Block, with the
+ * internationalised word or sentence used in typeblocks. Certain blocks do not only need the
+ * canonical block representation, but also values for dropdowns (name and value)
+ *   - No dropdowns:   this.typeblock: [{ translatedName: Blockly.LANG_VAR }]
+ *   - With dropdowns: this.typeblock: [{ translatedName: Blockly.LANG_VAR },
+ *                                        dropdown: {
+ *                                          titleName: 'TITLE', value: 'value'
+ *                                        }]
+ *   - Additional types can be used to mark a block as isProcedure or isGlobalVar. These are only
+ *   used to manage the loading of options in the auto-complete matcher.
+ * @private
+ */
+AI.Blockly.TypeBlock.prototype.TBOptions_ = {};
+
+/**
+ * Lazily loading options because some of them are not available during bootstrapping, and some
+ * users will never use this functionality, so we avoid having to deal with changes such as handling
+ * renaming of variables and procedures (leaving it until the moment they are used, if ever).
+ * @private
+ */
+AI.Blockly.TypeBlock.prototype.lazyLoadOfOptions_ = function () {
+  // Optimisation to avoid reloading all components and built-in objects unless it is needed.
+  // needsReload.components is setup when adding/renaming/removing a component in components.js
+  if (this.needsReload.components ||
+      this.needsReload.screens ||
+      this.needsReload.assets
+  ){
+    this.generateOptions();
+    this.needsReload.components = false;
+    this.needsReload.screens = false;
+    this.needsReload.assets = false;
+  }
+  this.loadGlobalVariables_();
+  this.loadLocalVariables_();
+  this.loadProcedures_();
+};
+
+/**
+ * This function traverses the Language tree and re-creates all the options
+ * available for type blocking. It's needed in the case of modifying the
+ * Language tree after its creation (adding or renaming components, for instance).
+ * It also loads all the built-in blocks.
+ *
+ * The function lazyLoadOfOptions_ is an example of how to call this function.
+ */
+AI.Blockly.TypeBlock.prototype.generateOptions = function() {
+
+  var buildListOfOptions = function() {
+    var listOfOptions = {};
+    var typeblockArray;
+    for (var name in Blockly.Blocks) {
+      var block = Blockly.Blocks[name];
+      if(block.typeblock){
+        typeblockArray = block.typeblock;
+        if(typeof block.typeblock == "function") {
+          typeblockArray = block.typeblock();
+        }
+        createOption(typeblockArray, name);
+      }
+    }
+
+    function createOption(tb, canonicName){
+      if (tb){
+        for (const dd of tb) {
+          var dropDownValues = {};
+          var mutatorAttributes = {};
+          if (dd.dropDown){
+            if (dd.dropDown.titleName && dd.dropDown.value){
+              dropDownValues.titleName = dd.dropDown.titleName;
+              dropDownValues.value = dd.dropDown.value;
+            }
+            else {
+              throw new Error('TypeBlock not correctly set up for ' + canonicName);
+            }
+          }
+          if(dd.mutatorAttributes) {
+            mutatorAttributes = dd.mutatorAttributes;
+          }
+          // We remove the Blockly placeholders, e.g., %1, since they aren't useful here.
+          listOfOptions[dd.translatedName.replace(/%[0-9]+/g, '')] = {
+            canonicName: canonicName,
+            dropDown: dropDownValues,
+            mutatorAttributes: mutatorAttributes
+          };
+        }
+      }
+    }
+
+    return listOfOptions;
+  };
+
+  // This is called once on startup, and it will contain all built-in blocks. After that, it can
+  // be called on demand (for instance in the function lazyLoadOfOptions_)
+  this.TBOptions_ = buildListOfOptions();
+};
+
+/**
+ * Loads all procedure names as options for TypeBlocking. It is used lazily from show().
+ * The function lazyLoadOfOptions_ is an example of how to call this function.
+ * @private
+ */
+AI.Blockly.TypeBlock.prototype.loadProcedures_ = function(){
+  // Clean up any previous procedures in the list.
+  this.TBOptions_ = Object.fromEntries(
+      Object.entries(this.TBOptions_).filter(([_, option]) => !option.isProcedure));
+
+  var procsNoReturn = createTypeBlockForProcedures_.call(this, false);
+  for (const pro of procsNoReturn) {
+    this.TBOptions_[pro.translatedName] = {
+      canonicName: 'procedures_callnoreturn',
+      dropDown: pro.dropDown,
+      isProcedure: true // this attribute is used to clean up before reloading
+    };
+  }
+
+  var procsReturn = createTypeBlockForProcedures_.call(this, true);
+  for (const pro of procsReturn) {
+    this.TBOptions_[pro.translatedName] = {
+      canonicName: 'procedures_callreturn',
+      dropDown: pro.dropDown,
+      isProcedure: true
+    };
+  }
+
+  /**
+   * Procedure names can be collected for both 'with return' and 'no return' varieties from
+   * getProcedureNames()
+   * @param {boolean} withReturn indicates if the query us for 'with':true or 'no':false return
+   * @returns {Array} array of the procedures requested
+   * @private
+   */
+  function createTypeBlockForProcedures_(withReturn) {
+    var options = [];
+    var procNames = this.workspace_.getProcedureDatabase().getMenuItems(withReturn);
+    if (procNames.length == 1 && procNames[0][0] == '') {
+      procNames = [];
+    }
+    for (const proc of procNames) {
+      options.push(
+          {
+            translatedName: Blockly.Msg.LANG_PROCEDURES_CALLNORETURN_CALL + proc[0],
+            dropDown: {
+              titleName: 'PROCNAME',
+              value: proc[1]
+            }
+          }
+      );
+    }
+    return options;
+  }
+};
+
+/**
+ * Loads all global variable names as options for TypeBlocking. It is used lazily from show().
+ * The function lazyLoadOfOptions_ is an example of how to call this function.
+ */
+AI.Blockly.TypeBlock.prototype.loadGlobalVariables_ = function () {
+  // Remove any global vars from the list so that we can re-add them.
+  this.TBOptions_ = Object.fromEntries(
+      Object.entries(this.TBOptions_).filter(([_, option]) => !option.isGlobalvar));
+
+  var globalVarNames = Blockly.FieldLexicalVariable.getGlobalNames();
+  for (const varName of globalVarNames) {
+    var prefixedName = Blockly.Msg.LANG_VARIABLES_GLOBAL_PREFIX  +
+        ' ' + varName;
+    var translatedGet = Blockly.Msg.LANG_VARIABLES_GET_TITLE_GET +
+        ' ' + prefixedName;
+    // We can leave 'global' as 'global' inside the value property because
+    // (I believe) the FieldLexicalVariable translates that later.
+    this.TBOptions_[translatedGet] = {
+      canonicName: 'lexical_variable_get',
+      dropDown: {
+        titleName: 'VAR',
+        value: 'global ' + varName
+      },
+      isGlobalvar: true
+    };
+    var translatedSet = Blockly.Msg.LANG_VARIABLES_SET_TITLE_SET +
+        ' ' + prefixedName;
+    this.TBOptions_[translatedSet] = {
+      canonicName: 'lexical_variable_set',
+      dropDown: {
+        titleName: 'VAR',
+        value: 'global ' + varName
+      },
+      isGlobalvar: true
+    }
+  }
+};
+
+/**
+ * Loads all local variables in the scope of the selected block (if one exists).
+ * The function lazyLoadOfOptions_ is an example of how to call this function.
+ * @private
+ */
+AI.Blockly.TypeBlock.prototype.loadLocalVariables_ = function() {
+  // Remove any local vars from the list so that we can re-add them.
+  this.TBOptions_ = Object.fromEntries(
+      Object.entries(this.TBOptions_).filter(([_, option]) => !option.isLocalVar));
+
+  var selected = Blockly.common.getSelected();
+  if (!selected) {
+    return;
+  }
+
+  var localVarNames = Blockly.FieldLexicalVariable
+      .getLexicalNamesInScope(selected).map(function (varNameArray) {
+        // Index 0 should be the translated name.
+        return varNameArray[0];
+      });
+  // getLexicalNamesInScope does not include names declared on the block passed.
+  if (selected.getVars) {
+    // TODO: This doesn't currently support variable prefixes, but I don't want
+    //  to duplicate all of the logic inside getLexicalNamesInScope(). If the
+    //  suggestion for #2033 gets accepted this will be an easy fix.
+    localVarNames = localVarNames.concat(
+        selected.getVars().map(function(varName) {
+          return selected.workspace.getTopWorkspace().getComponentDatabase()
+              .getInternationalizedParameterName(varName);
+        }));
+  }
+  for (const varName of localVarNames) {
+    var translatedGet = Blockly.Msg.LANG_VARIABLES_GET_TITLE_GET + ' ' + varName;
+    this.TBOptions_[translatedGet] = {
+      canonicName: 'lexical_variable_get',
+      dropDown: {
+        titleName: 'VAR',
+        value: varName
+      },
+      isLocalVar: true
+    };
+    var translatedSet = Blockly.Msg.LANG_VARIABLES_SET_TITLE_SET + ' ' + varName;
+    this.TBOptions_[translatedSet] = {
+      canonicName: 'lexical_variable_set',
+      dropDown: {
+        titleName: 'VAR',
+        value: varName
+      },
+      isLocalVar: true
+    }
+  }
+};
+
+AI.Blockly.TypeBlock.matchNumberOrTextBlock = function(blockName) {
+  var blockToCreate;
+  //If the input passed is not a block, check if it is a number or a pre-populated text block
+  var numberReg = new RegExp('^-?[0-9]\\d*(\.\\d+)?$', 'g');
+  var numberMatch = numberReg.exec(blockName);
+  var textReg = new RegExp('^[\"|\']+', 'g');
+  var textMatch = textReg.exec(blockName);
+  if (numberMatch && numberMatch.length > 0) {
+    blockToCreate = {
+      canonicName: 'math_number',
+      dropDown: {
+        titleName: 'NUM',
+        value: blockName
+      }
+    };
+  } else if (textMatch && textMatch.length === 1) {
+    blockToCreate = {
+      canonicName: 'text',
+      dropDown: {
+        titleName: 'TEXT',
+        value: blockName.endsWith('"') ? blockName.substring(1, blockName.length - 1) : blockName.substring(1)
+      }
+    };
+  }
+  return blockToCreate;
+};
+
+/**
+ * Blocks connect in different ways; a block with an outputConnection such as
+ * a number will connect in one of its parent's input connection (inputLis).                          .
+ * A block with no outputConnection could be connected to its parent's next
+ * connection.
+ */
+AI.Blockly.TypeBlock.prototype.connectIfPossible = function(blockSelected, createdBlock) {
+  var i = 0,
+    inputList = blockSelected.inputList,
+    ilLength = inputList.length;
+  const connectionChecker = blockSelected.workspace.connectionChecker;
+
+  //If createdBlock has an output connection, we need to:
+  //  connect to parent (eg: connect equals into if)
+  //else we need to:
+  //  connect its previousConnection to parent (eg: connect if to if)
+  for (i = 0; i < ilLength; i++){
+    try {
+      if (createdBlock.outputConnection != null){
+        //Check for type validity (connect does not do it)
+        if (inputList[i].connection &&
+            connectionChecker.canConnect(inputList[i].connection, createdBlock.outputConnection, false)){
+            if (!inputList[i].connection.targetConnection){ // is connection empty?
+              createdBlock.outputConnection.connect(inputList[i].connection);
+              break;
+            }
+        }
+      }
+      // Only attempt a connection if the input is empty
+      else if (!inputList[i].connection.isConnected()) {
+        createdBlock.previousConnection.connect(inputList[i].connection);
+        break;
+      }
+    } catch(e) {
+      //We can ignore these exceptions; they happen when connecting two blocks
+      //that should not be connected.
+    }
+  }
+  if (createdBlock.parentBlock_ !== null) return; //Already connected --> return
+
+  // Are both blocks statement blocks? If so, connect created block below the selected block
+  if (blockSelected.outputConnection == null && createdBlock.outputConnection == null) {
+      createdBlock.previousConnection.connect(blockSelected.nextConnection);
+      return;
+  }
+
+  // No connections? Try the parent (if it exists)
+  if (blockSelected.parentBlock_) {
+    //Is the parent block a statement?
+    if (blockSelected.parentBlock_.outputConnection == null) {
+        //Is the created block a statment? If so, connect it below the parent block,
+        // which is a statement
+        if(createdBlock.outputConnection == null) {
+          blockSelected.parentBlock_.nextConnection.connect(createdBlock.previousConnection);
+          return;
+        //If it's not, no connections should be made
+        } else return;
+      }
+      else {
+        //try the parent for other connections
+        this.connectIfPossible(blockSelected.parentBlock_, createdBlock);
+        //recursive call: creates the inner functions again, but should not be much
+        //overhead; if it is, optimise!
+      }
+    }
+  };
+
+//--------------------------------------
+// A custom matcher for the auto-complete widget that can handle numbers as well as the default
+// functionality of goog.ui.ac.ArrayMatcher
+goog.provide('AI.Blockly.TypeBlock.ac.AIArrayMatcher');
+
+/**
+ * Extension of goog.ui.ac.ArrayMatcher so that it can handle any number typed in.
+ * @constructor
+ * @param {Array} rows Dictionary of items to match.  Can be objects if they
+ * have a toString method that returns the value to match against.
+ * @param {boolean=} opt_noSimilar if true, do not do similarity matches for the
+ * input token against the dictionary.
+ */
+AI.Blockly.TypeBlock.ac.AIArrayMatcher = function(rows, opt_noSimilar) {
+  this.rows_ = rows;
+  this.useSimilar_ = !opt_noSimilar;
+};
+
+// From goog.string.regExpEscape
+AI.Blockly.TypeBlock.ac.AIArrayMatcher.regExpEscape_ = function(s) {
+  'use strict';
+  return String(s)
+      .replace(/([-()\[\]{}+?*.$\^|,:#<!\\])/g, '\\$1')
+      .replace(/\x08/g, '\\x08');
+};
+
+// From goog.ui.ac.ArrayMatcher.getPrefixMatchesForRows
+AI.Blockly.TypeBlock.ac.AIArrayMatcher.getPrefixMatchesForRows_ = function(
+    token, maxMatches, rows) {
+  'use strict';
+  var matches = [];
+
+  if (token != '') {
+    var escapedToken = AI.Blockly.TypeBlock.ac.AIArrayMatcher.regExpEscape_(token);
+    var matcher = new RegExp('(^|\\W+)' + escapedToken, 'i');
+
+    for (var i = 0; i < rows.length && matches.length < maxMatches; i++) {
+      var row = rows[i];
+      if (String(row).match(matcher)) {
+        matches.push(row);
+      }
+    }
+  }
+  return matches;
+};
+
+// From goog.ui.ac.ArrayMatcher.getSimilarMatchesForRows
+AI.Blockly.TypeBlock.ac.AIArrayMatcher.getSimilarMatchesForRows_ = function(
+    token, maxMatches, rows) {
+  'use strict';
+  var results = [];
+
+  for (var index = 0; index < rows.length; index++) {
+    var row = rows[index];
+    var str = token.toLowerCase();
+    var txt = String(row).toLowerCase();
+    var score = 0;
+
+    if (txt.indexOf(str) != -1) {
+      score = parseInt((txt.indexOf(str) / 4).toString(), 10);
+    } else {
+      var arr = str.split('');
+      var lastPos = -1;
+      var penalty = 10;
+
+      for (var i = 0, c; c = arr[i]; i++) {
+        var pos = txt.indexOf(c);
+        if (pos > lastPos) {
+          var diff = pos - lastPos - 1;
+          if (diff > penalty - 5) {
+            diff = penalty - 5;
+          }
+          score += diff;
+          lastPos = pos;
+        } else {
+          score += penalty;
+          penalty += 5;
+        }
+      }
+    }
+
+    if (score < str.length * 6) {
+      results.push({str: row, score: score, index: index});
+    }
+  }
+
+  results.sort(function(a, b) {
+    'use strict';
+    var diff = a.score - b.score;
+    if (diff != 0) {
+      return diff;
+    }
+    return a.index - b.index;
+  });
+
+  var matches = [];
+  for (var i = 0; i < maxMatches && i < results.length; i++) {
+    matches.push(results[i].str);
+  }
+
+  return matches;
+};
+
+// From goog.ui.ac.ArrayMatcher.prototype.getPrefixMatches
+AI.Blockly.TypeBlock.ac.AIArrayMatcher.prototype.getPrefixMatches = function(
+    token, maxMatches) {
+  'use strict';
+  return AI.Blockly.TypeBlock.ac.AIArrayMatcher.getPrefixMatchesForRows_(
+      token, maxMatches, this.rows_);
+};
+
+// From goog.ui.ac.ArrayMatcher.prototype.getSimilarRows
+AI.Blockly.TypeBlock.ac.AIArrayMatcher.prototype.getSimilarRows = function(token, maxMatches) {
+  'use strict';
+  return AI.Blockly.TypeBlock.ac.AIArrayMatcher.getSimilarMatchesForRows_(
+      token, maxMatches, this.rows_);
+};
+
+/**
+ * @inheritDoc
+ */
+AI.Blockly.TypeBlock.ac.AIArrayMatcher.prototype.requestMatchingRows = function(token, maxMatches,
+    matchHandler, opt_fullString) {
+
+  var matches = this.getPrefixMatches(token, maxMatches);
+
+  //Because we allow for similar matches, Button.Text will always appear before Text
+  //So we handle the 'text' case as a special case here
+  if (token === 'text' || token === 'Text'){
+    const index = matches.indexOf('Text');
+    if (index > -1) matches.splice(index, 1);
+    matches.unshift('Text');
+  }
+
+  // Added code to handle any number typed in the widget (including negatives and decimals)
+  var reg = new RegExp('^-?[0-9]\\d*(\.\\d+)?$', 'g');
+  var match = reg.exec(token);
+  if (match && match.length > 0){
+    matches.unshift(token);
+  }
+
+  // Added code to handle default values for text fields (they start with " or ')
+  var textReg = new RegExp('^[\"|\']+', 'g');
+  var textMatch = textReg.exec(token);
+  if (textMatch && textMatch.length === 1){
+    matches.push(token);
+  }
+
+  if (matches.length === 0 && this.useSimilar_) {
+    matches = this.getSimilarRows(token, maxMatches);
+  }
+
+  matchHandler(token, matches);
+};
