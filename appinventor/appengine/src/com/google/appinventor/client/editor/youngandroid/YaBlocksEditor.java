@@ -9,6 +9,7 @@ package com.google.appinventor.client.editor.youngandroid;
 import static com.google.appinventor.common.constants.YoungAndroidStructureConstants.BLOCKLY_SOURCE_EXTENSION;
 import static com.google.appinventor.common.constants.YoungAndroidStructureConstants.YAIL_FILE_EXTENSION;
 
+import com.google.appinventor.client.collab.Collab;
 import com.google.appinventor.client.Ode;
 import com.google.appinventor.client.editor.blocks.BlocklyPanel;
 import com.google.appinventor.client.editor.blocks.BlocksCategory;
@@ -114,7 +115,8 @@ public final class YaBlocksEditor extends BlocksEditor<YoungAndroidBlocksNode, Y
   @Override
   public void onWorkspaceChange(BlocklyPanel panel, JavaScriptObject event) {
     super.onWorkspaceChange(panel, event);
-    if (!EventHelper.isUi(event)) {
+    // A teammate's block change waits for this user's companion to be reset.
+    if (!EventHelper.isUi(event) && !Collab.isRemoteEvent(event)) {
       sendComponentData();
     }
   }

@@ -13,6 +13,7 @@ import static com.google.appinventor.client.utils.Promise.rejectWithReason;
 import static com.google.appinventor.client.utils.Promise.resolve;
 import static com.google.appinventor.client.wizards.TemplateUploadWizard.TEMPLATES_ROOT_DIRECTORY;
 
+import com.google.appinventor.client.collab.Collab;
 import com.google.appinventor.client.boxes.AssetListBox;
 import com.google.appinventor.client.boxes.PaletteBox;
 import com.google.appinventor.client.boxes.ProjectListBox;
@@ -712,6 +713,7 @@ public class Ode implements EntryPoint {
    */
   @Override
   public void onModuleLoad() {
+    Collab.init();
     // Handler for any otherwise unhandled exceptions
     GWT.setUncaughtExceptionHandler(new GWT.UncaughtExceptionHandler() {
       @Override

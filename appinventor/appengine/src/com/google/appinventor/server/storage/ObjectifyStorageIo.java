@@ -629,6 +629,17 @@ public class ObjectifyStorageIo implements StorageIo {
   @Override
   public void deleteProject(final String userId, final long projectId) {
     validateGCS();
+    final List<String> linkedUsers = getProjectCollaborators(projectId);
+    String ownerId = getProjectUserId(projectId);
+    if (ownerId != null && !ownerId.equals(userId) && linkedUsers.size() > 1) {
+      removeProjectLink(userId, projectId);
+      return;
+    }
+    for (String linkedUser : linkedUsers) {
+      if (!linkedUser.equals(userId)) {
+        removeProjectLink(linkedUser, projectId);
+      }
+    }
     // blobs associated with the project
     final List<String> blobKeys = new ArrayList<String>();
     final List<String> gcsPaths = new ArrayList<String>();
@@ -1442,6 +1453,7 @@ public class ObjectifyStorageIo implements StorageIo {
   public long uploadRawFile(final long projectId, final String fileName, final String userId,
       final boolean force, final byte[] content) throws BlocksTruncatedException {
     validateGCS();
+    final boolean collaborator = userHasProjectLink(userId, projectId);
     final Result<Long> modTime = new Result<Long>();
     final boolean useGCS = useGCSforFile(fileName, content.length);
 
@@ -1474,7 +1486,7 @@ public class ObjectifyStorageIo implements StorageIo {
           Preconditions.checkState(fd != null);
 
           if (fd.userId != null && !fd.userId.equals("")) {
-            if (!fd.userId.equals(userId)) {
+            if (!fd.userId.equals(userId) && !collaborator) {
               throw CrashReport.createAndLogError(LOG, null,
                 collectUserProjectErrorInfo(userId, projectId),
                 new UnauthorizedAccessException(userId, projectId, null));
@@ -1593,6 +1605,7 @@ public class ObjectifyStorageIo implements StorageIo {
   @Override
   public long deleteFile(final String userId, final long projectId, final String fileName) {
     validateGCS();
+    final boolean collaborator = userHasProjectLink(userId, projectId);
     final Result<Long> modTime = new Result<Long>();
     final Result<String> oldBlobKeyString = new Result<String>();
     final Result<String> oldgcsName = new Result<String>();
@@ -1605,7 +1618,7 @@ public class ObjectifyStorageIo implements StorageIo {
           FileData fileData = datastore.find(fileKey);
           if (fileData != null) {
             if (fileData.userId != null && !fileData.userId.equals("")) {
-              if (!fileData.userId.equals(userId)) {
+              if (!fileData.userId.equals(userId) && !collaborator) {
                 throw CrashReport.createAndLogError(LOG, null,
                   collectUserProjectErrorInfo(userId, projectId),
                   new UnauthorizedAccessException(userId, projectId, null));
@@ -1699,7 +1712,7 @@ public class ObjectifyStorageIo implements StorageIo {
     FileData fileData = fd.t;
     if (fileData != null) {
       if (fileData.userId != null && !fileData.userId.equals("")) {
-        if (!fileData.userId.equals(userId)) {
+        if (!fileData.userId.equals(userId) && !userHasProjectLink(userId, projectId)) {
           throw CrashReport.createAndLogError(LOG, null,
             collectUserProjectErrorInfo(userId, projectId),
             new UnauthorizedAccessException(userId, projectId, null));
@@ -2729,17 +2742,88 @@ public class ObjectifyStorageIo implements StorageIo {
   }
 
   @Override
-  public void assertUserHasProject(final String userId, final long projectId) {
-    final String cacheKey = PROJECT_OWNER_CACHE_KEY_PREFIX + "|" + projectId;
-    final String ownerUserId = (String) memcache.get(cacheKey);
+  public void addProjectCollaborator(final String userId, final long projectId) {
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          Key<UserProjectData> key = userProjectKey(userKey(userId), projectId);
+          if (datastore.find(key) == null) {
+            UserProjectData upd = new UserProjectData();
+            upd.projectId = projectId;
+            upd.userKey = userKey(userId);
+            upd.state = UserProjectData.StateEnum.OPEN;
+            datastore.put(upd);
+          }
+        }
+      }, true);
+    } catch (ObjectifyException e) {
+      throw CrashReport.createAndLogError(LOG, null,
+          collectUserProjectErrorInfo(userId, projectId), e);
+    }
+  }
 
-    if (ownerUserId != null) {
-      if (ownerUserId.equals(userId)) {
-        // The user in the cache owns the project, hence we don't need to throw anything
-        return;
-      }
-      // Whoops, it seems like someone is being sneaky :)
-      throw new SecurityException("Unauthorized access");
+  @Override
+  public List<String> getProjectCollaborators(final long projectId) {
+    final List<String> users = new ArrayList<String>();
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          users.clear();
+          for (UserProjectData upd : datastore.query(UserProjectData.class)) {
+            if (upd.projectId == projectId && upd.userKey != null) {
+              users.add(upd.userKey.getName());
+            }
+          }
+        }
+      }, false);
+    } catch (ObjectifyException e) {
+      throw CrashReport.createAndLogError(LOG, null,
+          collectProjectErrorInfo(null, projectId, null), e);
+    }
+    return users;
+  }
+
+  private boolean userHasProjectLink(final String userId, final long projectId) {
+    if (userId == null) {
+      return false;
+    }
+    final Result<Boolean> found = new Result<Boolean>();
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          found.t = datastore.find(userProjectKey(userKey(userId), projectId)) != null;
+        }
+      }, false);
+    } catch (ObjectifyException e) {
+      throw CrashReport.createAndLogError(LOG, null,
+          collectUserProjectErrorInfo(userId, projectId), e);
+    }
+    return Boolean.TRUE.equals(found.t);
+  }
+
+  private void removeProjectLink(final String userId, final long projectId) {
+    memcache.delete(PROJECT_OWNER_CACHE_KEY_PREFIX + "|" + projectId + "|" + userId);
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          datastore.delete(userProjectKey(userKey(userId), projectId));
+        }
+      }, true);
+    } catch (ObjectifyException e) {
+      throw CrashReport.createAndLogError(LOG, null,
+          collectUserProjectErrorInfo(userId, projectId), e);
+    }
+  }
+
+  @Override
+  public void assertUserHasProject(final String userId, final long projectId) {
+    final String cacheKey = PROJECT_OWNER_CACHE_KEY_PREFIX + "|" + projectId + "|" + userId;
+    if (userId.equals(memcache.get(cacheKey))) {
+      return;
     }
 
     // Now, if the cache does not contain the project, we will fallback to datastore as

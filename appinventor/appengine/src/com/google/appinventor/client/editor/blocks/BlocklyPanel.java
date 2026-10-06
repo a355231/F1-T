@@ -197,8 +197,15 @@ public class BlocklyPanel extends HTMLPanel {
       for (BlocklyWorkspaceChangeListener listener : listeners) {
         listener.onWorkspaceChange(this, event);
       }
+      notifyCollab(event);
     }
   }
+
+  private native void notifyCollab(JavaScriptObject event)/*-{
+    if ($wnd.AICollab) {
+      $wnd.AICollab.onBlocklyEvent(this.@com.google.appinventor.client.editor.blocks.BlocklyPanel::workspace, event);
+    }
+  }-*/;
 
   public static void switchWarningVisibility() {
     BlocklyPanel.isWarningVisible = !BlocklyPanel.isWarningVisible;
@@ -750,6 +757,9 @@ public class BlocklyPanel extends HTMLPanel {
     }.bind(workspace));
     this.@com.google.appinventor.client.editor.blocks.BlocklyPanel::workspace = workspace;
     workspace.setVisible(false);  // The workspace is invisible by default
+    if ($wnd.AICollab) {
+      $wnd.AICollab.registerWorkspace(workspace);
+    }
   }-*/;
 
   /**

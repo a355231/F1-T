@@ -81,6 +81,20 @@
     <url-pattern>/b/*</url-pattern>
   </servlet-mapping>
 
+  <!-- real-time collaboration endpoints (used by collab/server) -->
+  <servlet>
+    <servlet-name>collabServlet</servlet-name>
+    <servlet-class>com.google.appinventor.server.CollabServlet</servlet-class>
+  </servlet>
+  <servlet-mapping>
+    <servlet-name>collabServlet</servlet-name>
+    <url-pattern>/ode/collab/*</url-pattern>
+  </servlet-mapping>
+  <filter-mapping>
+    <filter-name>odeAuthFilter</filter-name>
+    <servlet-name>collabServlet</servlet-name>
+  </filter-mapping>
+
   <!-- download -->
   <servlet>
     <servlet-name>downloadServlet</servlet-name>

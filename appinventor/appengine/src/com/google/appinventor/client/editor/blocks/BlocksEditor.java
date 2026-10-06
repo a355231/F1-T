@@ -351,6 +351,10 @@ public abstract class BlocksEditor<S extends SourceNode, T extends DesignerEdito
     }
   }
 
+  public boolean isLoadComplete() {
+    return loadComplete;
+  }
+
   // BlocklyWorkspaceChangeListener implementation
   @Override
   public void onWorkspaceChange(BlocklyPanel panel, JavaScriptObject event) {

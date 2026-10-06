@@ -177,6 +177,9 @@ Blockly.ReplMgr.buildYail = function(workspace, opt_force) {
         if (phoneState.componentYail != code || opt_force) {
             // We need to send all of the component cruft (sorry)
             needinitialize = true;
+            // Everything is sent again, teammates' changes included.
+            phoneState.collabFormPending = false;
+            Blockly.common.getMainWorkspace().collabHeld = {};
             phoneState.blockYail = {}; // Sorry, have to send the blocks again.
             this.putYail(AI.Yail.YAIL_CLEAR_FORM);
             // Tell the Companion the current form name
@@ -227,6 +230,9 @@ Blockly.ReplMgr.buildYail = function(workspace, opt_force) {
     }
 
     for (var x = 0; (block = blocks[x]); x++) {
+        if (block.workspace.collabHeld && block.workspace.collabHeld[block.id]) {
+            continue;  // Changed by a teammate: waits for the companion to be reset
+        }
         if (block.disabled) {
             if (block.type == 'component_event' && !didEmitEvent(block)) {
                 // We do need do remove disabled event handlers, though
@@ -264,6 +270,14 @@ Blockly.ReplMgr.buildYail = function(workspace, opt_force) {
 };
 
 Blockly.ReplMgr.sendFormData = function(formJson, packageName, workspace, opt_force) {
+    if (top.AICollab_applying && !opt_force) {
+        // A teammate's change: the companion keeps running what this user is testing until the
+        // companion is reset (or this user makes a designer change of their own).
+        if (this.isConnected()) {
+            top.ReplState.phoneState.collabFormPending = true;
+        }
+        return;
+    }
     top.ReplState.phoneState.formJson = formJson;
     top.ReplState.phoneState.packageName = packageName;
     var context = this;
@@ -297,6 +311,9 @@ Blockly.ReplMgr.pollYail = function(workspace, opt_force) {
 
 Blockly.ReplMgr.resetYail = function(partial) {
     console.log("resetYail: partial = " + partial);
+    if (top.AICollab) {
+        top.AICollab.clearHolds();
+    }
     var rs = top.ReplState;
     rs.phoneState.initialized = false; // so running io stops
     if (!partial) {

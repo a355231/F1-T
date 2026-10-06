@@ -659,6 +659,16 @@ public interface StorageIo {
    */
   void assertUserHasProject(String userId, long projectId);
 
+  /**
+   * Adds the project to another user's project list so that both users can open and save it.
+   */
+  void addProjectCollaborator(String userId, long projectId);
+
+  /**
+   * Returns the ids of all users whose project list contains the project (owner included).
+   */
+  List<String> getProjectCollaborators(long projectId);
+
   List<String> getTutorialsUrlAllowed();
 
   /**

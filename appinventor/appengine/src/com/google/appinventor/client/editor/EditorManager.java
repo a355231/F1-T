@@ -8,6 +8,7 @@ package com.google.appinventor.client.editor;
 
 import static com.google.appinventor.client.Ode.MESSAGES;
 
+import com.google.appinventor.client.collab.Collab;
 import com.google.appinventor.client.ErrorReporter;
 import com.google.appinventor.client.Ode;
 import com.google.appinventor.client.OdeAsyncCallback;
@@ -256,6 +257,9 @@ public final class EditorManager {
     // Collect the files that need to be saved.
     List<FileDescriptorWithContent> filesToSave = new ArrayList<FileDescriptorWithContent>();
     for (FileEditor fileEditor : dirtyFileEditors) {
+      if (!Collab.mayAutoSave(fileEditor.getProjectId())) {
+        continue;  // a teammate's client is main for this project and saves it
+      }
       FileDescriptorWithContent fileContent = new FileDescriptorWithContent(
           fileEditor.getProjectId(), fileEditor.getFileId(), fileEditor.getRawFileContent());
       filesToSave.add(fileContent);

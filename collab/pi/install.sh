@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# One-time setup of the Raspberry Pi that hosts App Inventor for the team.
+#   sudo ./install.sh
+# Needs a 64-bit Raspberry Pi OS (Bookworm or newer) on a Pi 4 or 5 with at least 4 GB of RAM.
+# The App Inventor build itself is done on a PC and copied over with deploy-from-pc.sh.
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Run this with sudo: sudo $0" >&2
+  exit 1
+fi
+RUN_AS="${SUDO_USER:-pi}"
+ARCH="$(dpkg --print-architecture)"
+if [ "$ARCH" != "arm64" ]; then
+  echo "This needs 64-bit Raspberry Pi OS (found $ARCH)." >&2
+  exit 1
+fi
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+echo "== Packages (Java, Node.js, Python for the App Engine SDK)"
+apt-get update
+apt-get install -y curl rsync python3 nodejs npm
+apt-get install -y openjdk-21-jdk-headless || apt-get install -y openjdk-17-jdk-headless
+JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
+echo "Java: $JAVA_HOME"
+
+echo "== Google Cloud SDK with the App Engine Java dev server"
+if [ ! -x /opt/google-cloud-sdk/bin/java_dev_appserver.sh ]; then
+  tmp="$(mktemp -d)"
+  curl -fsSL -o "$tmp/gcloud.tgz" \
+    https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-arm.tar.gz
+  tar -xzf "$tmp/gcloud.tgz" -C /opt
+  rm -rf "$tmp"
+  /opt/google-cloud-sdk/bin/gcloud components install app-engine-java --quiet
+fi
+
+echo "== cloudflared"
+if ! command -v cloudflared >/dev/null; then
+  tmp="$(mktemp -d)"
+  curl -fsSL -o "$tmp/cloudflared.deb" \
+    https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb
+  dpkg -i "$tmp/cloudflared.deb"
+  rm -rf "$tmp"
+fi
+
+echo "== Folders"
+mkdir -p /opt/appinventor/war /opt/appinventor/hub
+chown -R "$RUN_AS:$RUN_AS" /opt/appinventor
+
+echo "== Services"
+for unit in appinventor collab-hub cloudflared-quick; do
+  sed -e "s#@USER@#$RUN_AS#g" -e "s#@JAVA_HOME@#$JAVA_HOME#g" \
+    "$HERE/systemd/$unit.service" > "/etc/systemd/system/$unit.service"
+done
+systemctl daemon-reload
+systemctl enable appinventor collab-hub cloudflared-quick
+
+IP="$(hostname -I | awk '{print $1}')"
+cat <<EOF
+
+Setup done. Next:
+  1. On your PC, build App Inventor and copy it here:
+       collab/pi/deploy-from-pc.sh $RUN_AS@$IP
+  2. Create the team's accounts (see collab/README.md, "First start").
+  3. LAN address:      http://$IP:8080
+     Internet address: $HERE/tunnel-url.sh
+EOF

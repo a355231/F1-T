@@ -10,11 +10,13 @@ import com.google.appinventor.client.ErrorReporter;
 import com.google.appinventor.client.Ode;
 import com.google.appinventor.client.OdeAsyncCallback;
 import com.google.appinventor.client.boxes.PaletteBox;
+import com.google.appinventor.client.collab.Collab;
 import com.google.appinventor.client.editor.ProjectEditor;
 import com.google.appinventor.client.editor.designer.DesignerEditor;
 import com.google.appinventor.client.editor.simple.ComponentNotFoundException;
 import com.google.appinventor.client.editor.simple.SimpleComponentDatabase;
 import com.google.appinventor.client.editor.simple.components.MockComponent;
+import com.google.appinventor.client.editor.simple.components.MockContainer;
 import com.google.appinventor.client.editor.simple.components.MockForm;
 import com.google.appinventor.client.editor.simple.palette.AbstractPalettePanel;
 import com.google.appinventor.client.editor.simple.palette.DropTargetProvider;
@@ -180,6 +182,53 @@ public final class YaFormEditor extends DesignerEditor<YoungAndroidFormNode, Moc
     super.onComponentPropertyChanged(component, propertyName, propertyValue);
     if (isLoadComplete() && component.isPropertyPersisted(propertyName)) {
       updatePhone();          // Push changes to the phone if it is connected
+    }
+    Collab.propertyChanged(this, component, propertyName, propertyValue);
+  }
+
+  @Override
+  public void onComponentRemoved(MockComponent component, boolean permanentlyDeleted) {
+    super.onComponentRemoved(component, permanentlyDeleted);
+    Collab.componentRemoved(this, component, permanentlyDeleted);
+  }
+
+  @Override
+  public void onComponentAdded(MockComponent component) {
+    super.onComponentAdded(component);
+    Collab.componentAdded(this, component);
+  }
+
+  @Override
+  public void onComponentRenamed(MockComponent component, String oldName) {
+    super.onComponentRenamed(component, oldName);
+    Collab.componentRenamed(this, component);
+  }
+
+  /** JSON for a component and its children, in the .scm format. */
+  public String encodeComponentForCollab(MockComponent component) {
+    StringBuilder sb = new StringBuilder();
+    encodeComponentProperties(component, sb, false);
+    return sb.toString();
+  }
+
+  /** Creates a teammate's new component (and its children) from {@link #encodeComponentForCollab}. */
+  public MockComponent createComponentForCollab(String json, MockContainer parent) {
+    return createMockComponent(JSON_PARSER.parse(json).asObject(), parent, MockForm.TYPE);
+  }
+
+  /** Brings a component's properties in line with a teammate's copy (all properties, as JSON). */
+  public void applyCollabProperties(MockComponent component, String json) {
+    Map<String, JSONValue> properties = JSON_PARSER.parse(json).asObject().getProperties();
+    for (Map.Entry<String, JSONValue> entry : properties.entrySet()) {
+      String name = entry.getKey();
+      if (MockComponent.PROPERTY_NAME_UUID.equals(name) || MockComponent.PROPERTY_NAME_NAME.equals(name)
+          || entry.getValue().asString() == null) {
+        continue;
+      }
+      String value = entry.getValue().asString().getString();
+      if (!value.equals(component.getPropertyValue(name))) {
+        component.changeProperty(name, value);
+      }
     }
   }
 

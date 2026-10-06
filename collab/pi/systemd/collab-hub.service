@@ -1,0 +1,16 @@
+[Unit]
+Description=App Inventor real-time collaboration hub
+After=network-online.target appinventor.service
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=/opt/appinventor/hub
+Environment=PORT=8080
+Environment=AI_UPSTREAM=http://127.0.0.1:8888
+ExecStart=/usr/bin/node /opt/appinventor/hub/hub.js
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

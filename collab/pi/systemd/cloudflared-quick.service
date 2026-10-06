@@ -1,0 +1,13 @@
+[Unit]
+Description=Cloudflare quick tunnel (free trycloudflare.com address) to the App Inventor hub
+After=network-online.target collab-hub.service
+Wants=network-online.target
+
+[Service]
+User=@USER@
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8080
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
