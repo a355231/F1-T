@@ -1,0 +1,3 @@
+[submodule "appinventor/components-ios/SchemeKit/picrin"]
+	path = appinventor/schemekit/src/picrin
+	url = https://github.com/mit-cml/picrin.git
