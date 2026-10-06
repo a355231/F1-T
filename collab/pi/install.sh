@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# One-time setup of the Raspberry Pi that hosts App Inventor for the team.
-#   sudo ./install.sh
+# Setup of the Raspberry Pi that hosts App Inventor for the team.
+#   sudo collab/pi/install.sh               # then build on a PC with deploy-from-pc.sh
+#   sudo collab/pi/install.sh --build-here  # or build on the Pi itself (slow) and start it
 # Needs a 64-bit Raspberry Pi OS (Bookworm or newer) on a Pi 4 or 5 with at least 4 GB of RAM.
-# The App Inventor build itself is done on a PC and copied over with deploy-from-pc.sh.
+# Safe to run again (for example after git pull); the team code and projects are kept.
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -16,6 +17,10 @@ if [ "$ARCH" != "arm64" ]; then
   exit 1
 fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
+BUILD_HERE=0
+if [ "${1:-}" = "--build-here" ]; then
+  BUILD_HERE=1
+fi
 
 echo "== Packages (Java, Node.js, Python for the App Engine SDK)"
 apt-get update
@@ -64,11 +69,33 @@ systemctl daemon-reload
 systemctl enable appinventor collab-hub cloudflared-quick
 
 IP="$(hostname -I | awk '{print $1}')"
+
+if [ "$BUILD_HERE" = 1 ]; then
+  "$HERE/build-on-pi.sh"
+  echo "== Waiting for the Cloudflare address"
+  url=""
+  for _ in $(seq 1 30); do
+    url="$(/opt/appinventor/tunnel-url.sh 2>/dev/null || true)"
+    [ -n "$url" ] && break
+    sleep 2
+  done
+  cat <<EOF
+
+App Inventor is running and will start again on every boot.
+  LAN address:      http://$IP:8080
+  Internet address: ${url:-not ready yet, run /opt/appinventor/tunnel-url.sh in a minute}
+    (the internet address changes after every reboot: /opt/appinventor/tunnel-url.sh)
+Everyone signs in with their name and the team code.
+EOF
+  exit 0
+fi
+
 cat <<EOF
 
 Setup done. Next:
   1. On your PC, build App Inventor and copy it here:
        collab/pi/deploy-from-pc.sh $RUN_AS@$IP
+     (or build on this Pi instead: sudo $HERE/install.sh --build-here)
   2. Give your team the team code. Everyone signs in with their name and that code.
   3. LAN address:      http://$IP:8080
      Internet address: /opt/appinventor/tunnel-url.sh

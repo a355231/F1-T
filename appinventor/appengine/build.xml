@@ -28,6 +28,7 @@
   <property name="release" value="false"/>
   <property name="sourceMaps" value="false"/>
   <property name="local.services" value="false"/>
+  <property name="gwt.heap" value="6G"/>
 
   <condition property="client.module"
              value="com.google.appinventor.YaClient"
@@ -665,7 +666,7 @@
         <path refid="YaClientApp.classpath" />
       </classpath>
       <jvmarg value="-Xss4M"/>  <!-- increase if you see a StackOverflowError -->
-      <jvmarg value="-Xmx6G"/>
+      <jvmarg value="-Xmx${gwt.heap}"/>  <!-- ant -Dgwt.heap=2500m on small machines -->
       <jvmarg line="${XstartOnFirstThread}"/>
       <jvmarg value="-Dfile.encoding=UTF-8" />
       <arg value="-war"/>

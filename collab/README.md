@@ -53,8 +53,27 @@ person leaves, another person becomes main automatically and saves anything pend
 
 ## Raspberry Pi setup
 
-You need a Raspberry Pi 4 or 5 with 4 GB of RAM or more, running 64-bit Raspberry Pi OS, plus a PC
-(Windows with WSL, macOS, or Linux) with Java 11 JDK and ant 1.10 for building.
+You need a Raspberry Pi 4 or 5 with 4 GB of RAM or more, running 64-bit Raspberry Pi OS.
+
+### Quickest: one command on the Pi
+
+```
+sudo apt-get install -y git && git clone -b claude/amazing-ritchie-68cj4h --depth 1 https://github.com/a355231/F1-T.git ~/F1-T && sudo ~/F1-T/collab/pi/install.sh --build-here
+```
+
+The repository is private, so `git clone` asks for your GitHub username and a password; use a
+[personal access token](https://github.com/settings/tokens) with read access to the repository as
+the password. The command installs everything, asks for the team code, builds App Inventor on the
+Pi (roughly 30-60 minutes the first time; on a 4 GB Pi it adds temporary swap for the build),
+starts it, and prints the LAN and internet addresses. Everything starts again on every boot.
+
+To update later: `cd ~/F1-T && git pull && sudo collab/pi/install.sh --build-here`. The team code
+and saved projects are kept.
+
+### Faster builds: build on a PC
+
+Building on a PC (Windows with WSL, macOS, or Linux, with Java 11 JDK and ant 1.10) takes about
+5 minutes instead:
 
 1. On the Pi, from a copy of this repository:
 
@@ -67,8 +86,7 @@ You need a Raspberry Pi 4 or 5 with 4 GB of RAM or more, running 64-bit Raspberr
    (press Enter to have one made up for you; it is shown once). The code is stored in
    `/opt/appinventor/teamcode`, readable only by the Pi's user.
 
-2. On the PC, build and copy everything to the Pi. The App Inventor build is too heavy for the
-   Pi, so it runs on the PC:
+2. On the PC, build and copy everything to the Pi:
 
    ```
    collab/pi/deploy-from-pc.sh pi@<pi-address>
