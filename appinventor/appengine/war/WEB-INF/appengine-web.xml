@@ -79,8 +79,12 @@
          to the site will receive an error page.
      -->
 
-    <property name="auth.usegoogle" value="true" />
+    <property name="auth.usegoogle" value="false" />
     <property name="auth.uselocal" value="true" />
+
+    <!-- Team login: people sign in with a name plus this shared code. Empty turns sign-in off.
+         On the Raspberry Pi it is set by collab/pi/set-team-code.sh; keep it out of git. -->
+    <property name="collab.teamcode" value="" />
 
     <!-- Flags associated with localauth code -->
     <property name="localauth.mailserver" value="https://osiris.mit.edu/passmail/" />

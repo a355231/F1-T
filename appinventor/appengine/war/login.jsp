@@ -5,7 +5,7 @@
 <!doctype html>
 <%
    String error = StringEscapeUtils.escapeHtml4(request.getParameter("error"));
-   String useGoogleLabel = (String) request.getAttribute("useGoogleLabel");
+   boolean teamLoginEnabled = "true".equals(request.getAttribute("teamLoginEnabled"));
    String locale = StringEscapeUtils.escapeHtml4(request.getParameter("locale"));
    String redirect = StringEscapeUtils.escapeHtml4(request.getParameter("redirect"));
    String repo = StringEscapeUtils.escapeHtml4((String) request.getAttribute("repo"));
@@ -33,11 +33,17 @@
 <% if (error != null) {
 out.println("<center><font color=red><b>" + error + "</b></font></center><br/>");
    } %>
+<% if (!teamLoginEnabled) { %>
+<center><p><b>Sign-in is not set up yet.</b><br/>
+Set a team code on the Raspberry Pi: <code>sudo /opt/appinventor/set-team-code.sh</code></p></center>
+<% } else { %>
 <form method=POST action="/login">
 <center><table>
-<tr><td>${emailAddressLabel}</td><td><input type=text name=email value="" size="35"></td></tr>
+<tr><td>Your name</td><td><input type=text name=name value="" size="35" maxlength="30"
+    autocomplete="username" autocapitalize="none" spellcheck="false" autofocus></td></tr>
 <tr><td></td></td>
-<tr><td>${passwordLabel}</td><td><input type=password name=password value="" size="35"></td></tr>
+<tr><td>Team code</td><td><input type=password name=teamcode value="" size="35"
+    autocomplete="current-password"></td></tr>
 </table></center>
 <% if (locale != null && !locale.equals("")) {
    %>
@@ -71,17 +77,8 @@ out.println("<center><font color=red><b>" + error + "</b></font></center><br/>")
 <center><input type=Submit value="${login}" style="font-size: 300%;"></center>
 </form>
 <p></p>
-<center><p><a href="/login/sendlink?locale=<%= locale %>"  style="text-decoration:none;">${passwordclickhereLabel}</a></p></center>
-<%    if (useGoogleLabel != null && useGoogleLabel.equals("true")) { %>
-<center><p><a href="<%= new UriBuilder("/login/google")
-                              .add("locale", locale)
-                              .add("autoload", autoload)
-                              .add("repo", repo)
-                              .add("galleryId", galleryId)
-                              .add("ng", newGalleryId)
-                              .add("ui", uiPreference)
-                              .add("redirect", redirect).build() %>" style="text-decoration:none;">Click Here to use your Google Account to login</a></p></center>
-<%    } %>
+<center><p>Use the same name every time to get back to your projects.</p></center>
+<% } %>
 <footer>
 <center><a href="<%= new UriBuilder("/login")
                            .add("locale", "zh_CN")

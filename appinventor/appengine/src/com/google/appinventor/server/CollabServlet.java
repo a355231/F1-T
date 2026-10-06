@@ -26,7 +26,7 @@ import org.json.JSONObject;
  *   GET  /ode/collab/whoami
  *   GET  /ode/collab/access?projectId=N
  *   GET  /ode/collab/collaborators?projectId=N
- *   POST /ode/collab/share?projectId=N&amp;email=E
+ *   POST /ode/collab/share?projectId=N&amp;name=TEAM_NAME
  * </pre>
  */
 public class CollabServlet extends OdeServlet {
@@ -90,14 +90,15 @@ public class CollabServlet extends OdeServlet {
           }
           long projectId = projectId(req);
           storageIo.assertUserHasProject(userId, projectId);
-          String email = req.getParameter("email");
-          if (email == null || !email.trim().contains("@")) {
-            send(resp, HttpServletResponse.SC_BAD_REQUEST, error("a valid email is required"));
+          String name = TeamLogin.normalizeName(req.getParameter("name"));
+          if (name == null) {
+            send(resp, HttpServletResponse.SC_BAD_REQUEST,
+                error("a team name is 1 to 30 letters, digits, - and ."));
             return;
           }
-          User target = storageIo.getUserFromEmail(email.trim().toLowerCase());
+          User target = storageIo.getUserFromEmail(TeamLogin.emailFor(name));
           storageIo.addProjectCollaborator(target.getUserId(), projectId);
-          send(resp, 200, new JSONObject().put("ok", true).put("email", target.getUserEmail()));
+          send(resp, 200, new JSONObject().put("ok", true).put("name", name));
           return;
         }
         default:

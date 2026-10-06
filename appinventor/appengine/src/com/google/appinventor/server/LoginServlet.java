@@ -12,14 +12,12 @@ import com.google.appinventor.server.flags.Flag;
 
 import com.google.appinventor.server.storage.StorageIo;
 import com.google.appinventor.server.storage.StorageIoInstanceHolder;
-import com.google.appinventor.server.storage.StoredData.PWData;
 import com.google.appinventor.server.storage.StoredData.ProjectNotFoundException;
 
 import com.google.appinventor.server.tokens.Token;
 import com.google.appinventor.server.tokens.TokenException;
 import com.google.appinventor.server.tokens.TokenProto;
 
-import com.google.appinventor.server.util.PasswordHash;
 import com.google.appinventor.server.util.UriBuilder;
 
 import com.google.appinventor.shared.rpc.user.User;
@@ -29,14 +27,8 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 
-import java.net.HttpURLConnection;
-import java.net.MalformedURLException;
-import java.net.URL;
 import java.net.URLDecoder;
-import java.net.URLEncoder;
 
-import java.security.NoSuchAlgorithmException;
-import java.security.spec.InvalidKeySpecException;
 
 import java.util.Date;
 import java.util.HashMap;
@@ -59,15 +51,10 @@ import org.owasp.html.HtmlPolicyBuilder;
 import org.owasp.html.PolicyFactory;
 
 /**
- * LoginServlet -- Handle logging someone in using an email address for a login
- * name and a password, which is stored hashed (and salted). Facilities are
- * provided to e-mail a password to an e-mail address both to set one up the
- * first time and to recover a lost password.
- *
- * This implementation uses a helper server to send mail. It does a webservices
- * transaction (REST/POST) to the server with the email address and reset url.
- * The helper server then formats the e-mail message and sends it. The source
- * code is in misc/passwordmail/...
+ * LoginServlet -- Handle logging someone in. Visitors sign in with a name and the team's shared
+ * code (see {@link TeamLogin}); the same name always opens the same account. Password sign-in is
+ * turned off. The /login/google page (App Engine's sign-in) and token logins still work; the
+ * collaboration hub only lets requests from the Raspberry Pi itself reach /login/google.
  *
  * @author jis@mit.edu (Jeffrey I. Schiller)
  */
@@ -76,8 +63,6 @@ public class LoginServlet extends HttpServlet {
 
   private final StorageIo storageIo = StorageIoInstanceHolder.getInstance();
   private static final Logger LOG = Logger.getLogger(LoginServlet.class.getName());
-  private static final Flag<String> mailServer = Flag.createFlag("localauth.mailserver", "");
-  private static final Flag<String> password = Flag.createFlag("localauth.mailserver.password", "");
   private static final Flag<Boolean> useGoogle = Flag.createFlag("auth.usegoogle", true);
   private static final Flag<Boolean> useLocal = Flag.createFlag("auth.uselocal", false);
   private static final String loginUrl = Flag.createFlag("login.url", "").get();
@@ -85,6 +70,8 @@ public class LoginServlet extends HttpServlet {
   private static final UserService userService = UserServiceFactory.getUserService();
   private final PolicyFactory sanitizer = new HtmlPolicyBuilder().allowElements("p").toFactory();
   private static final boolean DEBUG = Flag.createFlag("appinventor.debugging", false).get();
+  private static final String PASSWORDS_OFF =
+      "Passwords are not used here. Sign in with your name and the team code.";
 
   private static final Set<LoginListener> loginListeners = new HashSet<>();
 
@@ -226,54 +213,8 @@ public class LoginServlet extends HttpServlet {
     // If we get here, local accounts are supported
     // or we are the "token" page
 
-    if (page.equals("setpw")) {
-      String uid = getParam(req);
-      if (uid == null) {
-        fail(req, resp, "Invalid Set Password Link", locale);
-        return;
-      }
-      PWData data = storageIo.findPWData(uid);
-      if (data == null) {
-        fail(req, resp, "Invalid Set Password Link", locale);
-        return;
-      }
-      if (DEBUG) {
-        LOG.info("setpw email = " + data.email);
-      }
-      User user = storageIo.getUserFromEmail(data.email);
-      userInfo = new OdeAuthFilter.UserInfo(); // Create new userInfo object
-      userInfo.setUserId(user.getUserId()); // This effectively logs us in!
-      out = setCookieOutput(userInfo, resp);
-//      req.getSession().setAttribute("userid", user.getUserId()); // This effectively logs us in!
-      out.println("<html><head><title>Set Your Password</title>\n");
-      out.println("</head>\n<body>\n");
-      out.println("<h1>" + bundle.getString("setyourpassword") + "</h1>\n");
-      out.println("<form method=POST action=\"" + req.getRequestURI() + "\">");
-      out.println("<input type=password name=password value=\"\" size=\"35\"><br />\n");
-      out.println("<p><input type=hidden name=locale value=\""+ sanitizer.sanitize(locale) + "\"></p>");
-      out.println("<input type=Submit value=\"" + bundle.getString("setpassword") + "\" style=\"font-size: 300%;\">\n");
-      out.println("</form>\n");
-      storageIo.cleanuppwdata();
-      return;
-    } else if (page.equals("linksent")) {
-      out = setCookieOutput(userInfo, resp);
-      out.println("<html><head><title>" + bundle.getString("linksent") + "</title></head>\n");
-      out.println("<body>\n");
-      out.println("<h1>" + bundle.getString("linksent") + "</h1>\n");
-      out.println("<p>" + bundle.getString("checkemail") + "</p>\n");
-      return;
-    } else if (page.equals("sendlink")) {
-      out = setCookieOutput(userInfo, resp);
-      out.println("<head><title>" + bundle.getString("requestreset") + "</title></head>\n");
-      out.println("<body>\n");
-      out.println("<h1>" + bundle.getString("requestlink") + "</h1>\n");
-      out.println("<p>" + bundle.getString("requestinstructions") + "</p>\n");
-      out.println("<form method=POST action=\"" + req.getRequestURI() + "\">\n");
-      out.println(bundle.getString("enteremailaddress") + ":&nbsp;<input type=text name=email value=\"\" size=\"35\"><br />\n");
-      out.println("<input type=hidden name=locale value=\"" + sanitizer.sanitize(locale) + "\">");
-      out.println("<p></p>");
-      out.println("<input type=submit value=\"" + bundle.getString("sendlink") + "\" style=\"font-size: 300%;\">\n");
-      out.println("</form>\n");
+    if (page.equals("setpw") || page.equals("sendlink") || page.equals("linksent")) {
+      fail(req, resp, PASSWORDS_OFF, locale);
       return;
     } else if (page.equals("token") || page.equals("stoken")) {
       String encodedToken = params.get("token");
@@ -373,21 +314,11 @@ public class LoginServlet extends HttpServlet {
       return;
     }
 
-    String emailAddress = bundle.getString("emailaddress");
-    String password = bundle.getString("password");
     String login = bundle.getString("login");
-    String passwordclickhere = bundle.getString("passwordclickhere");
 
     req.setCharacterEncoding("UTF-8");
-    if (useGoogle.get()) {
-      req.setAttribute("useGoogleLabel", "true");
-    } else {
-      req.setAttribute("useGoogleLabel", "false");
-    }
-    req.setAttribute("emailAddressLabel", emailAddress);
-    req.setAttribute("passwordLabel", password);
+    req.setAttribute("teamLoginEnabled", TeamLogin.isEnabled() ? "true" : "false");
     req.setAttribute("loginLabel", login);
-    req.setAttribute("passwordclickhereLabel", passwordclickhere);
     req.setAttribute("localeLabel", locale);
     req.setAttribute("pleaselogin", bundle.getString("pleaselogin"));
     req.setAttribute("login", bundle.getString("login"));
@@ -441,77 +372,36 @@ public class LoginServlet extends HttpServlet {
     if (DEBUG) {
       LOG.info("locale = " + locale + " bundle: " + new Locale(locale));
     }
-    if (page.equals("sendlink")) {
-      String email = params.get("email");
-      if (email == null) {
-        fail(req, resp, "No Email Address Provided", locale);
-        return;
-      }
-      // Send email here, for now we put it in the error string and redirect
-      PWData pwData = storageIo.createPWData(email);
-      if (pwData == null) {
-        fail(req, resp, "Internal Error", locale);
-        return;
-      }
-      String link = trimPage(req) + pwData.id + "/setpw";
-      sendmail(email, link, locale);
-      resp.sendRedirect("/login/linksent/?locale=" + locale);
-      storageIo.cleanuppwdata();
-      return;
-    } else if (page.equals("setpw")) {
-      if (userInfo == null || userInfo.getUserId().equals("")) {
-        fail(req, resp, "Session Timed Out", locale);
-        return;
-      }
-      User user = storageIo.getUser(userInfo.getUserId());
-      String password = params.get("password");
-      if (password == null || password.equals("")) {
-        fail(req, resp, bundle.getString("nopassword"), locale);
-        return;
-      }
-      String hashedPassword;
-      try {
-        hashedPassword = PasswordHash.createHash(password);
-      } catch (NoSuchAlgorithmException e) {
-        fail(req, resp, "System Error hashing password", locale);
-        return;
-      } catch (InvalidKeySpecException e) {
-        fail(req, resp, "System Error hashing password", locale);
-        return;
-      }
-
-      storageIo.setUserPassword(user.getUserId(),  hashedPassword);
-      String uri = new UriBuilder("/")
-        .add("locale", locale)
-        .add("repo", repo)
-        .add("autoload", autoload)
-        .add("ng", newGalleryId)
-        .add("ui", uiPreference)
-        .add("galleryId", galleryId).build();
-      resp.sendRedirect(uri);   // Logged in, go to service
+    if (page.equals("sendlink") || page.equals("setpw")) {
+      fail(req, resp, PASSWORDS_OFF, locale);
       return;
     }
 
-    String email = params.get("email");
-    String password = params.get("password"); // We don't check it now
-    User user = storageIo.getUserFromEmail(email);
-    boolean validLogin = false;
-
-    String hash = user.getPassword();
-    if ((hash == null) || hash.equals("")) {
-      fail(req, resp, "No Password Set for User", locale);
+    // Team login: a name plus the team's shared code (collab.teamcode in appengine-web.xml).
+    String ip = TeamLogin.clientIp(req);
+    long wait = TeamLogin.secondsLocked(ip);
+    if (wait > 0) {
+      fail(req, resp, "Too many wrong team codes. Try again in " + wait + " seconds.", locale);
       return;
     }
-
-    try {
-      validLogin = PasswordHash.validatePassword(password, hash);
-    } catch (NoSuchAlgorithmException e) {
-    } catch (InvalidKeySpecException e) {
-    }
-
-    if (!validLogin) {
-      fail(req, resp, bundle.getString("invalidpassword"), locale);
+    if (!TeamLogin.isEnabled()) {
+      fail(req, resp, "Team login is not set up yet.", locale);
       return;
+    }
+    if (!TeamLogin.codeMatches(params.get("teamcode"))) {
+      TeamLogin.recordFailure(ip);
+      fail(req, resp, "Wrong team code.", locale);
+      return;
+    }
+    String name = TeamLogin.normalizeName(params.get("name"));
+    if (name == null) {
+      fail(req, resp, "Your name can use 1 to 30 letters, digits, - and . (no spaces).", locale);
+      return;
+    }
+    TeamLogin.recordSuccess(ip);
+    User user = storageIo.getUserFromEmail(TeamLogin.emailFor(name));
+    if (!user.getUserTosAccepted()) {
+      storageIo.setTosAccepted(user.getUserId());
     }
 
     if (DEBUG) {
@@ -578,44 +468,12 @@ public class LoginServlet extends HttpServlet {
     return components[components.length-2];
   }
 
-  private String trimPage(HttpServletRequest req) {
-    String [] components = req.getRequestURL().toString().split("/");
-    StringBuffer sb = new StringBuffer();
-    for (int i = 0; i < components.length-1; i++)
-      sb.append(components[i] + "/");
-    return sb.toString();
-  }
 
   private void fail(HttpServletRequest req, HttpServletResponse resp, String error, String locale) throws IOException {
     resp.sendRedirect("/login/?locale=" + sanitizer.sanitize(locale) + "&error=" + sanitizer.sanitize(error));
     return;
   }
 
-  private void sendmail(String email, String url, String locale) {
-    try {
-      String tmailServer = mailServer.get();
-      if (tmailServer.equals("")) { // No mailserver = no mail!
-        return;
-      }
-      URL mailServerUrl = new URL(tmailServer);
-      HttpURLConnection connection = (HttpURLConnection) mailServerUrl.openConnection();
-      connection.setDoOutput(true);
-      connection.setRequestMethod("POST");
-      PrintWriter stream = new PrintWriter(connection.getOutputStream());
-      stream.write("email=" + URLEncoder.encode(email) + "&url=" + URLEncoder.encode(url) +
-          "&pass=" + password.get() + "&locale=" + locale);
-      stream.flush();
-      stream.close();
-      int responseCode = 0;
-      responseCode = connection.getResponseCode();
-      if (responseCode != HttpURLConnection.HTTP_OK) {
-        LOG.warning("mailserver responded with code = " + responseCode);
-        // Nothing else we can do here...
-      }
-    } catch (MalformedURLException e) {
-    } catch (IOException e) {
-    }
-  }
 
   private PrintWriter setCookieOutput(OdeAuthFilter.UserInfo userInfo, HttpServletResponse resp)
     throws IOException {

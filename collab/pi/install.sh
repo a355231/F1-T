@@ -43,9 +43,17 @@ if ! command -v cloudflared >/dev/null; then
   rm -rf "$tmp"
 fi
 
-echo "== Folders"
-mkdir -p /opt/appinventor/war /opt/appinventor/hub
+echo "== Folders and helper scripts"
+mkdir -p /opt/appinventor/war /opt/appinventor/hub /opt/appinventor/tools
+install -m 755 "$HERE/apply-config.sh" "$HERE/set-team-code.sh" "$HERE/tunnel-url.sh" /opt/appinventor/
 chown -R "$RUN_AS:$RUN_AS" /opt/appinventor
+
+echo "== Team code"
+if [ -s /opt/appinventor/teamcode ]; then
+  echo "Keeping the existing team code (change it with: sudo /opt/appinventor/set-team-code.sh)"
+else
+  /opt/appinventor/set-team-code.sh
+fi
 
 echo "== Services"
 for unit in appinventor collab-hub cloudflared-quick; do
@@ -61,7 +69,7 @@ cat <<EOF
 Setup done. Next:
   1. On your PC, build App Inventor and copy it here:
        collab/pi/deploy-from-pc.sh $RUN_AS@$IP
-  2. Create the team's accounts (see collab/README.md, "First start").
+  2. Give your team the team code. Everyone signs in with their name and that code.
   3. LAN address:      http://$IP:8080
-     Internet address: $HERE/tunnel-url.sh
+     Internet address: /opt/appinventor/tunnel-url.sh
 EOF

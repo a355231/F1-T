@@ -38,8 +38,23 @@ function fixLocation(location, req) {
   return location.startsWith(plain) ? 'https://' + location.slice('http://'.length) : location;
 }
 
+function isLoopback(addr) {
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+// The browser's real address, for App Inventor's limit on wrong team codes. A client cannot set
+// it: X-Forwarded-For is replaced, and Cloudflare's header is only believed when the request came
+// from cloudflared on this machine.
+function clientAddress(req) {
+  const addr = req.socket.remoteAddress || '';
+  const viaTunnel = req.headers['cf-connecting-ip'];
+  if (isLoopback(addr) && viaTunnel) return String(viaTunnel).trim();
+  return addr.startsWith('::ffff:') ? addr.slice(7) : addr;
+}
+
 function proxy(req, res) {
   const headers = Object.assign({}, req.headers);
+  headers['x-forwarded-for'] = clientAddress(req);
   headers['x-forwarded-host'] = req.headers.host || '';
   headers['x-forwarded-proto'] = forwardedProto(req);
   const upstreamReq = http.request({
@@ -95,9 +110,8 @@ function askAppInventor(path, cookie) {
 // lets anyone sign in as anyone, must only be usable from the Pi itself, never through the LAN or
 // the Cloudflare tunnel (cloudflared runs on the Pi, so tunnel requests carry cf-connecting-ip).
 function isFromPiItself(req) {
-  const addr = req.socket.remoteAddress || '';
-  const loopback = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
-  return loopback && !req.headers['cf-connecting-ip'] && !req.headers['x-forwarded-for'];
+  return isLoopback(req.socket.remoteAddress || '') && !req.headers['cf-connecting-ip'] &&
+    !req.headers['x-forwarded-for'];
 }
 
 function isPiOnlyPath(url) {

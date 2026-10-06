@@ -425,12 +425,12 @@
     if (!ctx) {
       return;
     }
-    var email = window.prompt('Share "' + ctx.projectName + '" with (their App Inventor login email):');
-    if (!email) {
+    var name = window.prompt('Share "' + ctx.projectName + '" with (the name they sign in with):');
+    if (!name) {
       return;
     }
-    var body = 'projectId=' + encodeURIComponent(ctx.projectId) + '&email=' +
-      encodeURIComponent(email.trim());
+    var body = 'projectId=' + encodeURIComponent(ctx.projectId) + '&name=' +
+      encodeURIComponent(name.trim());
     fetch('/ode/collab/share', {
       method: 'POST',
       credentials: 'same-origin',
@@ -440,7 +440,7 @@
       return r.json().catch(function() { return {ok: false}; });
     }).then(function(result) {
       window.alert(result.ok ?
-        '"' + ctx.projectName + '" is now in ' + result.email + '\'s My Projects. ' +
+        '"' + ctx.projectName + '" is now in ' + result.name + '\'s My Projects. ' +
         'They may need to reload App Inventor to see it.' :
         'Could not share the project: ' + (result.error || 'unknown error'));
     }, function() {
@@ -466,7 +466,7 @@
 
   function installStyles() {
     var css =
-      '#aicollab{position:fixed;left:8px;bottom:8px;z-index:900;font:12px/1.35 sans-serif;' +
+      '#aicollab{position:fixed;left:8px;bottom:3px;z-index:900;font:12px/1.35 sans-serif;' +
       'color:#222;background:rgba(255,255,255,.96);border:1px solid #bbb;border-radius:6px;' +
       'box-shadow:0 2px 8px rgba(0,0,0,.2);max-width:300px}' +
       '#aicollab .aic-head{display:flex;align-items:center;gap:6px;padding:4px 8px;cursor:pointer;' +
