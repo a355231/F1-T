@@ -50,7 +50,8 @@ fi
 
 echo "== Folders and helper scripts"
 mkdir -p /opt/appinventor/war /opt/appinventor/hub /opt/appinventor/tools
-install -m 755 "$HERE/apply-config.sh" "$HERE/set-team-code.sh" "$HERE/tunnel-url.sh" /opt/appinventor/
+install -m 755 "$HERE/apply-config.sh" "$HERE/set-team-code.sh" "$HERE/tunnel-url.sh" \
+  "$HERE/show-info.sh" /opt/appinventor/
 chown -R "$RUN_AS:$RUN_AS" /opt/appinventor
 
 echo "== Team code"
@@ -79,14 +80,9 @@ if [ "$BUILD_HERE" = 1 ]; then
     [ -n "$url" ] && break
     sleep 2
   done
-  cat <<EOF
-
-App Inventor is running and will start again on every boot.
-  LAN address:      http://$IP:8080
-  Internet address: ${url:-not ready yet, run /opt/appinventor/tunnel-url.sh in a minute}
-    (the internet address changes after every reboot: /opt/appinventor/tunnel-url.sh)
-Everyone signs in with their name and the team code.
-EOF
+  echo
+  echo "App Inventor is running and will start again on every boot."
+  /opt/appinventor/show-info.sh
   exit 0
 fi
 

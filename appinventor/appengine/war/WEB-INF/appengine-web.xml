@@ -83,8 +83,11 @@
     <property name="auth.uselocal" value="true" />
 
     <!-- Team login: people sign in with a name plus this shared code. Empty turns sign-in off.
-         On the Raspberry Pi it is set by collab/pi/set-team-code.sh; keep it out of git. -->
+         On the Raspberry Pi the code lives in a file instead (see below); keep codes out of git. -->
     <property name="collab.teamcode" value="" />
+    <!-- If set, the code is read from this file at every sign-in instead, so it can be changed
+         while App Inventor runs (the Raspberry Pi install sets it to /opt/appinventor/teamcode). -->
+    <property name="collab.teamcode.file" value="" />
 
     <!-- Flags associated with localauth code -->
     <property name="localauth.mailserver" value="https://osiris.mit.edu/passmail/" />

@@ -36,8 +36,10 @@
     <equals arg1="${release}" arg2="true" />
   </condition>
 
-  <!-- ant -Dclient.dev.flags="-style obfuscated -optimize 9" for a small, fast single-file build -->
-  <property name="client.dev.flags" value="-style pretty"/>
+  <!-- The default is the small build (about 23 MB) because the readable "-style pretty" build is
+       so large (about 118 MB) that phones fail to load it. For debugging the client, pass
+       -Dclient.dev.flags="-style pretty". -->
+  <property name="client.dev.flags" value="-style obfuscated -optimize 9"/>
   <condition property="client.flags"
              value="-optimize 9 -localWorkers 8"
              else="${client.dev.flags}">

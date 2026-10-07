@@ -14,6 +14,8 @@
   var BLOCK_EVENT_TYPES = ['create', 'delete', 'change', 'move', 'var_create', 'var_delete',
     'var_rename', 'comment_create', 'comment_delete', 'comment_change', 'comment_move'];
   var TICK_MS = 700;
+  var CURSOR_MS = 5000;          // how often your mouse position is shared
+  var CURSOR_GLIDE_MS = 1200;    // a teammate's cursor glides to its new spot over this long
   var OPS_PER_TICK = 300;
 
   var C = window.AICollab = {
@@ -30,10 +32,14 @@
     presence: '',
     notice: '',
     expanded: false,
+    cursors: {},       // client id -> {screen, editor, x, y, fresh}
+    stats: {cursorsSent: 0, cursorsReceived: 0},
   };
 
   var ws = null;
   var failures = 0;
+  var lastWhere = '';
+  var lastCursorKey = 'none';
 
   // ---- hub connection ----
 
@@ -72,6 +78,9 @@
       C.presence = '';
       C.queues = {};
       C.roster = [];
+      C.cursors = {};
+      lastCursorKey = 'none';
+      renderCursors();
       render();
       scheduleReconnect();
     };
@@ -92,9 +101,19 @@
     switch (msg.t) {
       case 'hello':
         C.me = msg.you;
+        if (C.announceAfterReconnect) {
+          C.announceAfterReconnect = false;
+          send({t: 'codechanged'});
+        }
         break;
       case 'roster':
         C.roster = msg.clients || [];
+        Object.keys(C.cursors).forEach(function(id) {
+          if (!C.roster.some(function(c) { return c.id === id && c.projectId === C.joined; })) {
+            delete C.cursors[id];
+          }
+        });
+        renderCursors();
         break;
       case 'joined':
         if (String(msg.projectId) !== C.wanted) {
@@ -104,9 +123,19 @@
         C.epoch = msg.epoch;
         C.mainId = msg.leaderId;
         C.queues = {};
+        C.cursors = {};
+        (msg.cursors || []).forEach(setCursor);
         updateRole();
         (msg.log || []).forEach(enqueue);
         processQueues();
+        break;
+      case 'cursor':
+        C.stats.cursorsReceived++;
+        setCursor(msg);
+        renderCursors();
+        break;
+      case 'notice':
+        showNotice(msg.text);
         break;
       case 'leader':
         if (String(msg.projectId) === C.joined) {
@@ -178,6 +207,8 @@
         }
         C.joined = null;
         C.queues = {};
+        C.cursors = {};
+        lastCursorKey = 'none';
         C.wanted = projectId;
         if (projectId) {
           send({t: 'join', projectId: projectId});
@@ -189,8 +220,15 @@
         send({t: 'presence', screen: ctx.screen, editor: ctx.editor,
           companion: companionConnected()});
       }
+      // Moving to another screen or editor: say so now instead of waiting up to 5 seconds.
+      var where = ctx ? [ctx.projectId, ctx.screen, ctx.editor].join('|') : '';
+      if (where !== lastWhere) {
+        lastWhere = where;
+        sendCursor();
+      }
     }
     processQueues();
+    renderCursors();
     render();
   }
 
@@ -418,6 +456,337 @@
     return count;
   }
 
+  // ---- mouse cursors ----
+  //
+  // Your mouse position is shared every CURSOR_MS while the mouse is over the blocks workspace
+  // (as workspace coordinates, so the cursor stays on the same block when someone scrolls) or over
+  // the designer's phone preview (as pixels from its top-left corner).
+
+  var lastMouse = null;
+  var cursorLayer = null;
+  var cursorEls = {};
+
+  document.addEventListener('mousemove', function(e) {
+    lastMouse = {x: e.clientX, y: e.clientY};
+  }, true);
+  document.addEventListener('mouseout', function(e) {
+    if (!e.relatedTarget) {
+      lastMouse = null;   // the mouse left the window
+    }
+  }, true);
+
+  function inside(rect, x, y) {
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }
+
+  function visibleForm() {
+    var forms = document.querySelectorAll('.ode-SimpleMockForm');
+    for (var i = 0; i < forms.length; i++) {
+      if (forms[i].offsetWidth > 0 && forms[i].offsetHeight > 0) {
+        return forms[i];
+      }
+    }
+    return null;
+  }
+
+  function workspaceBox(workspace) {
+    var div = workspace.getInjectionDiv ? workspace.getInjectionDiv() :
+      workspace.getParentSvg().parentNode;
+    return div.getBoundingClientRect();
+  }
+
+  function sampleCursor() {
+    var ctx = context();
+    if (!ctx || !C.joined || ctx.projectId !== C.joined || !lastMouse || document.hidden) {
+      return null;
+    }
+    var x = lastMouse.x;
+    var y = lastMouse.y;
+    if (ctx.editor === 'blocks') {
+      var workspace = C.workspaces[C.joined + '_' + ctx.screen];
+      if (!workspace || !inside(workspaceBox(workspace), x, y)) {
+        return null;
+      }
+      var p = Blockly.utils.svgMath.screenToWsCoordinates(workspace,
+        new Blockly.utils.Coordinate(x, y));
+      return {screen: ctx.screen, editor: 'blocks', x: Math.round(p.x), y: Math.round(p.y)};
+    }
+    var form = visibleForm();
+    if (!form) {
+      return null;
+    }
+    var box = form.getBoundingClientRect();
+    if (!inside(box, x, y)) {
+      return null;
+    }
+    return {screen: ctx.screen, editor: 'designer', x: Math.round(x - box.left),
+      y: Math.round(y - box.top)};
+  }
+
+  function sendCursor() {
+    if (!C.connected || !C.joined) {
+      return;
+    }
+    var spot = sampleCursor();
+    var key = spot ? [spot.screen, spot.editor, spot.x, spot.y].join('|') : 'none';
+    if (key === lastCursorKey) {
+      return;   // nothing new to say
+    }
+    lastCursorKey = key;
+    C.stats.cursorsSent++;
+    send(spot ? {t: 'cursor', screen: spot.screen, editor: spot.editor, x: spot.x, y: spot.y} :
+      {t: 'cursor', x: null, y: null});
+  }
+
+  function setCursor(msg) {
+    if (!msg || !msg.id) {
+      return;
+    }
+    if (msg.x === null || msg.x === undefined) {
+      delete C.cursors[msg.id];
+    } else {
+      C.cursors[msg.id] = {screen: msg.screen, editor: msg.editor, x: msg.x, y: msg.y,
+        fresh: Date.now()};
+    }
+  }
+
+  function cursorScreenPosition(c) {
+    if (c.editor === 'blocks') {
+      var workspace = C.workspaces[C.joined + '_' + c.screen];
+      if (!workspace) {
+        return null;
+      }
+      var p = Blockly.utils.svgMath.wsToScreenCoordinates(workspace,
+        new Blockly.utils.Coordinate(c.x, c.y));
+      return inside(workspaceBox(workspace), p.x, p.y) ? {x: p.x, y: p.y} : null;
+    }
+    var form = visibleForm();
+    if (!form) {
+      return null;
+    }
+    var box = form.getBoundingClientRect();
+    var pos = {x: box.left + c.x, y: box.top + c.y};
+    return inside(box, pos.x, pos.y) ? pos : null;
+  }
+
+  function makeCursorEl() {
+    var wrap = el('div', 'aic-cursor');
+    wrap.innerHTML = '<svg width="20" height="26" viewBox="0 0 20 26" aria-hidden="true">' +
+      '<path d="M1.5 1.5 L1.5 20 L6.2 15.6 L9.6 23.6 L13 22.2 L9.7 14.4 L16.4 14.2 Z" ' +
+      'stroke="#222" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+    wrap.appendChild(el('span', 'aic-cursor-name', ''));
+    return wrap;
+  }
+
+  function renderCursors() {
+    if (!document.body) {
+      return;
+    }
+    var ctx = context();
+    var wanted = {};
+    if (ctx && C.joined && ctx.projectId === C.joined && !document.hidden) {
+      Object.keys(C.cursors).forEach(function(id) {
+        var c = C.cursors[id];
+        var who = C.roster.filter(function(r) { return r.id === id; })[0];
+        if (!who || who.projectId !== C.joined || c.screen !== ctx.screen ||
+            c.editor !== ctx.editor || (C.me && id === C.me.id)) {
+          return;
+        }
+        var pos = cursorScreenPosition(c);
+        if (pos) {
+          wanted[id] = {pos: pos, who: who, c: c};
+        }
+      });
+    }
+    if (!cursorLayer && Object.keys(wanted).length) {
+      cursorLayer = el('div');
+      cursorLayer.id = 'aicollab-cursors';
+      document.body.appendChild(cursorLayer);
+    }
+    Object.keys(cursorEls).forEach(function(id) {
+      if (!wanted[id]) {
+        cursorEls[id].remove();
+        delete cursorEls[id];
+      }
+    });
+    Object.keys(wanted).forEach(function(id) {
+      var w = wanted[id];
+      var wrap = cursorEls[id];
+      var fresh = false;
+      if (!wrap) {
+        wrap = cursorEls[id] = makeCursorEl();
+        cursorLayer.appendChild(wrap);
+        wrap.style.transition = 'none';
+      } else {
+        fresh = Date.now() - w.c.fresh < CURSOR_GLIDE_MS + 100;
+        wrap.style.transition = fresh ? 'transform ' + CURSOR_GLIDE_MS + 'ms ease' : 'none';
+      }
+      var x = Math.max(0, Math.min(window.innerWidth - 24, w.pos.x));
+      var y = Math.max(0, Math.min(window.innerHeight - 30, w.pos.y));
+      wrap.style.transform = 'translate(' + Math.round(x) + 'px,' + Math.round(y) + 'px)';
+      wrap.setAttribute('data-name', w.who.name);
+      wrap.querySelector('path').setAttribute('fill', w.who.color);
+      var label = wrap.querySelector('.aic-cursor-name');
+      label.textContent = w.who.name;
+      label.style.background = w.who.color;
+      label.style.color = w.who.color === '#fdd835' ? '#222' : '#fff';
+    });
+  }
+
+  // ---- changing the team code while everyone is working ----
+
+  function randomCode() {
+    var letters = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    var out = '';
+    var bytes = new Uint8Array(1);
+    while (out.length < 12) {
+      crypto.getRandomValues(bytes);
+      if (bytes[0] < 252) {   // 252 = 7 * 36, so every letter is equally likely
+        out += letters.charAt(bytes[0] % 36);
+      }
+    }
+    return out.slice(0, 4) + '-' + out.slice(4, 8) + '-' + out.slice(8, 12);
+  }
+
+  function showNotice(text) {
+    C.notice = text;
+    C.expanded = true;
+    render();
+    setTimeout(function() {
+      if (C.notice === text) {
+        C.notice = '';
+        render();
+      }
+    }, 5 * 60 * 1000);
+  }
+
+  function changeCodeDialog() {
+    if (document.getElementById('aicollab-dialog')) {
+      return;
+    }
+    var backdrop = el('div');
+    backdrop.id = 'aicollab-dialog';
+    var card = el('div', 'aic-card');
+    backdrop.appendChild(card);
+
+    function close() {
+      backdrop.remove();
+      document.removeEventListener('keydown', onKey, true);
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') {
+        close();
+      }
+    }
+    document.addEventListener('keydown', onKey, true);
+
+    function field(label, type) {
+      var row = el('label', 'aic-field');
+      row.appendChild(el('span', '', label));
+      var input = el('input');
+      input.type = type;
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      row.appendChild(input);
+      card.appendChild(row);
+      return input;
+    }
+
+    card.appendChild(el('h3', '', 'Change team code'));
+    card.appendChild(el('p', '', 'Anyone who signs in from now on needs the new code. ' +
+      'People who are already signed in stay signed in, unless you tick the box below.'));
+    var current = field('Current team code', 'password');
+    var fresh = field('New team code (8 or more characters)', 'text');
+    var make = el('a', 'aic-link', 'Make one up');
+    make.onclick = function() {
+      fresh.value = randomCode();
+    };
+    card.appendChild(make);
+    var signoutRow = el('label', 'aic-check');
+    var signout = el('input');
+    signout.type = 'checkbox';
+    signoutRow.appendChild(signout);
+    signoutRow.appendChild(el('span', '', ' Also sign everyone else out right now (use this if ' +
+      'the old code leaked)'));
+    card.appendChild(signoutRow);
+    var message = el('div', 'aic-error');
+    card.appendChild(message);
+    var buttons = el('div', 'aic-buttons');
+    var cancel = el('button', '', 'Cancel');
+    var go = el('button', 'aic-primary', 'Change code');
+    buttons.appendChild(cancel);
+    buttons.appendChild(go);
+    card.appendChild(buttons);
+    cancel.onclick = close;
+
+    function done(newCode, signedOut) {
+      card.textContent = '';
+      card.appendChild(el('h3', '', 'Team code changed'));
+      card.appendChild(el('p', '', 'The new team code is:'));
+      var shown = el('div', 'aic-newcode', newCode);
+      card.appendChild(shown);
+      card.appendChild(el('p', '', 'Tell your teammates. ' + (signedOut ?
+        'Everyone else was signed out and must sign in again with it.' :
+        'The next person to sign in needs it.')));
+      var row = el('div', 'aic-buttons');
+      var copy = el('button', '', 'Copy');
+      copy.onclick = function() {
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(newCode).then(function() { copy.textContent = 'Copied'; });
+        }
+      };
+      var ok = el('button', 'aic-primary', 'Done');
+      ok.onclick = close;
+      row.appendChild(copy);
+      row.appendChild(ok);
+      card.appendChild(row);
+    }
+
+    function submit() {
+      message.textContent = '';
+      var newCode = fresh.value;
+      go.disabled = true;
+      var body = 'current=' + encodeURIComponent(current.value) + '&new=' +
+        encodeURIComponent(newCode) + '&signout=' + (signout.checked ? 'true' : 'false');
+      fetch('/ode/collab/teamcode', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: body
+      }).then(function(r) {
+        return r.json().catch(function() { return {ok: false, error: 'Unexpected answer.'}; });
+      }).then(function(result) {
+        go.disabled = false;
+        if (result.ok) {
+          if (result.signedOut && ws) {
+            // Everyone's login was just replaced, including the one this connection was opened
+            // with. Reconnect with the new one first; the hub then checks and announces the change.
+            C.announceAfterReconnect = true;
+            ws.close();
+          } else {
+            send({t: 'codechanged'});
+          }
+          done(newCode, !!result.signedOut);
+        } else {
+          message.textContent = result.error || 'The team code could not be changed.';
+        }
+      }, function() {
+        go.disabled = false;
+        message.textContent = 'Could not reach the App Inventor server.';
+      });
+    }
+    go.onclick = submit;
+    [current, fresh].forEach(function(input) {
+      input.onkeydown = function(e) {
+        if (e.key === 'Enter') {
+          submit();
+        }
+      };
+    });
+    document.body.appendChild(backdrop);
+    current.focus();
+  }
+
   // ---- sharing ----
 
   function share() {
@@ -484,7 +853,34 @@
       '#aicollab .aic-note{margin-top:6px;color:#a33}' +
       '#aicollab a{color:#1a6dd6;cursor:pointer}' +
       'body.dark #aicollab,.dark-theme #aicollab{background:rgba(40,40,40,.96);color:#eee;' +
-      'border-color:#555}';
+      'border-color:#555}' +
+      '#aicollab-cursors{position:fixed;left:0;top:0;width:0;height:0;z-index:950;' +
+      'pointer-events:none}' +
+      '.aic-cursor{position:fixed;left:0;top:0;pointer-events:none;will-change:transform}' +
+      '.aic-cursor svg{display:block;filter:drop-shadow(0 1px 1px rgba(0,0,0,.35))}' +
+      '.aic-cursor-name{position:absolute;left:14px;top:20px;white-space:nowrap;font:bold 12px/1.2 ' +
+      'sans-serif;padding:2px 7px;border-radius:9px;box-shadow:0 1px 3px rgba(0,0,0,.4);' +
+      'border:1px solid rgba(0,0,0,.35)}' +
+      '#aicollab-dialog{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.45);' +
+      'display:flex;align-items:center;justify-content:center;font:14px/1.4 sans-serif}' +
+      '#aicollab-dialog .aic-card{background:#fff;color:#222;border-radius:8px;padding:18px 20px;' +
+      'width:min(420px,calc(100vw - 32px));box-shadow:0 8px 30px rgba(0,0,0,.4)}' +
+      '#aicollab-dialog h3{margin:0 0 8px;font-size:18px}' +
+      '#aicollab-dialog p{margin:0 0 10px}' +
+      '#aicollab-dialog .aic-field{display:block;margin:8px 0}' +
+      '#aicollab-dialog .aic-field span{display:block;font-size:12px;color:#555;margin-bottom:2px}' +
+      '#aicollab-dialog .aic-field input{width:100%;box-sizing:border-box;padding:7px;font-size:15px;' +
+      'border:1px solid #999;border-radius:4px}' +
+      '#aicollab-dialog .aic-link{color:#1a6dd6;cursor:pointer;font-size:13px}' +
+      '#aicollab-dialog .aic-check{display:block;margin:10px 0;font-size:13px}' +
+      '#aicollab-dialog .aic-error{color:#b00020;min-height:18px;margin:4px 0}' +
+      '#aicollab-dialog .aic-buttons{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}' +
+      '#aicollab-dialog button{padding:7px 14px;font-size:14px;border-radius:4px;' +
+      'border:1px solid #888;background:#f3f3f3;cursor:pointer}' +
+      '#aicollab-dialog button.aic-primary{background:#7fb400;border-color:#6a9900;color:#fff}' +
+      '#aicollab-dialog button:disabled{opacity:.5}' +
+      '#aicollab-dialog .aic-newcode{font:bold 22px/1.3 monospace;background:#f0f0f0;' +
+      'padding:10px;border-radius:6px;text-align:center;user-select:all}';
     var style = el('style');
     style.textContent = css;
     document.head.appendChild(style);
@@ -590,20 +986,29 @@
     if (C.notice) {
       body.appendChild(el('div', 'aic-note', C.notice));
     }
+    var actions = el('div');
+    actions.style.marginTop = '6px';
     if (C.joined) {
-      var actions = el('div');
-      actions.style.marginTop = '6px';
       var link = el('a', '', 'Share this project with a teammate…');
       link.onclick = function(ev) {
         ev.stopPropagation();
         share();
       };
       actions.appendChild(link);
-      body.appendChild(actions);
+      actions.appendChild(el('br'));
     }
+    var codeLink = el('a', '', 'Change team code…');
+    codeLink.onclick = function(ev) {
+      ev.stopPropagation();
+      changeCodeDialog();
+    };
+    actions.appendChild(codeLink);
+    body.appendChild(actions);
     panel.appendChild(body);
   }
 
   connect();
   setInterval(tick, TICK_MS);
+  setInterval(sendCursor, CURSOR_MS);
+  window.addEventListener('resize', renderCursors);
 })();

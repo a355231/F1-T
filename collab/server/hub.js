@@ -19,6 +19,7 @@ const UPSTREAM = new URL(process.env.AI_UPSTREAM || 'http://127.0.0.1:8888');
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 
 const sockets = new Map();
+const cookies = new Map();
 const hub = new Hub((id, msg) => {
   const ws = sockets.get(id);
   if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -159,6 +160,7 @@ server.on('upgrade', async (req, socket, head) => {
 function onConnection(ws, me, cookie) {
   const client = hub.addClient({userId: me.userId, email: me.email});
   sockets.set(client.id, ws);
+  cookies.set(client.id, cookie);
   hub.welcome(client.id);
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -187,6 +189,19 @@ function onConnection(ws, me, cookie) {
       case 'presence':
         hub.presence(client.id, msg);
         break;
+      case 'cursor':
+        hub.cursor(client.id, msg);
+        break;
+      case 'codechanged': {
+        // Do not take the browser's word for it: ask App Inventor whether this person really just
+        // changed the code, and whether everyone was signed out.
+        const last = await askAppInventor('/ode/collab/lastcodechange', cookie);
+        if (last && last.by === me.userId && Date.now() - last.at < 60 * 1000 &&
+            hub.codeChanged(client.id, !!last.signedOut) && last.signedOut) {
+          setTimeout(() => revalidateEveryone(client.id), 500);
+        }
+        break;
+      }
       case 'op':
         hub.op(client.id, msg);
         break;
@@ -199,9 +214,21 @@ function onConnection(ws, me, cookie) {
   });
   ws.on('close', () => {
     sockets.delete(client.id);
+    cookies.delete(client.id);
     hub.removeClient(client.id);
   });
 }
+
+// After a sign-out, close the connections of people whose App Inventor login is no longer valid.
+async function revalidateEveryone(exceptId) {
+  for (const [id, ws] of sockets) {
+    if (id === exceptId) continue;
+    const me = await askAppInventor('/ode/collab/whoami', cookies.get(id));
+    if (!me || !me.userId) ws.close(4001, 'signed out');
+  }
+}
+
+setInterval(() => revalidateEveryone(), 2 * 60 * 1000).unref();
 
 setInterval(() => {
   for (const ws of wss.clients) {

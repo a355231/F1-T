@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Puts the Pi's own settings into the deployed App Inventor (/opt/appinventor/war):
-#   * the team code from /opt/appinventor/teamcode, written into WEB-INF/appengine-web.xml;
+#   * the location of the team code file (/opt/appinventor/teamcode), written into
+#     WEB-INF/appengine-web.xml; the code itself stays in that file, which App Inventor re-reads at
+#     every sign-in, so it can be changed while running;
 #   * the Pi's cookie encryption key (/opt/appinventor/authkey), created on first use.
-# Run by deploy-from-pc.sh after every deploy and by set-team-code.sh. Never prints the code.
+# Run by deploy-from-pc.sh and build-on-pi.sh after every deploy. Never prints the code.
 set -euo pipefail
 
 BASE=/opt/appinventor
@@ -19,11 +21,6 @@ import re, sys
 from xml.sax.saxutils import quoteattr
 
 xml_path, code_path = sys.argv[1], sys.argv[2]
-try:
-    with open(code_path, encoding='utf-8') as f:
-        code = f.read().strip()
-except FileNotFoundError:
-    code = ''
 
 with open(xml_path, encoding='utf-8') as f:
     xml = f.read()
@@ -35,7 +32,8 @@ def set_property(xml, name, value):
         return pattern.sub(lambda m: line, xml, count=1)
     return xml.replace('</system-properties>', '    ' + line + '\n  </system-properties>', 1)
 
-xml = set_property(xml, 'collab.teamcode', code)
+xml = set_property(xml, 'collab.teamcode', '')
+xml = set_property(xml, 'collab.teamcode.file', code_path)
 xml = set_property(xml, 'auth.usegoogle', 'false')
 xml = set_property(xml, 'auth.uselocal', 'true')
 with open(xml_path, 'w', encoding='utf-8') as f:

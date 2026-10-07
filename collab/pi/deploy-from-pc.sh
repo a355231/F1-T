@@ -21,7 +21,7 @@ rsync -az --delete --exclude node_modules \
   "$ROOT/collab/server/" "$TARGET:/opt/appinventor/hub/"
 rsync -az "$ROOT/appinventor/lib/keyczar/KeyczarTool.jar" "$TARGET:/opt/appinventor/tools/"
 rsync -az --chmod=F755 "$ROOT/collab/pi/apply-config.sh" "$ROOT/collab/pi/set-team-code.sh" \
-  "$ROOT/collab/pi/tunnel-url.sh" "$TARGET:/opt/appinventor/"
+  "$ROOT/collab/pi/tunnel-url.sh" "$ROOT/collab/pi/show-info.sh" "$TARGET:/opt/appinventor/"
 
 echo "== Applying the Pi's team code and restarting"
 # The team code stays on the Pi; apply-config.sh copies it into the new build without printing it.

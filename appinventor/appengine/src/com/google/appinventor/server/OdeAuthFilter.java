@@ -359,9 +359,9 @@ public class OdeAuthFilter implements Filter {
 
       if (offset < -60 || offset > (60*idleTimeout.get())) {
         return false;
-      } else {
-        return true;
       }
+      // Everyone can be signed out at once (see TeamLogin.signEveryoneOut).
+      return this.ts >= TeamLogin.signedOutBefore();
     }
   }
 

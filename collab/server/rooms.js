@@ -3,8 +3,11 @@
 // Room, presence and leader logic for the collaboration hub. Transport-free so it can be unit
 // tested: the hub calls these methods and passes a send(clientId, message) function.
 
-const COLORS = ['#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4', '#008080', '#9a6324',
-  '#800000', '#808000', '#000075'];
+// Each person gets red, blue or yellow (the first one nobody online is using); a fourth person
+// online at the same time would have to share a colour.
+const COLORS = ['#e53935', '#1e88e5', '#fdd835'];
+const CURSOR_MIN_GAP_MS = 1000;
+const NOTICE_MIN_GAP_MS = 5000;
 
 // Ops are kept so that someone who opens the project late can replay what the main client has
 // not saved yet. The main client autosaves within 30s, so old ops are only trimmed once the log
@@ -27,7 +30,8 @@ class Hub {
     const color = this.pickColor(userId);
     const name = (email || 'user').split('@')[0];
     const client = {id, userId, email, name, color, projectId: null, projectName: '',
-      screen: '', editor: '', companion: false, joinedAt: 0};
+      screen: '', editor: '', companion: false, joinedAt: 0, cursor: null,
+      cursorAt: -Infinity, noticeAt: -Infinity};
     this.clients.set(id, client);
     return client;
   }
@@ -64,7 +68,7 @@ class Hub {
     if (client.projectId === projectId) {
       const current = this.rooms.get(projectId);
       this.send(id, {t: 'joined', projectId, epoch: current.epoch, leaderId: current.leader,
-        log: current.log});
+        log: current.log, cursors: this.cursorsInRoom(current, id)});
       return;
     }
     this.leave(id, false);
@@ -83,7 +87,8 @@ class Hub {
     client.screen = '';
     client.editor = '';
     this.electLeader(room, id);
-    this.send(id, {t: 'joined', projectId, epoch: room.epoch, leaderId: room.leader, log: room.log});
+    this.send(id, {t: 'joined', projectId, epoch: room.epoch, leaderId: room.leader, log: room.log,
+      cursors: this.cursorsInRoom(room, id)});
     this.broadcastRoster();
   }
 
@@ -96,8 +101,10 @@ class Hub {
     client.screen = '';
     client.editor = '';
     client.companion = false;
+    client.cursor = null;
     if (room) {
       room.members.delete(id);
+      for (const m of room.members) this.send(m, {t: 'cursor', id, x: null, y: null});
       if (room.members.size === 0) {
         room.leader = null;
         room.emptySince = this.now();
@@ -138,6 +145,60 @@ class Hub {
     }
     Object.assign(client, next);
     this.broadcastRoster();
+  }
+
+  // Where this person's mouse is, for the others in the same project. x and y are null when the
+  // mouse is not over the blocks or designer area. For blocks they are workspace coordinates; for
+  // the designer they are pixels from the top-left of the phone preview.
+  cursor(id, msg) {
+    const client = this.clients.get(id);
+    if (!client || !client.projectId) return;
+    const room = this.rooms.get(client.projectId);
+    if (!room) return;
+    const hidden = msg.x === null || msg.x === undefined;
+    let cursor = null;
+    if (!hidden) {
+      const x = Number(msg.x);
+      const y = Number(msg.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 1e7 || Math.abs(y) > 1e7 ||
+          (msg.editor !== 'blocks' && msg.editor !== 'designer') || typeof msg.screen !== 'string') {
+        return;
+      }
+      if (this.now() - client.cursorAt < CURSOR_MIN_GAP_MS) return;
+      cursor = {screen: msg.screen.slice(0, 100), editor: msg.editor, x: Math.round(x),
+        y: Math.round(y)};
+    } else if (!client.cursor) {
+      return;  // already hidden
+    }
+    client.cursor = cursor;
+    if (cursor) client.cursorAt = this.now();
+    const out = cursor ? Object.assign({t: 'cursor', id}, cursor) : {t: 'cursor', id, x: null, y: null};
+    for (const m of room.members) {
+      if (m !== id) this.send(m, out);
+    }
+  }
+
+  cursorsInRoom(room, exceptId) {
+    const list = [];
+    for (const m of room.members) {
+      const c = this.clients.get(m);
+      if (m !== exceptId && c && c.cursor) list.push(Object.assign({id: m}, c.cursor));
+    }
+    return list;
+  }
+
+  // Tells everyone online that something happened that they should know about (the team code was
+  // changed). The text is composed here, from the sender's name, so it cannot be spoofed.
+  codeChanged(id, signedOut) {
+    const client = this.clients.get(id);
+    if (!client || this.now() - client.noticeAt < NOTICE_MIN_GAP_MS) return false;
+    client.noticeAt = this.now();
+    const text = client.name + ' changed the team code' +
+      (signedOut ? ' and signed everyone out' : '') + '. Ask them for the new code.';
+    for (const other of this.clients.keys()) {
+      if (other !== id) this.send(other, {t: 'notice', text});
+    }
+    return true;
   }
 
   op(id, {projectId, screen, kind, data}) {

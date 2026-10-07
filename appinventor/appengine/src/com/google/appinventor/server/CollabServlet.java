@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -27,6 +28,8 @@ import org.json.JSONObject;
  *   GET  /ode/collab/access?projectId=N
  *   GET  /ode/collab/collaborators?projectId=N
  *   POST /ode/collab/share?projectId=N&amp;name=TEAM_NAME
+ *   POST /ode/collab/teamcode  current=CODE&amp;new=CODE[&amp;signout=true]
+ *   GET  /ode/collab/lastcodechange   (lets the hub check an announcement of a change)
  * </pre>
  */
 public class CollabServlet extends OdeServlet {
@@ -101,6 +104,19 @@ public class CollabServlet extends OdeServlet {
           send(resp, 200, new JSONObject().put("ok", true).put("name", name));
           return;
         }
+        case "/lastcodechange": {
+          Object[] last = TeamLogin.lastChange();
+          send(resp, 200, new JSONObject().put("at", last[0]).put("by", last[1])
+              .put("signedOut", last[2]));
+          return;
+        }
+        case "/teamcode":
+          if (!post) {
+            send(resp, HttpServletResponse.SC_METHOD_NOT_ALLOWED, error("use POST"));
+            return;
+          }
+          changeTeamCode(req, resp);
+          return;
         default:
           send(resp, HttpServletResponse.SC_NOT_FOUND, error("unknown endpoint"));
       }
@@ -112,6 +128,53 @@ public class CollabServlet extends OdeServlet {
       LOG.log(Level.WARNING, "collab request failed: " + path, e);
       send(resp, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, error("server error"));
     }
+  }
+
+  /**
+   * Changes the team code while App Inventor is running; the next sign-in must use the new code.
+   * The current code has to be given again, and wrong guesses are slowed down like at sign-in.
+   */
+  private void changeTeamCode(HttpServletRequest req, HttpServletResponse resp)
+      throws IOException {
+    String ip = TeamLogin.clientIp(req);
+    long wait = TeamLogin.secondsLocked(ip);
+    if (wait > 0) {
+      send(resp, 429, error("Too many wrong team codes. Try again in " + wait + " seconds."));
+      return;
+    }
+    if (!TeamLogin.codeMatches(req.getParameter("current"))) {
+      TeamLogin.recordFailure(ip);
+      send(resp, HttpServletResponse.SC_FORBIDDEN, error("The current team code is wrong."));
+      return;
+    }
+    TeamLogin.recordSuccess(ip);
+    String newCode = req.getParameter("new");
+    String problem = TeamLogin.problemWithNewCode(newCode);
+    if (problem != null) {
+      send(resp, HttpServletResponse.SC_BAD_REQUEST, error(problem));
+      return;
+    }
+    boolean saved = TeamLogin.setCode(newCode);
+    boolean signedOut = "true".equals(req.getParameter("signout"));
+    if (signedOut) {
+      OdeAuthFilter.UserInfo me = OdeAuthFilter.getUserInfo(req);
+      long moment = TeamLogin.signEveryoneOut();
+      if (me != null) {
+        // Keep the person who made the change signed in, with a cookie from after the sign-out.
+        me.ts = moment;
+        String cookie = me.buildCookie(false);
+        if (cookie != null) {
+          Cookie fresh = new Cookie("AppInventor", cookie);
+          fresh.setPath("/");
+          resp.addCookie(fresh);
+        }
+      }
+    }
+    TeamLogin.recordChange(userInfoProvider.getUserId(), signedOut);
+    LOG.info("The team code was changed" + (signedOut ? " and everyone was signed out" : "")
+        + (saved ? "" : " (not saved to a file: it lasts until the next restart)"));
+    send(resp, 200, new JSONObject().put("ok", true).put("saved", saved)
+        .put("signedOut", signedOut));
   }
 
   private static long projectId(HttpServletRequest req) {

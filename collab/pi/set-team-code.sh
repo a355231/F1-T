@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Changes the team code, signs everyone out, and restarts App Inventor.
-#   sudo /opt/appinventor/set-team-code.sh            # asks for the new code
-#   sudo /opt/appinventor/set-team-code.sh --random   # makes one up and shows it once
+# Changes the team code while App Inventor is running. Nobody has to restart anything: the next
+# person to sign in must use the new code.
+#   sudo /opt/appinventor/set-team-code.sh                # asks for the new code
+#   sudo /opt/appinventor/set-team-code.sh --random       # makes one up and shows it once
+#   sudo /opt/appinventor/set-team-code.sh --signout      # also signs everybody out right now
+# (The code can also be changed from inside App Inventor: Team panel > Change team code.)
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -10,6 +13,15 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 BASE=/opt/appinventor
 OWNER="$(stat -c %U "$BASE")"
+RANDOM_CODE=0
+SIGNOUT=0
+for arg in "$@"; do
+  case "$arg" in
+    --random) RANDOM_CODE=1 ;;
+    --signout) SIGNOUT=1 ;;
+    *) echo "Unknown option: $arg" >&2; exit 1 ;;
+  esac
+done
 
 random_code() {
   # 3 groups of 4 letters and digits, e.g. k7qm-2xwd-9fha (about 62 bits)
@@ -18,7 +30,8 @@ random_code() {
   echo "${raw:0:4}-${raw:4:4}-${raw:8:4}"
 }
 
-if [ "${1:-}" = "--random" ]; then
+show=0
+if [ "$RANDOM_CODE" = 1 ]; then
   code="$(random_code)"
   show=1
 else
@@ -28,9 +41,8 @@ else
     code="$(random_code)"
     show=1
   else
-    show=0
-    if [ "${#code}" -lt 8 ]; then
-      echo "Use at least 8 characters." >&2
+    if [ "${#code}" -lt 8 ] || [ "${#code}" -gt 64 ]; then
+      echo "Use 8 to 64 characters." >&2
       exit 1
     fi
     read -r -s -p "Type it again: " again
@@ -43,18 +55,32 @@ else
 fi
 
 umask 077
-printf '%s\n' "$code" > "$BASE/teamcode"
-chown "$OWNER:$OWNER" "$BASE/teamcode"
-chmod 600 "$BASE/teamcode"
+tmp="$BASE/teamcode.tmp"
+printf '%s\n' "$code" > "$tmp"
+chown "$OWNER:$OWNER" "$tmp"
+chmod 600 "$tmp"
+mv -f "$tmp" "$BASE/teamcode"
 
-# A new cookie key signs out everyone who logged in with the old code.
-rm -rf "$BASE/authkey"
-if [ -f "$BASE/war/WEB-INF/appengine-web.xml" ]; then
+if [ "$SIGNOUT" = 1 ]; then
+  printf '%s\n' "$(date +%s%3N)" > "$tmp"
+  chown "$OWNER:$OWNER" "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$BASE/teamcode.signout"
+fi
+
+WEBXML="$BASE/war/WEB-INF/appengine-web.xml"
+if [ -f "$WEBXML" ] && ! grep -q 'name="collab.teamcode.file"' "$WEBXML"; then
+  # An install from before the code could be changed live: switch it over once.
   sudo -u "$OWNER" "$BASE/apply-config.sh"
   systemctl restart appinventor
-  echo "Team code changed. Everyone has been signed out and must sign in with the new code."
+  echo "App Inventor was restarted once to switch to live code changes."
+fi
+
+echo "The team code is changed. The next sign-in needs the new code."
+if [ "$SIGNOUT" = 1 ]; then
+  echo "Everyone was signed out and must sign in again."
 else
-  echo "Team code saved. It will be used when App Inventor is deployed."
+  echo "People who are signed in now stay signed in (add --signout to sign them out too)."
 fi
 if [ "$show" = 1 ]; then
   echo "New team code: $code"
