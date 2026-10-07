@@ -1,7 +1,12 @@
 [Unit]
-Description=Check for a newer App Inventor Team Edition and install it when nobody is online
+Description=Update App Inventor Team Edition (3 AM); puts the old version back if the new one fails
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
 ExecStart=/opt/appinventor/update.sh
+# A build on a Raspberry Pi can take an hour; the update must not be stopped for taking long.
+TimeoutStartSec=infinity
+Nice=10
+Environment=DEBIAN_FRONTEND=noninteractive

@@ -1,10 +1,15 @@
 [Unit]
-Description=Nightly check for a newer App Inventor Team Edition
+Description=Nightly update for App Inventor Team Edition (3 AM)
 
 [Timer]
-# 4 am, and every hour until 8 am if somebody was still online
-OnCalendar=*-*-* 04,05,06,07:00:00
-RandomizedDelaySec=10min
+# 3 AM. If people are online then, the update waits and tries again every half hour until 6 AM.
+OnCalendar=*-*-* 03:00:00
+OnCalendar=*-*-* 03:30:00
+OnCalendar=*-*-* 04:00:00
+OnCalendar=*-*-* 04:30:00
+OnCalendar=*-*-* 05:00:00
+OnCalendar=*-*-* 05:30:00
+OnCalendar=*-*-* 06:00:00
 
 [Install]
 WantedBy=timers.target

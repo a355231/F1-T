@@ -238,13 +238,34 @@ to a person (they can sign in again with the team code; change the code to keep 
 **Alerts.** A yellow banner appears for everyone when the Pi is almost out of disk space or memory,
 when App Inventor stops answering, or when a newer version of this software exists.
 
-**Version, updates, restarts.** `/opt/appinventor/show-info.sh` shows the version. A systemd timer
-(`collab-update.timer`) checks GitHub at about 4 am and, if nobody is online, installs the newer
-version by itself (keeping projects, backups and the team code; the previous build is kept in
-`/opt/appinventor/war.previous`). Choose with `sudo /opt/appinventor/update.sh --mode
-install|notify|off`, or update now with `sudo /opt/appinventor/update.sh --now`. This trusts
-whatever is on the branch you installed from. `collab-watchdog.timer` restarts App Inventor or the
-hub if they stop answering for 3 minutes.
+**Version, updates, restarts.** `/opt/appinventor/show-info.sh` shows the version.
+
+**Nightly updates.** Every night at **3 AM** a systemd timer (`collab-update.timer`) checks the
+branch on GitHub. If there is something new, it downloads it and **builds it while the current
+version keeps running**. Only when the build has succeeded is the new version installed and
+started. If people are online at 3 AM, it tries again every half hour until 6 AM, and it never
+interrupts a session. Your projects, backups, team code and OpenRouter settings are never touched.
+
+**If the new version fails, it goes back.** A failed build, or a new version that does not answer
+within 10 minutes, puts the previous version back automatically. Everyone who opens the link then
+sees a red notice at the top of the page, saying which step failed and that the previous version
+is running again. The notice goes away after the next update that works. The log is
+`/opt/appinventor/update.log` (`sudo tail -n 60 /opt/appinventor/update.log`).
+
+The previous version is kept in `/opt/appinventor/rollback`, so you can go back by hand with
+`sudo /opt/appinventor/update.sh --rollback`. Commands:
+* `--check` says whether a newer version exists, without installing it.
+* `--now` updates right away, even if people are online.
+* `--mode install|notify|off` chooses what the nightly run does: install (the default), only
+  report that a newer version exists, or nothing.
+* `--now --simulate-failure=compile` or `=start` rehearses a failure and the way back. The `start`
+  rehearsal does a real build first.
+
+Whoever runs the Pi should know that a "successful" update means the new version starts and
+answers. It does not check that every feature works. The updater trusts whatever is on the branch
+it was installed from. Its test, `collab/pi/test/update-test.sh`, runs on any machine.
+
+`collab-watchdog.timer` restarts App Inventor or the hub if they stop answering for 3 minutes.
 
 **Fewer writes to the SD card.** The installer runs `/opt/appinventor/protect-sd.sh`: system logs in
 memory, `noatime`, `/tmp` and swap in memory (zram), gentler write-back, and the datastore saved

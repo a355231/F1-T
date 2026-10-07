@@ -72,6 +72,27 @@ function clientAddress(req) {
   return addr.startsWith('::ffff:') ? addr.slice(7) : addr;
 }
 
+// After a failed update, update.sh leaves a notice in DATA_DIR/update-failed. Every page of App
+// Inventor shows it, to whoever opens the link, until a later update succeeds.
+function updateNotice() {
+  try {
+    return fs.readFileSync(DATA_DIR + '/update-failed', 'utf8').trim();
+  } catch (e) {
+    return '';
+  }
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+function withNotice(html, text) {
+  const banner = '<div id="aicollab-update-notice" style="position:fixed;left:0;right:0;top:0;z-index:99999;' +
+    'background:#b00020;color:#fff;padding:10px 14px;font:14px/1.4 sans-serif;text-align:center;' +
+    'box-shadow:0 2px 8px rgba(0,0,0,.3)">' + escapeHtml(text) + '</div>';
+  return /<\/body>/i.test(html) ? html.replace(/<\/body>/i, () => banner + '</body>') : html + banner;
+}
+
 function proxy(req, res) {
   // Only the hub itself may ask App Inventor for full-app changes (see ai.js), so a browser's copy
   // of this header is dropped here.
@@ -123,6 +144,22 @@ function proxy(req, res) {
           res.writeHead(200, outHeaders);
           res.end(body);
         }
+      });
+      upstreamRes.on('error', () => res.destroy());
+      return;
+    }
+    const notice = upstreamRes.statusCode === 200 && /text\/html/i.test(String(outHeaders['content-type'] || ''))
+      ? updateNotice() : '';
+    if (notice) {
+      const chunks = [];
+      upstreamRes.on('data', c => chunks.push(c));
+      upstreamRes.on('end', () => {
+        const page = Buffer.from(withNotice(Buffer.concat(chunks).toString('utf8'), notice), 'utf8');
+        delete outHeaders['content-encoding'];
+        delete outHeaders['transfer-encoding'];
+        outHeaders['content-length'] = page.length;
+        res.writeHead(200, outHeaders);
+        res.end(page);
       });
       upstreamRes.on('error', () => res.destroy());
       return;
@@ -213,6 +250,7 @@ const server = http.createServer((req, res) => {
         hits: staticCache.hits, misses: staticCache.misses},
       uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
       alerts,
+      updateFailed: updateNotice() || null,
     }, null, 2));
     return;
   }

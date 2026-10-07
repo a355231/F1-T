@@ -9,6 +9,10 @@ const http = require('node:http');
 const path = require('node:path');
 const {spawn} = require('node:child_process');
 const WebSocket = require('ws');
+const fs = require('node:fs');
+const os = require('node:os');
+
+let dataDir;
 
 let upstream, hubProcess, hubPort, externalPort, lastCodeChange;
 const backupCalls = [];
@@ -22,6 +26,7 @@ function listen(server) {
 
 test.before(async () => {
   lastCodeChange = {at: 0, by: '', signedOut: false};
+  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aidata-'));
   // The stand-in's cookie is just "AppInventor=<name>"; "AppInventor=gone" is a signed-out login.
   upstream = http.createServer((req, res) => {
     const name = (/AppInventor=([a-z0-9]+)/.exec(req.headers.cookie || '') || [])[1];
@@ -54,6 +59,10 @@ test.before(async () => {
       hits[url.pathname] = (hits[url.pathname] || 0) + 1;
       return res.end(JSON.stringify({rows: BIG}));
     }
+    if (url.pathname === '/html-page') {
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      return res.end('<html><body><p>page</p></body></html>');
+    }
     if (url.pathname === '/echo-headers') {
       return res.end(JSON.stringify(req.headers));
     }
@@ -71,7 +80,7 @@ test.before(async () => {
   externalPort = hubPort + 10000;
   hubProcess = spawn('node', [path.join(__dirname, '..', 'hub.js')], {
     env: Object.assign({}, process.env, {PORT: String(hubPort), HOST: '127.0.0.1',
-      EXTERNAL_PORT: String(externalPort), BACKUP_MS: '300', AI_DATA_DIR: '/nonexistent',
+      EXTERNAL_PORT: String(externalPort), BACKUP_MS: '300', AI_DATA_DIR: dataDir,
       AI_UPSTREAM: 'http://127.0.0.1:' + upstreamPort}),
     stdio: ['ignore', 'pipe', 'inherit'],
   });
@@ -275,4 +284,17 @@ test('files with a hash in their name are cached for a year; dynamic replies are
 test('a browser cannot ask App Inventor for full-app changes; the hub removes that header', async () => {
   const r = await fetchRaw('/echo-headers', {'x-collab-ai-mode': 'full'});
   assert.strictEqual(JSON.parse(r.body.toString())['x-collab-ai-mode'], undefined);
+});
+
+test('after a failed update every page shows the notice, until the file is removed', async () => {
+  const file = path.join(dataDir, 'update-failed');
+  fs.writeFileSync(file, 'The automatic update failed <test>.');
+  const shown = (await fetchRaw('/html-page')).body.toString();
+  assert.match(shown, /id="aicollab-update-notice"/);
+  assert.match(shown, /update failed &lt;test&gt;\./, 'the text is escaped');
+  assert.match(shown, /<\/div><\/body>/, 'the notice is placed before the end of the page');
+  const status = JSON.parse((await fetchRaw('/collab/status')).body.toString());
+  assert.strictEqual(status.updateFailed, 'The automatic update failed <test>.');
+  fs.unlinkSync(file);
+  assert.doesNotMatch((await fetchRaw('/html-page')).body.toString(), /aicollab-update-notice/);
 });
