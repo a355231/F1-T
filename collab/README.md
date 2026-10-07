@@ -14,8 +14,10 @@ mouse cursor with a name for each teammate who is working in the same project.
 | Designer: add, move, delete, rename components, change any property | Yes |
 | Which screen and editor each person is in, who is testing on a companion | Yes (Team panel) |
 | Where each teammate's mouse is, with their name | Yes, every 5 seconds (see below) |
-| Each person's companion (phone or iPad) | No, see below |
-| New screens, uploaded media, project properties dialogs | Saved to the server; teammates see them after reopening the project |
+| Each person's companion (phone or iPad) | Yes, every 5 seconds (can be switched off), see below |
+| New and removed screens, uploaded and deleted media | Yes, within a couple of seconds |
+| Project properties dialogs | Saved to the server; teammates see them after reopening the project |
+| What a teammate has selected, block locks, recent changes, chat | Yes (Team panel and outlines) |
 
 **Teammates' mouse cursors.** While you are in the blocks editor or looking at the designer's phone
 preview, everyone else in the same project sees a second cursor: an arrow with the name you signed
@@ -28,10 +30,12 @@ screen and the same editor (Designer or Blocks) as that person, and it disappear
 leaves the workspace or preview, or when they close the project.
 
 **Companions.** Everyone runs their own companion, connected from their own App Inventor
-window. Your own edits reach your companion right away, as usual. Teammates' edits do **not**
-reach your companion while you are testing. The Team panel shows "N waiting". To load them, use
-**Connect › Reset Connection** and connect again. They are also loaded when you switch screens or
-make a designer change of your own, because the companion then reloads the whole screen.
+window. Your own edits reach your companion right away, as usual. By default your teammates'
+changes are sent to *your* companion too, **every 5 seconds** (only what changed, so your running
+app is not restarted for a block edit). If someone is demonstrating on an iPad and does not want
+the app to change under them, they untick **Update my companion with teammates' changes** in the
+Team panel. Then the panel shows "N waiting", and **Load teammates' changes now** (or
+**Connect › Reset Connection**) brings them in when they are ready.
 
 **Saving.** Projects are saved on the server (the Raspberry Pi) as in normal App Inventor. While
 several people have a project open, only one client, marked **main** in the Team panel, writes it
@@ -196,18 +200,99 @@ every sign-in. If you empty that file, sign-in is switched off, again without a 
 
 Live testing with the MIT AI2 Companion works without anything else. **Build › Android App**
 needs App Inventor's build server, which can't run on the Pi because Android's build tools are
-x86-only. Run it on one of the PCs (`cd appinventor/buildserver && ant RunLocalBuildServer`), then
-on the Pi set `build.server.host` in `/opt/appinventor/war/WEB-INF/appengine-web.xml` to
-`<pc-address>:9990` and restart: `sudo systemctl restart appinventor`.
+x86-only. Run it on one of the PCs (`collab/pc/build-server.sh`), then on the Pi run
+`sudo /opt/appinventor/set-build-server.sh <pc-address>:9990`.
+
+## More team features
+
+**The 30-second syncer.** Live edits can occasionally go missing (a lost connection, two people
+dragging the same block). Every 30 seconds the hub asks everyone for a short fingerprint of the
+screens people are on and compares each person's with the main client's. If someone's blocks differ
+two rounds in a row (and nobody was editing at the time), they get the main client's blocks; if
+their designer differs, their page reloads from the main client's saved copy. A screen is never
+re-synced more than twice in 10 minutes, so a harmless difference cannot cause a loop. A teammate's
+edits that cannot be applied for 30 seconds are replayed from the hub's log.
+
+**Backups and going back.** While a project is open, it is backed up **every minute, but only if it
+changed** (a backup is a zip of the project's source files in `/opt/appinventor/backups/<project>/`).
+All of the last hour is kept, then one per 10 minutes for a day, one per hour for a week and one
+per day, at most 400. To go back: in **My Projects**, **right-click** the project, choose **Go back
+to an earlier version…**, and press **Restore** next to a time. A backup of the current version is
+made first (so a restore can itself be undone), everyone who has the project open stops saving and
+reloads. Right-click › **Back up now** makes one at once.
+
+**Following, outlines, locks, changes, chat.** In the Team panel:
+* **follow** next to a teammate takes you to whatever they are looking at (project, screen,
+  Designer or Blocks) and keeps following until you press **stop following**.
+* A block a teammate has selected gets an outline in their colour with their name (and "is typing…"
+  while they edit a field).
+* **Block locks:** the block you select is yours for about a minute (renewed while it stays
+  selected). Others can look but a click on it says who is editing it. Locks are a courtesy that
+  the browsers enforce, not a security feature; you can switch them off in the panel for yourself.
+* **Recent changes** ("Sam added Button2 on Screen1") and a per-project **Chat**.
+
+**Admin page** (`/collab/admin`, any signed-in person): who is online and where, **Sign out** next
+to a person (they can sign in again with the team code; change the code to keep someone out), and
+**Sign everyone out** (asks for the team code). It also shows the version and alerts.
+
+**Alerts.** A yellow banner appears for everyone when the Pi is almost out of disk space or memory,
+when App Inventor stops answering, or when a newer version of this software exists.
+
+**Version, updates, restarts.** `/opt/appinventor/show-info.sh` shows the version. A systemd timer
+(`collab-update.timer`) checks GitHub at about 4 am and, if nobody is online, installs the newer
+version by itself (keeping projects, backups and the team code; the previous build is kept in
+`/opt/appinventor/war.previous`). Choose with `sudo /opt/appinventor/update.sh --mode
+install|notify|off`, or update now with `sudo /opt/appinventor/update.sh --now`. This trusts
+whatever is on the branch you installed from. `collab-watchdog.timer` restarts App Inventor or the
+hub if they stop answering for 3 minutes.
+
+**Fewer writes to the SD card.** The installer runs `/opt/appinventor/protect-sd.sh`: system logs in
+memory, `noatime`, `/tmp` and swap in memory (zram), gentler write-back, and the datastore saved
+every 2 minutes instead of every 30 seconds (a power cut can lose the last 2 minutes of edits,
+and the minute-by-minute backups survive). Backups are skipped when nothing changed.
+`protect-sd.sh --status` shows how much has been written since boot. To move projects and backups
+to a USB stick or SSD (ext4): `sudo /opt/appinventor/move-data.sh /mnt/usb` (and `--undo`).
+Logs live in memory now, so after a reboot `journalctl` starts empty.
+
+**A link that never changes.** The Cloudflare quick tunnel gets a new address when it restarts.
+For a fixed one, install Tailscale on the Pi (`curl -fsSL https://tailscale.com/install.sh | sh`,
+`sudo tailscale up`) and run `sudo /opt/appinventor/stable-link.sh`; it turns on Tailscale Funnel
+and prints your `https://….ts.net` address. Both links work at the same time.
+
+**Build server.** Build › Android App needs the build server on an x86 PC: run
+`collab/pc/build-server.sh` there, then on the Pi
+`sudo /opt/appinventor/set-build-server.sh <pc-address>:9990` (kept across updates).
+
+## AI helper
+
+Press **Ctrl+I+M** (hold Ctrl and I, then M), or use **AI helper** in the Team panel, to open the
+helper in its own window. It can read the open project's designer and blocks files, answer
+questions about them, and **propose** small bug fixes or additions. It will decline to build a
+whole app. Nothing changes until someone presses **Apply**; then App Inventor refuses anything
+but a small change (1 to 3 existing screen or blocks files, no file more than 50% bigger), makes a
+backup first, and everyone reloads. The change is on the same footing as a restore, so it can be
+undone from the backups list. Questions are limited to 12 a minute per person and 300 a day for the
+team.
+
+The helper uses OpenRouter. The key and the model name are **not in the source**; set them on the
+Pi: `sudo /opt/appinventor/set-ai.sh` (asks for both, hidden, stored in `/opt/appinventor/ai.env`
+readable only by root, never sent to browsers). `--status` and `--off` also exist. Remember that
+anyone with the team code can use the helper, and that the project's files are sent to OpenRouter's
+model when someone asks a question.
+
+## Speed
+
+The hub reuses its connections to App Inventor, compresses text (Brotli or gzip) on the way to the
+browser, and keeps scripts, images and styles in memory with long-lived cache headers, so a
+returning browser downloads almost nothing. The App Inventor service starts with a larger Java
+heap. `/collab/status` shows the cache's hits and misses.
 
 ## Limits
 
 * Edits are applied in the order the hub receives them. If two people drag the *same* block or
   change the *same* property at the same instant, the last one wins and the two screens can
   briefly differ. Reopening the project brings everyone back in line.
-* Adding or removing a screen, uploading media, and changing project properties are saved, but
-  teammates only see them after reopening the project. The Team panel says when a teammate is
-  editing a screen you don't have yet.
+* Changing project properties is saved, but teammates only see it after reopening the project.
 * Undo (Ctrl+Z) only undoes your own block edits.
 * If the hub goes down, everyone keeps working and saving on their own, as in normal App
   Inventor. Live sharing resumes when the hub comes back. Close and reopen the project then, so

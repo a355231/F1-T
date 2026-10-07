@@ -96,3 +96,71 @@ test('restoring starts the session over and tells everyone to reload', () => {
   hub.join(c.id, '5', {projectName: 'P', ownerEmail: 'a@team.local'});
   assert.deepStrictEqual(all(c.id, 'joined').pop().log, []);
 });
+
+test('chat is cleaned up, rate limited, kept for late joiners and only for the project', () => {
+  const {hub, all, pair, advance} = setup();
+  const {a, b} = pair();
+  const outsider = hub.addClient({userId: 'u9', email: 'z@team.local'});
+  hub.chat(a.id, '  hello\u0007 there  ');
+  assert.strictEqual(all(b.id, 'chat')[0].item.text, 'hello  there');
+  assert.strictEqual(all(outsider.id, 'chat').length, 0);
+  hub.chat(a.id, 'too fast');
+  assert.strictEqual(all(b.id, 'chat').length, 1);
+  advance(1000);
+  hub.chat(a.id, 'x'.repeat(2000));
+  assert.strictEqual(all(b.id, 'chat')[1].item.text.length, 500);
+  const c = hub.addClient({userId: 'u3', email: 'c@team.local'});
+  hub.join(c.id, '5', {projectName: 'P', ownerEmail: 'a@team.local'});
+  assert.strictEqual(all(c.id, 'joined').pop().chat.length, 2);
+});
+
+test('recent changes name what happened and fold repeats together', () => {
+  const {hub, all, pair, advance} = setup();
+  const {a, b} = pair();
+  hub.op(a.id, {projectId: '5', screen: 'Screen1', kind: 'designer',
+    data: {op: 'addmove', uuid: '1', b: JSON.stringify({$Name: 'Button2', $Type: 'Button'})}});
+  assert.strictEqual(all(b.id, 'activity')[0].item.text, 'added Button2 on Screen1');
+  for (let i = 0; i < 3; i++) {
+    advance(1000);
+    hub.op(a.id, {projectId: '5', screen: 'Screen1', kind: 'blocks', data: {type: 'move'}});
+  }
+  const lines = all(b.id, 'activity');
+  assert.strictEqual(lines.length, 2, 'three moves are one line');
+  const room = hub.rooms.get('5');
+  assert.strictEqual(room.activity[1].count, 3);
+  hub.op(a.id, {projectId: '5', screen: '', kind: 'tree', data: {}});
+  assert.match(room.activity[2].text, /screens or media/);
+});
+
+test('a block can be claimed by one person at a time, and is freed when they let go or leave', () => {
+  const {hub, all, pair, advance} = setup();
+  const {a, b} = pair();
+  assert.strictEqual(hub.lock(a.id, {screen: 'Screen1', blockId: 'blk1'}), true);
+  assert.strictEqual(hub.lock(b.id, {screen: 'Screen1', blockId: 'blk1'}), false);
+  assert.strictEqual(all(b.id, 'lock-denied')[0].name, 'a');
+  assert.strictEqual(hub.lock(b.id, {screen: 'Screen1', blockId: 'blk2'}), true);
+  hub.unlock(b.id, {screen: 'Screen1', blockId: 'blk1'});          // not b's: ignored
+  assert.strictEqual(hub.lock(b.id, {screen: 'Screen1', blockId: 'blk1'}), false);
+  advance(30000);
+  assert.strictEqual(hub.lock(a.id, {screen: 'Screen1', blockId: 'blk1'}), true);   // renewed
+  advance(45000);
+  assert.strictEqual(hub.lock(b.id, {screen: 'Screen1', blockId: 'blk1'}), false, 'still a\'s');
+  advance(30000);
+  assert.strictEqual(hub.lock(b.id, {screen: 'Screen1', blockId: 'blk1'}), true, 'expired');
+  hub.removeClient(b.id);
+  assert.deepStrictEqual(hub.lockList(hub.rooms.get('5')), []);
+});
+
+test('selections reach the others, are rate limited and vanish when the person leaves', () => {
+  const {hub, all, pair, advance} = setup();
+  const {a, b} = pair();
+  hub.select(a.id, {screen: 'Screen1', blockId: 'b1', typing: true});
+  assert.deepStrictEqual(all(b.id, 'sel')[0].blockId, 'b1');
+  assert.strictEqual(all(b.id, 'sel')[0].typing, true);
+  hub.select(a.id, {screen: 'Screen1', blockId: 'b2'});
+  assert.strictEqual(all(b.id, 'sel').length, 1, 'too soon');
+  advance(1000);
+  hub.select(a.id, {screen: 'Screen1', blockId: 'b2'});
+  hub.leave(a.id);
+  assert.strictEqual(all(b.id, 'sel').pop().blockId, null);
+});

@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly check for a newer App Inventor Team Edition
+
+[Timer]
+# 4 am, and every hour until 8 am if somebody was still online
+OnCalendar=*-*-* 04,05,06,07:00:00
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart App Inventor or the collaboration hub if they stop answering
+
+[Service]
+Type=oneshot
+ExecStart=/opt/appinventor/watchdog.sh

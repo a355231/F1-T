@@ -98,6 +98,9 @@
   }
 
   function onMessage(msg) {
+    if (C.onExtra) {
+      C.onExtra(msg);
+    }
     switch (msg.t) {
       case 'hello':
         C.me = msg.you;
@@ -247,6 +250,12 @@
   }
 
   function enqueue(op) {
+    if (op.kind === 'tree') {
+      if (C.onTreeOp) {
+        C.onTreeOp(op);
+      }
+      return;
+    }
     if (op.seq <= appliedFor(op.screen)) {
       return;
     }
@@ -393,6 +402,9 @@
   };
 
   C.onBlocklyEvent = function(workspace, e) {
+    if (C.onUiEvent && e && e.type === 'selected') {
+      C.onUiEvent(workspace, e);
+    }
     if (!workspace || !e || e.isUiEvent || e.type === 'ui' ||
         BLOCK_EVENT_TYPES.indexOf(e.type) < 0) {
       return;
@@ -424,6 +436,20 @@
     if (C.isJoined(projectId)) {
       send({t: 'op', projectId: String(projectId), screen: screen, kind: 'designer', data: op});
     }
+  };
+
+  C.sendTreeChanged = function(projectId) {
+    if (C.isJoined(projectId)) {
+      send({t: 'op', projectId: String(projectId), screen: '', kind: 'tree', data: {}});
+    }
+  };
+
+  C.send = send;
+  C.context = context;
+  C.companionConnected = function() { return companionConnected(); };
+  C.render = function() {
+    lastRender = '';
+    render();
   };
 
   C.clearHolds = function() {
@@ -914,7 +940,7 @@
       return C.queues[s].length && !C.workspaces[C.joined + '_' + s];
     });
     var key = JSON.stringify([C.connected, C.roster, C.me && C.me.id, C.joined, C.expanded, held,
-      waiting, C.notice]);
+      waiting, C.notice, C.extraKey ? C.extraKey() : '']);
     if (key === lastRender) {
       return;
     }
@@ -985,6 +1011,9 @@
     }
     if (C.notice) {
       body.appendChild(el('div', 'aic-note', C.notice));
+    }
+    if (C.extraBody) {
+      C.extraBody(body);
     }
     var actions = el('div');
     actions.style.marginTop = '6px';

@@ -15,9 +15,15 @@ const net = require('net');
 const os = require('os');
 const {WebSocketServer} = require('ws');
 const {Hub, SYNC_MS} = require('./rooms');
+const perf = require('./perf');
+const staticCache = new perf.StaticCache();
+const {Assistant} = require('./ai');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
+// A second listener for tunnels that connect from this machine (Tailscale Funnel). Everything that
+// arrives on it counts as coming from the internet, so the Pi-only pages stay closed.
+const EXTERNAL_PORT = parseInt(process.env.EXTERNAL_PORT || '0', 10);
 const UPSTREAM = new URL(process.env.AI_UPSTREAM || 'http://127.0.0.1:8888');
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 const BACKUP_MS = parseInt(process.env.BACKUP_MS || '60000', 10);
@@ -33,7 +39,7 @@ const hub = new Hub((id, msg) => {
   const ws = sockets.get(id);
   if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 });
-setInterval(() => hub.sweep(), 60 * 1000).unref();
+setInterval(() => hub.sweep(), 10 * 1000).unref();
 
 function forwardedProto(req) {
   const p = req.headers['x-forwarded-proto'];
@@ -59,15 +65,35 @@ function clientAddress(req) {
   const addr = req.socket.remoteAddress || '';
   const viaTunnel = req.headers['cf-connecting-ip'];
   if (isLoopback(addr) && viaTunnel) return String(viaTunnel).trim();
+  const fwd = req.headers['x-forwarded-for'];
+  if (isLoopback(addr) && fwd && req.socket.server && req.socket.server.external) {
+    return String(fwd).split(',')[0].trim();
+  }
   return addr.startsWith('::ffff:') ? addr.slice(7) : addr;
 }
 
 function proxy(req, res) {
+  const cacheable = perf.isCacheable(req);
+  if (cacheable) {
+    const entry = staticCache.get(req.url);
+    if (entry) {
+      staticCache.hits++;
+      staticCache.serve(req, res, entry).catch(() => res.destroy());
+      return;
+    }
+  }
   const headers = Object.assign({}, req.headers);
   headers['x-forwarded-for'] = clientAddress(req);
   headers['x-forwarded-host'] = req.headers.host || '';
   headers['x-forwarded-proto'] = forwardedProto(req);
+  // The hub does the compressing, so App Inventor's replies come plain.
+  headers['accept-encoding'] = 'identity';
+  if (cacheable) {
+    delete headers['if-none-match'];
+    delete headers['if-modified-since'];
+  }
   const upstreamReq = http.request({
+    agent: perf.agent,
     hostname: UPSTREAM.hostname,
     port: UPSTREAM.port || 80,
     method: req.method,
@@ -76,8 +102,36 @@ function proxy(req, res) {
   }, upstreamRes => {
     const outHeaders = Object.assign({}, upstreamRes.headers);
     if (outHeaders.location) outHeaders.location = fixLocation(outHeaders.location, req);
+    if (cacheable && upstreamRes.statusCode === 200 && !outHeaders['set-cookie'] &&
+        parseInt(outHeaders['content-length'] || '0', 10) <= perf.MAX_ENTRY_BYTES) {
+      // Keep it for next time, and answer from the copy.
+      staticCache.misses++;
+      const chunks = [];
+      let size = 0;
+      upstreamRes.on('data', c => { chunks.push(c); size += c.length; });
+      upstreamRes.on('end', () => {
+        const body = Buffer.concat(chunks, size);
+        const entry = staticCache.put(req.url, outHeaders, body);
+        if (entry) {
+          staticCache.serve(req, res, entry).catch(() => res.destroy());
+        } else {
+          delete outHeaders['content-encoding'];
+          outHeaders['content-length'] = body.length;
+          res.writeHead(200, outHeaders);
+          res.end(body);
+        }
+      });
+      upstreamRes.on('error', () => res.destroy());
+      return;
+    }
+    const compressor = perf.compressStream(req, upstreamRes, outHeaders);
     res.writeHead(upstreamRes.statusCode, upstreamRes.statusMessage, outHeaders);
-    upstreamRes.pipe(res);
+    if (compressor) {
+      upstreamRes.pipe(compressor).pipe(res);
+      compressor.on('error', () => res.destroy());
+    } else {
+      upstreamRes.pipe(res);
+    }
   });
   upstreamReq.on('error', err => {
     if (!res.headersSent) {
@@ -88,15 +142,17 @@ function proxy(req, res) {
   req.pipe(upstreamReq);
 }
 
-function askAppInventor(path, cookie, method = 'GET') {
+function askAppInventor(path, cookie, method = 'GET', body = null) {
   return new Promise(resolve => {
     const req = http.request({
+      agent: perf.agent,
       hostname: UPSTREAM.hostname,
       port: UPSTREAM.port || 80,
       method,
       path,
       headers: Object.assign({cookie: cookie || '', accept: 'application/json'},
-        method === 'GET' ? {} : {'content-length': '0'}),
+        method === 'GET' ? {} : body === null ? {'content-length': '0'} :
+          {'content-length': Buffer.byteLength(body), 'content-type': 'application/json'}),
       timeout: 30000,
     }, res => {
       let body = '';
@@ -113,7 +169,7 @@ function askAppInventor(path, cookie, method = 'GET') {
     });
     req.on('timeout', () => req.destroy());
     req.on('error', () => resolve(null));
-    req.end();
+    req.end(body === null ? undefined : body);
   });
 }
 
@@ -121,6 +177,7 @@ function askAppInventor(path, cookie, method = 'GET') {
 // lets anyone sign in as anyone, must only be usable from the Pi itself, never through the LAN or
 // the Cloudflare tunnel (cloudflared runs on the Pi, so tunnel requests carry cf-connecting-ip).
 function isFromPiItself(req) {
+  if (req.socket.server && req.socket.server.external) return false;
   return isLoopback(req.socket.remoteAddress || '') && !req.headers['cf-connecting-ip'] &&
     !req.headers['x-forwarded-for'];
 }
@@ -130,7 +187,10 @@ function isPiOnlyPath(url) {
   return path.startsWith('/_ah/') || path === '/_ah' || path.startsWith('/login/google');
 }
 
+const ai = new Assistant({ask: askAppInventor, hub});
+
 const server = http.createServer((req, res) => {
+  req.socket.setNoDelay(true);
   if (isPiOnlyPath(req.url) && !isFromPiItself(req)) {
     res.writeHead(403, {'content-type': 'text/plain'});
     res.end('This page is only available on the Raspberry Pi itself.');
@@ -145,9 +205,15 @@ const server = http.createServer((req, res) => {
         editor: c.editor, companion: c.companion, main: c.main})),
       rooms: s.rooms.map(r => ({members: r.members.length, ops: r.ops})),
       version: readVersion(),
+      cache: {entries: staticCache.entries.size, mb: Math.round(staticCache.bytes / 104857.6) / 10,
+        hits: staticCache.hits, misses: staticCache.misses},
       uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
       alerts,
     }, null, 2));
+    return;
+  }
+  if (req.url.split('?')[0].startsWith('/collab/ai')) {
+    ai.handle(req, res);
     return;
   }
   if (req.url.split('?')[0].startsWith('/collab/admin')) {
@@ -159,7 +225,7 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({noServer: true, maxPayload: MAX_MESSAGE_BYTES});
 
-server.on('upgrade', async (req, socket, head) => {
+async function onUpgrade(req, socket, head) {
   if (!req.url.startsWith('/collab/ws')) {
     socket.destroy();
     return;
@@ -172,7 +238,8 @@ server.on('upgrade', async (req, socket, head) => {
     return;
   }
   wss.handleUpgrade(req, socket, head, ws => onConnection(ws, me, cookie));
-});
+}
+server.on('upgrade', onUpgrade);
 
 function onConnection(ws, me, cookie) {
   const client = hub.addClient({userId: me.userId, email: me.email});
@@ -224,6 +291,18 @@ function onConnection(ws, me, cookie) {
       case 'op':
         hub.op(client.id, msg);
         break;
+      case 'chat':
+        hub.chat(client.id, msg.text);
+        break;
+      case 'sel':
+        hub.select(client.id, msg);
+        break;
+      case 'lock':
+        hub.lock(client.id, msg);
+        break;
+      case 'unlock':
+        hub.unlock(client.id, msg);
+        break;
       case 'digest':
         hub.digest(client.id, msg);
         break;
@@ -231,20 +310,22 @@ function onConnection(ws, me, cookie) {
         hub.snapshot(client.id, msg);
         break;
       case 'restoring':
-        // The sender is about to put an older backup back: everyone in the project stops saving.
-        if (client.projectId && now() - (client.restoreAt || 0) > 10 * 1000) {
+      case 'restored': {
+        // Someone is putting an older backup back (they need access to the project to do so):
+        // everyone with the project open stops saving, then reloads.
+        const projectId = String(msg.projectId || '');
+        if (!/^\d+$/.test(projectId)) return;
+        if (msg.t === 'restoring' && now() - client.restoreAt < 2000) return;
+        const access = await askAppInventor('/ode/collab/access?projectId=' + projectId, cookie);
+        if (!access || !access.ok) return;
+        if (msg.t === 'restoring') {
           client.restoreAt = now();
-          hub.broadcastToProject(client.projectId, {t: 'freeze', by: client.name});
+          hub.broadcastToProject(projectId, {t: 'freeze', by: client.name});
+        } else {
+          hub.restored(projectId, client.name);
         }
         break;
-      case 'restored':
-        if (client.projectId) {
-          hub.restored(client.projectId, client.name);
-        }
-        break;
-      case 'ping':
-        ws.send(JSON.stringify({t: 'pong'}));
-        break;
+      }
       default:
         break;
     }
@@ -413,6 +494,10 @@ async function checkHealth() {
   if (!(await portOpen(UPSTREAM.port || 80, UPSTREAM.hostname))) {
     list.push('App Inventor is not answering. It may be restarting; saving is paused.');
   }
+  try {
+    const upd = fs.readFileSync(DATA_DIR + '/update-available', 'utf8').trim();
+    if (upd) list.push('A newer version is available (' + upd + '). Whoever runs the Pi can update it.');
+  } catch (e) { /* none */ }
   if (JSON.stringify(list) !== JSON.stringify(alerts)) {
     alerts = list;
     for (const ws of sockets.values()) {
@@ -422,6 +507,13 @@ async function checkHealth() {
 }
 setInterval(checkHealth, 30 * 1000).unref();
 setTimeout(checkHealth, 3000).unref();
+
+if (EXTERNAL_PORT) {
+  const external = http.createServer(server.listeners('request')[0]);
+  external.external = true;
+  external.on('upgrade', onUpgrade);
+  external.listen(EXTERNAL_PORT, '127.0.0.1');
+}
 
 server.listen(PORT, HOST, () => {
   console.log(`App Inventor collaboration hub on http://${HOST}:${PORT} -> ${UPSTREAM.href}`);

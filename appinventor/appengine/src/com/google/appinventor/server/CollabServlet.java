@@ -32,6 +32,8 @@ import org.json.JSONObject;
  *   POST /ode/collab/backup?projectId=N        (no-op if unchanged since the newest backup)
  *   GET  /ode/collab/backups?projectId=N
  *   POST /ode/collab/restore?projectId=N&amp;id=BACKUP_ID
+ *   GET  /ode/collab/files?projectId=N, /file?projectId=N&path=P   (read a project's source)
+ *   POST /ode/collab/writefiles?projectId=N     (a few small .scm/.bky changes; backup first)
  *   POST /ode/collab/kick?name=NAME            (signs that person out; the hub drops them)
  *   GET  /ode/collab/lastcodechange   (lets the hub check an announcement of a change)
  * </pre>
@@ -176,6 +178,44 @@ public class CollabServlet extends OdeServlet {
           send(resp, 200, new JSONObject().put("ok", true).put("files", n));
           return;
         }
+        case "/files": {
+          long projectId = projectId(req);
+          storageIo.assertUserHasProject(userId, projectId);
+          JSONArray list = new JSONArray();
+          for (String f : storageIo.getProjectSourceFiles(userId, projectId)) {
+            byte[] content = storageIo.downloadRawFile(userId, projectId, f);
+            list.put(new JSONObject().put("path", f).put("bytes", content == null ? 0 : content.length));
+          }
+          send(resp, 200, new JSONObject().put("ok", true).put("files", list));
+          return;
+        }
+        case "/file": {
+          long projectId = projectId(req);
+          storageIo.assertUserHasProject(userId, projectId);
+          String file = req.getParameter("path");
+          if (file == null || !storageIo.getProjectSourceFiles(userId, projectId).contains(file)) {
+            send(resp, HttpServletResponse.SC_NOT_FOUND, error("no such file"));
+            return;
+          }
+          byte[] content = storageIo.downloadRawFile(userId, projectId, file);
+          boolean text = file.endsWith(".scm") || file.endsWith(".bky") || file.endsWith(".properties")
+              || file.endsWith(".json") || file.endsWith(".txt") || file.endsWith(".csv");
+          send(resp, 200, new JSONObject().put("ok", true).put("path", file)
+              .put("bytes", content.length)
+              .put("text", text ? new String(content, java.nio.charset.StandardCharsets.UTF_8)
+                  : JSONObject.NULL));
+          return;
+        }
+        case "/writefiles": {
+          if (!post) {
+            send(resp, HttpServletResponse.SC_METHOD_NOT_ALLOWED, error("use POST"));
+            return;
+          }
+          long projectId = projectId(req);
+          storageIo.assertUserHasProject(userId, projectId);
+          writeFiles(userId, projectId, req, resp);
+          return;
+        }
         case "/teamcode":
           if (!post) {
             send(resp, HttpServletResponse.SC_METHOD_NOT_ALLOWED, error("use POST"));
@@ -249,6 +289,61 @@ public class CollabServlet extends OdeServlet {
         + (saved ? "" : " (not saved to a file: it lasts until the next restart)"));
     send(resp, 200, new JSONObject().put("ok", true).put("saved", saved)
         .put("signedOut", signedOut));
+  }
+
+  private static final int MAX_WRITE_FILES = 3;
+  private static final int MAX_WRITE_BYTES = 400 * 1024;
+
+  /**
+   * Changes a few designer (.scm) and blocks (.bky) files of a project; used by the AI helper.
+   * Body: {"files": {"path": "new content", ...}}. Only files that exist can be changed, a file
+   * may not grow by more than half (plus 4 KB), and a backup is made first, so it can be undone.
+   */
+  private void writeFiles(String userId, long projectId, HttpServletRequest req,
+      HttpServletResponse resp) throws IOException {
+    StringBuilder body = new StringBuilder();
+    char[] buf = new char[8192];
+    int n;
+    java.io.Reader reader = req.getReader();
+    while ((n = reader.read(buf)) > 0) {
+      body.append(buf, 0, n);
+      if (body.length() > 2 * 1024 * 1024) {
+        send(resp, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, error("too large"));
+        return;
+      }
+    }
+    JSONObject files = new JSONObject(body.toString()).getJSONObject("files");
+    if (files.length() == 0 || files.length() > MAX_WRITE_FILES) {
+      send(resp, HttpServletResponse.SC_BAD_REQUEST,
+          error("a change touches 1 to " + MAX_WRITE_FILES + " files"));
+      return;
+    }
+    List<String> existing = storageIo.getProjectSourceFiles(userId, projectId);
+    List<String> paths = new java.util.ArrayList<>();
+    for (java.util.Iterator<?> it = files.keys(); it.hasNext();) {
+      paths.add((String) it.next());
+    }
+    for (String path : paths) {
+      String content = files.getString(path);
+      byte[] old = existing.contains(path) ? storageIo.downloadRawFile(userId, projectId, path) : null;
+      if (old == null || !(path.endsWith(".scm") || path.endsWith(".bky"))) {
+        send(resp, HttpServletResponse.SC_BAD_REQUEST,
+            error("only existing screen (.scm) and blocks (.bky) files can be changed: " + path));
+        return;
+      }
+      int size = content.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+      if (size > MAX_WRITE_BYTES || size > old.length * 1.5 + 4096) {
+        send(resp, HttpServletResponse.SC_BAD_REQUEST,
+            error(path + " would change too much for a small fix"));
+        return;
+      }
+    }
+    backups.backup(userId, projectId, System.currentTimeMillis());
+    for (String path : paths) {
+      storageIo.uploadFileForce(projectId, path, userId, files.getString(path), "UTF-8");
+    }
+    LOG.info("AI change applied to project " + projectId + " by " + userInfoProvider.getUserEmail());
+    send(resp, 200, new JSONObject().put("ok", true).put("files", files.length()));
   }
 
   private static long projectId(HttpServletRequest req) {

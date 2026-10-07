@@ -215,6 +215,7 @@ public final class Project {
     // Event if the node already exists, we still call fireProjectNodeAdded so that asset property
     // editors can detect that an asset was updated.
     fireProjectNodeAdded(node);
+    com.google.appinventor.client.collab.Collab.treeChanged(this);
     return node;
   }
 
@@ -229,6 +230,7 @@ public final class Project {
       parent.removeChild(node);
     }
     fireProjectNodeRemoved(node);
+    com.google.appinventor.client.collab.Collab.treeChanged(this);
   }
 
   public void deleteFromTrash() {

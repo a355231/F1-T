@@ -51,7 +51,11 @@ fi
 echo "== Folders and helper scripts"
 mkdir -p /opt/appinventor/war /opt/appinventor/hub /opt/appinventor/tools
 install -m 755 "$HERE/apply-config.sh" "$HERE/set-team-code.sh" "$HERE/tunnel-url.sh" \
-  "$HERE/show-info.sh" /opt/appinventor/
+  "$HERE/show-info.sh" "$HERE/protect-sd.sh" "$HERE/move-data.sh" "$HERE/watchdog.sh" \
+  "$HERE/update.sh" "$HERE/stable-link.sh" "$HERE/set-build-server.sh" "$HERE/set-ai.sh" /opt/appinventor/
+echo "$(cd "$HERE/../.." && pwd)" > /opt/appinventor/repo
+(cd "$HERE" && git rev-parse --short HEAD 2>/dev/null) > /opt/appinventor/version || true
+[ -f /opt/appinventor/update-mode ] || echo install > /opt/appinventor/update-mode
 chown -R "$RUN_AS:$RUN_AS" /opt/appinventor
 
 echo "== Team code"
@@ -66,8 +70,15 @@ for unit in appinventor collab-hub cloudflared-quick; do
   sed -e "s#@USER@#$RUN_AS#g" -e "s#@JAVA_HOME@#$JAVA_HOME#g" \
     "$HERE/systemd/$unit.service" > "/etc/systemd/system/$unit.service"
 done
+for unit in collab-update.service collab-update.timer collab-watchdog.service collab-watchdog.timer; do
+  cp "$HERE/systemd/$unit" "/etc/systemd/system/$unit"
+done
 systemctl daemon-reload
-systemctl enable appinventor collab-hub cloudflared-quick
+systemctl enable appinventor collab-hub cloudflared-quick collab-update.timer collab-watchdog.timer
+systemctl start collab-update.timer collab-watchdog.timer
+
+echo "== Gentler on the SD card"
+/opt/appinventor/protect-sd.sh || true
 
 IP="$(hostname -I | awk '{print $1}')"
 

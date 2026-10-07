@@ -38,6 +38,13 @@ import os
 backup_dir = os.path.join(os.path.dirname(code_path), 'backups')
 os.makedirs(backup_dir, exist_ok=True)
 xml = set_property(xml, 'collab.backup.dir', backup_dir)
+try:
+    with open(os.path.join(os.path.dirname(code_path), 'build-server'), encoding='utf-8') as f:
+        host = f.read().strip()
+    if host:
+        xml = set_property(xml, 'build.server.host', host)
+except OSError:
+    pass
 xml = set_property(xml, 'auth.usegoogle', 'false')
 xml = set_property(xml, 'auth.uselocal', 'true')
 with open(xml_path, 'w', encoding='utf-8') as f:

@@ -1,0 +1,7 @@
+[Unit]
+Description=Check for a newer App Inventor Team Edition and install it when nobody is online
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/appinventor/update.sh

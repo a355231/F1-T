@@ -317,6 +317,154 @@ public final class Collab {
     return form != null && blocks != null && form.isLoadComplete() && blocks.isLoadComplete();
   }
 
+  // New or removed screens and media. The person who made the change sends a "tree" op; the
+  // others fetch the project's file list again and add or remove what differs.
+
+  private static boolean refreshingTree = false;
+
+  /** Called by Project when a node is added or removed by this user. */
+  public static void treeChanged(Project project) {
+    if (refreshingTree) {
+      return;
+    }
+    sendTree(Long.toString(project.getProjectId()));
+  }
+
+  private static native void sendTree(String projectId) /*-{
+    if ($wnd.AICollab && $wnd.AICollab.sendTreeChanged) {
+      $wnd.AICollab.sendTreeChanged(projectId);
+    }
+  }-*/;
+
+  private static void refreshTree(final String projectId) {
+    final long id;
+    try {
+      id = Long.parseLong(projectId);
+    } catch (NumberFormatException e) {
+      return;
+    }
+    final Project project = Ode.getInstance().getProjectManager().getProject(id);
+    if (project == null || project.getRootNode() == null) {
+      return;  // not open here: it is read fresh when opened
+    }
+    Ode.getInstance().getProjectService().getProject(id,
+        new com.google.appinventor.client.OdeAsyncCallback<
+            com.google.appinventor.shared.rpc.project.ProjectRootNode>("refresh") {
+          @Override
+          public void onSuccess(com.google.appinventor.shared.rpc.project.ProjectRootNode fresh) {
+            mergeTree(project, fresh);
+          }
+        });
+  }
+
+  private static void collect(com.google.appinventor.shared.rpc.project.ProjectNode node,
+      List<com.google.appinventor.shared.rpc.project.ProjectNode> out) {
+    for (com.google.appinventor.shared.rpc.project.ProjectNode child : node.getChildren()) {
+      out.add(child);
+      collect(child, out);
+    }
+  }
+
+  private static void mergeTree(Project project,
+      com.google.appinventor.shared.rpc.project.ProjectRootNode fresh) {
+    com.google.appinventor.shared.rpc.project.ProjectRootNode old = project.getRootNode();
+    List<com.google.appinventor.shared.rpc.project.ProjectNode> oldNodes = new ArrayList<>();
+    List<com.google.appinventor.shared.rpc.project.ProjectNode> newNodes = new ArrayList<>();
+    collect(old, oldNodes);
+    collect(fresh, newNodes);
+    Set<String> newIds = new HashSet<>();
+    for (com.google.appinventor.shared.rpc.project.ProjectNode n : newNodes) {
+      newIds.add(n.getFileId());
+    }
+    final List<String> addedScreens = new ArrayList<>();
+    refreshingTree = true;
+    try {
+      for (com.google.appinventor.shared.rpc.project.ProjectNode n : oldNodes) {
+        if (!newIds.contains(n.getFileId())) {
+          if (n instanceof com.google.appinventor.shared.rpc.project.youngandroid.YoungAndroidFormNode) {
+            String screen = ((YoungAndroidSourceNode) n).getFormName();
+            project.deleteNode(n);
+            Ode.getInstance().getDesignToolbar().removeScreen(project.getProjectId(), screen);
+          } else if (!(n instanceof YoungAndroidSourceNode)) {
+            project.deleteNode(n);
+          }
+        }
+      }
+      for (com.google.appinventor.shared.rpc.project.ProjectNode n : newNodes) {
+        if (old.findNode(n.getFileId()) == null) {
+          com.google.appinventor.shared.rpc.project.ProjectNode parent =
+              n.getParent() == null ? null : old.findNode(n.getParent().getFileId());
+          if (parent == null && n.getParent() != null
+              && n.getParent().getFileId().equals(fresh.getFileId())) {
+            parent = old;
+          }
+          if (parent != null) {
+            project.addNode(parent, n);
+            if (n instanceof com.google.appinventor.shared.rpc.project.youngandroid.YoungAndroidFormNode) {
+              addedScreens.add(((YoungAndroidSourceNode) n).getFormName());
+            }
+          }
+        }
+      }
+    } finally {
+      refreshingTree = false;
+    }
+    final long projectId = project.getProjectId();
+    for (final String screen : addedScreens) {
+      Scheduler.get().scheduleDeferred(new Scheduler.ScheduledCommand() {
+        int tries = 0;
+
+        @Override
+        public void execute() {
+          YaProjectEditor editor = projectEditor(Long.toString(projectId));
+          if (editor == null || tries++ > 200) {
+            return;
+          }
+          FileEditor form = editor.getFormFileEditor(screen);
+          FileEditor blocks = editor.getBlocksFileEditor(screen);
+          if (form != null && blocks != null) {
+            Ode.getInstance().getDesignToolbar().addScreen(projectId, screen, form, blocks);
+          } else {
+            Scheduler.get().scheduleDeferred(this);
+          }
+        }
+      });
+    }
+  }
+
+  /** Sends the screen's current blocks and components to the connected companion. */
+  private static void pushCompanion(String projectId, String screen) {
+    YaProjectEditor editor = projectEditor(projectId);
+    if (editor == null) {
+      return;
+    }
+    BlocksEditor<?, ?> blocks = editor.getBlocksFileEditor(screen);
+    if (blocks instanceof YaBlocksEditor) {
+      ((YaBlocksEditor) blocks).sendComponentData(false);
+    }
+  }
+
+  /** Opens a screen in the designer or blocks editor of the project that is open (following). */
+  private static void goTo(String projectId, String screen, String editorName) {
+    long id;
+    try {
+      id = Long.parseLong(projectId);
+    } catch (NumberFormatException e) {
+      return;
+    }
+    com.google.appinventor.client.editor.youngandroid.DesignToolbar.View view =
+        "blocks".equals(editorName)
+            ? com.google.appinventor.client.editor.youngandroid.DesignToolbar.View.BLOCKS
+            : com.google.appinventor.client.editor.youngandroid.DesignToolbar.View.DESIGNER;
+    Ode.getInstance().getDesignToolbar().switchToScreen(id, screen, view);
+  }
+
+  /** The id of the project with this name, or "" (for the project list's right-click menu). */
+  private static String projectIdByName(String name) {
+    Project p = Ode.getInstance().getProjectManager().getProject(name);
+    return p == null ? "" : Long.toString(p.getProjectId());
+  }
+
   /** The screen's designer file as text, for comparing with a teammate's copy ("" if not loaded). */
   private static String designerContent(String projectId, String screen) {
     YaFormEditor form = formEditor(projectId, screen);
@@ -401,6 +549,10 @@ public final class Collab {
     $wnd.AICollab_isScreenReady = $entry(@com.google.appinventor.client.collab.Collab::isScreenReady(Ljava/lang/String;Ljava/lang/String;));
     $wnd.AICollab_setMain = $entry(@com.google.appinventor.client.collab.Collab::setMain(Ljava/lang/String;Z));
     $wnd.AICollab_designerContent = $entry(@com.google.appinventor.client.collab.Collab::designerContent(Ljava/lang/String;Ljava/lang/String;));
+    $wnd.AICollab_refreshTree = $entry(@com.google.appinventor.client.collab.Collab::refreshTree(Ljava/lang/String;));
+    $wnd.AICollab_projectIdByName = $entry(@com.google.appinventor.client.collab.Collab::projectIdByName(Ljava/lang/String;));
+    $wnd.AICollab_pushCompanion = $entry(@com.google.appinventor.client.collab.Collab::pushCompanion(Ljava/lang/String;Ljava/lang/String;));
+    $wnd.AICollab_goTo = $entry(@com.google.appinventor.client.collab.Collab::goTo(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;));
     $wnd.AICollab_saveNow = $entry(@com.google.appinventor.client.collab.Collab::saveNow());
     $wnd.AICollab_getContext = $entry(@com.google.appinventor.client.collab.Collab::getContext());
     if ($wnd.AICollab && $wnd.AICollab.bridgeReady) {

@@ -15,13 +15,15 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
 fi
 
 echo "== Copying to $TARGET"
-rsync -az --delete --exclude 'WEB-INF/appengine-generated/' \
+rsync -az --delete --exclude 'WEB-INF/appengine-generated' \
   "$ROOT/appinventor/appengine/build/war/" "$TARGET:/opt/appinventor/war/"
 rsync -az --delete --exclude node_modules \
   "$ROOT/collab/server/" "$TARGET:/opt/appinventor/hub/"
 rsync -az "$ROOT/appinventor/lib/keyczar/KeyczarTool.jar" "$TARGET:/opt/appinventor/tools/"
 rsync -az --chmod=F755 "$ROOT/collab/pi/apply-config.sh" "$ROOT/collab/pi/set-team-code.sh" \
-  "$ROOT/collab/pi/tunnel-url.sh" "$ROOT/collab/pi/show-info.sh" "$TARGET:/opt/appinventor/"
+  "$ROOT/collab/pi/tunnel-url.sh" "$ROOT/collab/pi/show-info.sh" "$ROOT/collab/pi/protect-sd.sh" \
+  "$ROOT/collab/pi/move-data.sh" "$ROOT/collab/pi/watchdog.sh" "$ROOT/collab/pi/update.sh" \
+  "$ROOT/collab/pi/stable-link.sh" "$ROOT/collab/pi/set-build-server.sh" "$ROOT/collab/pi/set-ai.sh" "$TARGET:/opt/appinventor/"
 
 echo "== Applying the Pi's team code and restarting"
 # The team code stays on the Pi; apply-config.sh copies it into the new build without printing it.

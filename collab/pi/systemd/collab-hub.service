@@ -7,6 +7,9 @@ Wants=network-online.target
 User=@USER@
 WorkingDirectory=/opt/appinventor/hub
 Environment=PORT=8080
+Environment=EXTERNAL_PORT=8081
+# The AI helper's OpenRouter key and model live here, not in the source (see set-ai.sh).
+EnvironmentFile=-/opt/appinventor/ai.env
 Environment=AI_UPSTREAM=http://127.0.0.1:8888
 ExecStart=/usr/bin/node /opt/appinventor/hub/hub.js
 Restart=on-failure

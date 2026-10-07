@@ -20,6 +20,12 @@ const EMPTY_ROOM_TTL_MS = 30 * 60 * 1000;
 // people are on. A follower whose fingerprint differs from the main client's twice in a row (and
 // nothing was being edited at the time) gets the main client's copy.
 const SYNC_MS = 30 * 1000;
+const CHAT_KEEP = 50;
+const CHAT_MAX_CHARS = 500;
+const CHAT_MIN_GAP_MS = 500;
+const ACTIVITY_KEEP = 30;
+const LOCK_MS = 60 * 1000;
+const SEL_MIN_GAP_MS = 400;
 const DIGEST_FRESH_MS = 90 * 1000;
 const QUIET_MS = 5 * 1000;
 const RESYNC_MIN_GAP_MS = 60 * 1000;
@@ -40,7 +46,7 @@ class Hub {
     const client = {id, userId, email, name, color, projectId: null, projectName: '',
       screen: '', editor: '', companion: false, joinedAt: 0, cursor: null,
       cursorAt: -Infinity, noticeAt: -Infinity, digests: {}, strikes: {}, counted: {},
-      resyncAt: -Infinity};
+      resyncAt: -Infinity, selAt: -Infinity, chatAt: -Infinity, sel: null};
     this.clients.set(id, client);
     return client;
   }
@@ -76,8 +82,7 @@ class Hub {
     projectId = String(projectId);
     if (client.projectId === projectId) {
       const current = this.rooms.get(projectId);
-      this.send(id, {t: 'joined', projectId, epoch: current.epoch, leaderId: current.leader,
-        log: current.log, cursors: this.cursorsInRoom(current, id)});
+      this.send(id, this.joinedMessage(current, id));
       return;
     }
     this.leave(id, false);
@@ -85,7 +90,7 @@ class Hub {
     if (!room) {
       room = {projectId, projectName: access.projectName || '', ownerEmail: access.ownerEmail || '',
         members: new Set(), leader: null, log: [], seq: 0, emptySince: null, lastOpAt: -Infinity,
-        backedSeq: 0,
+        backedSeq: 0, chat: [], activity: [], locks: new Map(),
         epoch: this.now().toString(36) + Math.random().toString(36).slice(2, 8)};
       this.rooms.set(projectId, room);
     }
@@ -100,9 +105,14 @@ class Hub {
     client.strikes = {};
     client.counted = {};
     this.electLeader(room, id);
-    this.send(id, {t: 'joined', projectId, epoch: room.epoch, leaderId: room.leader, log: room.log,
-      cursors: this.cursorsInRoom(room, id)});
+    this.send(id, this.joinedMessage(room, id));
     this.broadcastRoster();
+  }
+
+  joinedMessage(room, id) {
+    return {t: 'joined', projectId: room.projectId, epoch: room.epoch, leaderId: room.leader,
+      log: room.log, cursors: this.cursorsInRoom(room, id), chat: room.chat,
+      activity: room.activity, locks: this.lockList(room), sels: this.selsInRoom(room, id)};
   }
 
   leave(id, rosterUpdate = true) {
@@ -115,8 +125,12 @@ class Hub {
     client.editor = '';
     client.companion = false;
     client.cursor = null;
+    client.sel = null;
     if (room) {
       room.members.delete(id);
+      for (const [key, lock] of room.locks) if (lock.by === id) room.locks.delete(key);
+      this.broadcastLocks(room);
+      for (const m of room.members) this.send(m, {t: 'sel', id, blockId: null});
       for (const m of room.members) this.send(m, {t: 'cursor', id, x: null, y: null});
       if (room.members.size === 0) {
         room.leader = null;
@@ -217,12 +231,13 @@ class Hub {
   op(id, {projectId, screen, kind, data}) {
     const client = this.clients.get(id);
     if (!client || !client.projectId || client.projectId !== String(projectId)) return;
-    if (kind !== 'blocks' && kind !== 'designer') return;
+    if (kind !== 'blocks' && kind !== 'designer' && kind !== 'tree') return;
     const room = this.rooms.get(client.projectId);
     const entry = {seq: ++room.seq, from: id, name: client.name, color: client.color,
       screen: String(screen), kind, data, at: this.now()};
     room.log.push(entry);
     room.lastOpAt = entry.at;
+    this.recordActivity(room, client, entry);
     this.trim(room);
     for (const m of room.members) {
       if (m !== id) this.send(m, {t: 'op', projectId: room.projectId, op: entry});
@@ -300,6 +315,129 @@ class Hub {
     return true;
   }
 
+  // ---- recent changes, chat, selections and block locks ----
+
+  describeOp(entry) {
+    const d = entry.data || {};
+    const screen = entry.screen;
+    if (entry.kind === 'tree') return 'changed the screens or media';
+    if (entry.kind === 'designer') {
+      if (d.op === 'addmove') {
+        let name = '';
+        try { name = JSON.parse(d.b).$Name || ''; } catch (e) { /* not JSON */ }
+        return name ? 'added ' + name + ' on ' + screen : 'added or moved a component on ' + screen;
+      }
+      if (d.op === 'remove') return 'removed a component on ' + screen;
+      if (d.op === 'rename') return 'renamed a component to ' + String(d.a || '').slice(0, 40);
+      return 'changed ' + String(d.a || 'a property').slice(0, 40) + ' on ' + screen;
+    }
+    const type = d.type;
+    if (type === 'create') return 'added blocks on ' + screen;
+    if (type === 'delete') return 'deleted blocks on ' + screen;
+    if (type === 'move') return 'moved blocks on ' + screen;
+    return 'edited blocks on ' + screen;
+  }
+
+  recordActivity(room, client, entry) {
+    const text = this.describeOp(entry);
+    const last = room.activity[room.activity.length - 1];
+    if (last && last.name === client.name && last.text === text && entry.at - last.at < 30000) {
+      last.at = entry.at;
+      last.count = (last.count || 1) + 1;
+      return;   // repeats are folded into one line, and are not re-sent one by one
+    }
+    const item = {name: client.name, color: client.color, text, at: entry.at, count: 1};
+    room.activity.push(item);
+    if (room.activity.length > ACTIVITY_KEEP) room.activity.shift();
+    for (const m of room.members) this.send(m, {t: 'activity', item});
+  }
+
+  chat(id, text) {
+    const client = this.clients.get(id);
+    if (!client || !client.projectId || typeof text !== 'string') return;
+    text = text.replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, CHAT_MAX_CHARS);
+    if (!text || this.now() - client.chatAt < CHAT_MIN_GAP_MS) return;
+    client.chatAt = this.now();
+    const room = this.rooms.get(client.projectId);
+    const item = {name: client.name, color: client.color, text, at: this.now()};
+    room.chat.push(item);
+    if (room.chat.length > CHAT_KEEP) room.chat.shift();
+    for (const m of room.members) this.send(m, {t: 'chat', item});
+  }
+
+  // What this person has selected in the blocks editor (a block id), or null.
+  select(id, msg) {
+    const client = this.clients.get(id);
+    if (!client || !client.projectId) return;
+    const room = this.rooms.get(client.projectId);
+    if (!room) return;
+    const blockId = typeof msg.blockId === 'string' ? msg.blockId.slice(0, 80) : null;
+    if (blockId && this.now() - client.selAt < SEL_MIN_GAP_MS) return;
+    client.selAt = this.now();
+    client.sel = blockId ? {screen: String(msg.screen || '').slice(0, 100), blockId,
+      typing: !!msg.typing} : null;
+    const out = client.sel ? Object.assign({t: 'sel', id}, client.sel) : {t: 'sel', id, blockId: null};
+    for (const m of room.members) if (m !== id) this.send(m, out);
+  }
+
+  selsInRoom(room, exceptId) {
+    const list = [];
+    for (const m of room.members) {
+      const c = this.clients.get(m);
+      if (m !== exceptId && c && c.sel) list.push(Object.assign({id: m}, c.sel));
+    }
+    return list;
+  }
+
+  // A claim on a top-level block for a minute (renewed while it stays selected).
+  lock(id, msg) {
+    const client = this.clients.get(id);
+    if (!client || !client.projectId) return false;
+    const room = this.rooms.get(client.projectId);
+    const key = String(msg.screen || '').slice(0, 100) + '/' + String(msg.blockId || '').slice(0, 80);
+    if (!msg.blockId) return false;
+    this.expireLocks(room);
+    const held = room.locks.get(key);
+    if (held && held.by !== id) {
+      this.send(id, {t: 'lock-denied', key, name: this.clients.get(held.by).name});
+      return false;
+    }
+    const fresh = !held;
+    room.locks.set(key, {by: id, until: this.now() + LOCK_MS});
+    if (fresh) this.broadcastLocks(room);
+    return true;
+  }
+
+  unlock(id, msg) {
+    const client = this.clients.get(id);
+    if (!client || !client.projectId) return;
+    const room = this.rooms.get(client.projectId);
+    const key = String(msg.screen || '').slice(0, 100) + '/' + String(msg.blockId || '').slice(0, 80);
+    const held = room.locks.get(key);
+    if (held && held.by === id) {
+      room.locks.delete(key);
+      this.broadcastLocks(room);
+    }
+  }
+
+  expireLocks(room) {
+    let changed = false;
+    for (const [key, lock] of room.locks) {
+      if (lock.until <= this.now()) { room.locks.delete(key); changed = true; }
+    }
+    if (changed) this.broadcastLocks(room);
+  }
+
+  lockList(room) {
+    return [...room.locks].map(([key, lock]) => ({key, by: lock.by,
+      name: (this.clients.get(lock.by) || {}).name}));
+  }
+
+  broadcastLocks(room) {
+    const msg = {t: 'locks', list: this.lockList(room)};
+    for (const m of room.members) this.send(m, msg);
+  }
+
   // ---- backups ----
 
   // Projects that have changed since their last backup and who can make the backup (the main
@@ -348,6 +486,7 @@ class Hub {
 
   sweep() {
     const now = this.now();
+    for (const room of this.rooms.values()) this.expireLocks(room);
     for (const [pid, room] of this.rooms) {
       if (room.members.size === 0 && room.emptySince && now - room.emptySince > EMPTY_ROOM_TTL_MS) {
         this.rooms.delete(pid);
