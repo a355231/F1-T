@@ -208,6 +208,18 @@ final class TeamLogin {
     return now;
   }
 
+  // One person signed out (the admin page's "kick"); lasts until the server restarts.
+  private static final Map<String, Long> userSignedOut = new ConcurrentHashMap<>();
+
+  static void signOutUser(String userId) {
+    userSignedOut.put(userId, System.currentTimeMillis());
+  }
+
+  static long userSignedOutBefore(String userId) {
+    Long t = userId == null ? null : userSignedOut.get(userId);
+    return t == null ? 0 : t;
+  }
+
   private static void writeAtomically(Path file, String content) throws IOException {
     Path temp = file.resolveSibling(file.getFileName() + ".tmp");
     Files.write(temp, content.getBytes(StandardCharsets.UTF_8));

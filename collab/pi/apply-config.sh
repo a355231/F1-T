@@ -34,6 +34,10 @@ def set_property(xml, name, value):
 
 xml = set_property(xml, 'collab.teamcode', '')
 xml = set_property(xml, 'collab.teamcode.file', code_path)
+import os
+backup_dir = os.path.join(os.path.dirname(code_path), 'backups')
+os.makedirs(backup_dir, exist_ok=True)
+xml = set_property(xml, 'collab.backup.dir', backup_dir)
 xml = set_property(xml, 'auth.usegoogle', 'false')
 xml = set_property(xml, 'auth.uselocal', 'true')
 with open(xml_path, 'w', encoding='utf-8') as f:

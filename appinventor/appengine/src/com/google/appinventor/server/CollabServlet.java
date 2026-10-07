@@ -29,6 +29,10 @@ import org.json.JSONObject;
  *   GET  /ode/collab/collaborators?projectId=N
  *   POST /ode/collab/share?projectId=N&amp;name=TEAM_NAME
  *   POST /ode/collab/teamcode  current=CODE&amp;new=CODE[&amp;signout=true]
+ *   POST /ode/collab/backup?projectId=N        (no-op if unchanged since the newest backup)
+ *   GET  /ode/collab/backups?projectId=N
+ *   POST /ode/collab/restore?projectId=N&amp;id=BACKUP_ID
+ *   POST /ode/collab/kick?name=NAME            (signs that person out; the hub drops them)
  *   GET  /ode/collab/lastcodechange   (lets the hub check an announcement of a change)
  * </pre>
  */
@@ -36,6 +40,7 @@ public class CollabServlet extends OdeServlet {
   private static final Logger LOG = Logger.getLogger(CollabServlet.class.getName());
 
   private final transient StorageIo storageIo = StorageIoInstanceHolder.getInstance();
+  private final transient BackupStore backups = new BackupStore(storageIo);
 
   @Override
   protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
@@ -104,10 +109,71 @@ public class CollabServlet extends OdeServlet {
           send(resp, 200, new JSONObject().put("ok", true).put("name", name));
           return;
         }
+        case "/kick": {
+          if (!post) {
+            send(resp, HttpServletResponse.SC_METHOD_NOT_ALLOWED, error("use POST"));
+            return;
+          }
+          String name = TeamLogin.normalizeName(req.getParameter("name"));
+          if (name == null) {
+            send(resp, HttpServletResponse.SC_BAD_REQUEST, error("bad name"));
+            return;
+          }
+          User target = storageIo.getUserFromEmail(TeamLogin.emailFor(name));
+          if (target.getUserId().equals(userId)) {
+            send(resp, HttpServletResponse.SC_BAD_REQUEST, error("you cannot kick yourself"));
+            return;
+          }
+          TeamLogin.signOutUser(target.getUserId());
+          LOG.info(userInfoProvider.getUserEmail() + " signed " + name + " out");
+          send(resp, 200, new JSONObject().put("ok", true).put("userId", target.getUserId()));
+          return;
+        }
         case "/lastcodechange": {
           Object[] last = TeamLogin.lastChange();
           send(resp, 200, new JSONObject().put("at", last[0]).put("by", last[1])
               .put("signedOut", last[2]));
+          return;
+        }
+        case "/backup": {
+          if (!post) {
+            send(resp, HttpServletResponse.SC_METHOD_NOT_ALLOWED, error("use POST"));
+            return;
+          }
+          long projectId = projectId(req);
+          storageIo.assertUserHasProject(userId, projectId);
+          String id = backups.backup(userId, projectId, System.currentTimeMillis());
+          send(resp, 200, new JSONObject().put("ok", true).put("enabled", BackupStore.enabled())
+              .put("id", id == null ? JSONObject.NULL : id));
+          return;
+        }
+        case "/backups": {
+          long projectId = projectId(req);
+          storageIo.assertUserHasProject(userId, projectId);
+          JSONArray list = new JSONArray();
+          for (String id : backups.ids(projectId)) {
+            list.put(new JSONObject().put("id", id).put("at", BackupStore.timeOf(id)));
+          }
+          send(resp, 200, new JSONObject().put("ok", true).put("enabled", BackupStore.enabled())
+              .put("backups", list));
+          return;
+        }
+        case "/restore": {
+          if (!post) {
+            send(resp, HttpServletResponse.SC_METHOD_NOT_ALLOWED, error("use POST"));
+            return;
+          }
+          long projectId = projectId(req);
+          storageIo.assertUserHasProject(userId, projectId);
+          String id = req.getParameter("id");
+          if (!BackupStore.validId(id)) {
+            send(resp, HttpServletResponse.SC_BAD_REQUEST, error("bad backup id"));
+            return;
+          }
+          backups.backup(userId, projectId, System.currentTimeMillis());  // safety copy first
+          int n = backups.restore(userId, projectId, id);
+          LOG.info("Project " + projectId + " restored to backup " + id);
+          send(resp, 200, new JSONObject().put("ok", true).put("files", n));
           return;
         }
         case "/teamcode":
@@ -124,6 +190,9 @@ public class CollabServlet extends OdeServlet {
       send(resp, HttpServletResponse.SC_BAD_REQUEST, error("bad projectId"));
     } catch (SecurityException e) {
       send(resp, HttpServletResponse.SC_FORBIDDEN, error("no access to project"));
+    } catch (IOException e) {
+      LOG.log(Level.WARNING, "collab backup failed: " + path, e);
+      send(resp, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, error("backup failed"));
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "collab request failed: " + path, e);
       send(resp, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, error("server error"));
@@ -149,12 +218,17 @@ public class CollabServlet extends OdeServlet {
     }
     TeamLogin.recordSuccess(ip);
     String newCode = req.getParameter("new");
+    boolean keepCode = (newCode == null || newCode.isEmpty())
+        && "true".equals(req.getParameter("signout"));
+    if (keepCode) {
+      newCode = req.getParameter("current");  // only signing everybody out; the code stays
+    }
     String problem = TeamLogin.problemWithNewCode(newCode);
     if (problem != null) {
       send(resp, HttpServletResponse.SC_BAD_REQUEST, error(problem));
       return;
     }
-    boolean saved = TeamLogin.setCode(newCode);
+    boolean saved = keepCode || TeamLogin.setCode(newCode);
     boolean signedOut = "true".equals(req.getParameter("signout"));
     if (signedOut) {
       OdeAuthFilter.UserInfo me = OdeAuthFilter.getUserInfo(req);

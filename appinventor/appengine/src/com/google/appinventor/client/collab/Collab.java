@@ -65,8 +65,13 @@ public final class Collab {
    * each other. Everyone else's edits reach the server through the main client.
    */
   public static boolean mayAutoSave(long projectId) {
-    return !followerProjects.contains(projectId);
+    return !followerProjects.contains(projectId) && !frozen();
   }
+
+  /** True while a backup is being restored: nothing may be written until the page reloads. */
+  private static native boolean frozen() /*-{
+    return !!$wnd.AICollab_frozen;
+  }-*/;
 
   // Outgoing designer changes (called from YaFormEditor's DesignerChangeListener methods)
 
@@ -312,6 +317,21 @@ public final class Collab {
     return form != null && blocks != null && form.isLoadComplete() && blocks.isLoadComplete();
   }
 
+  /** The screen's designer file as text, for comparing with a teammate's copy ("" if not loaded). */
+  private static String designerContent(String projectId, String screen) {
+    YaFormEditor form = formEditor(projectId, screen);
+    return form == null || !form.isLoadComplete() ? "" : form.getRawFileContent();
+  }
+
+  /** Writes this client's unsaved edits to the server now (used before a teammate reloads). */
+  private static void saveNow() {
+    Ode.getInstance().getEditorManager().saveDirtyEditors(new com.google.gwt.user.client.Command() {
+      @Override
+      public void execute() {
+      }
+    });
+  }
+
   /**
    * Called by collab.js when the hub says who the main client of the project is.
    */
@@ -380,6 +400,8 @@ public final class Collab {
     $wnd.AICollab_applyDesignerOp = $entry(@com.google.appinventor.client.collab.Collab::applyDesignerOp(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I));
     $wnd.AICollab_isScreenReady = $entry(@com.google.appinventor.client.collab.Collab::isScreenReady(Ljava/lang/String;Ljava/lang/String;));
     $wnd.AICollab_setMain = $entry(@com.google.appinventor.client.collab.Collab::setMain(Ljava/lang/String;Z));
+    $wnd.AICollab_designerContent = $entry(@com.google.appinventor.client.collab.Collab::designerContent(Ljava/lang/String;Ljava/lang/String;));
+    $wnd.AICollab_saveNow = $entry(@com.google.appinventor.client.collab.Collab::saveNow());
     $wnd.AICollab_getContext = $entry(@com.google.appinventor.client.collab.Collab::getContext());
     if ($wnd.AICollab && $wnd.AICollab.bridgeReady) {
       $wnd.AICollab.bridgeReady();

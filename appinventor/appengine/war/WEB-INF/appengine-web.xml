@@ -88,6 +88,9 @@
     <!-- If set, the code is read from this file at every sign-in instead, so it can be changed
          while App Inventor runs (the Raspberry Pi install sets it to /opt/appinventor/teamcode). -->
     <property name="collab.teamcode.file" value="" />
+    <!-- Folder for project version history (one backup zip per change, see BackupStore). Empty
+         turns backups off. The Raspberry Pi install sets it to /opt/appinventor/backups. -->
+    <property name="collab.backup.dir" value="" />
 
     <!-- Flags associated with localauth code -->
     <property name="localauth.mailserver" value="https://osiris.mit.edu/passmail/" />

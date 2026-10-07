@@ -16,6 +16,14 @@ const LOG_SOFT_LIMIT = 5000;
 const LOG_MIN_AGE_MS = 10 * 60 * 1000;
 const EMPTY_ROOM_TTL_MS = 30 * 60 * 1000;
 
+// The persistent syncer: every SYNC_MS the hub asks everybody for a fingerprint of the screens
+// people are on. A follower whose fingerprint differs from the main client's twice in a row (and
+// nothing was being edited at the time) gets the main client's copy.
+const SYNC_MS = 30 * 1000;
+const DIGEST_FRESH_MS = 90 * 1000;
+const QUIET_MS = 5 * 1000;
+const RESYNC_MIN_GAP_MS = 60 * 1000;
+
 class Hub {
   constructor(send, now = Date.now) {
     this.send = send;
@@ -31,7 +39,8 @@ class Hub {
     const name = (email || 'user').split('@')[0];
     const client = {id, userId, email, name, color, projectId: null, projectName: '',
       screen: '', editor: '', companion: false, joinedAt: 0, cursor: null,
-      cursorAt: -Infinity, noticeAt: -Infinity};
+      cursorAt: -Infinity, noticeAt: -Infinity, digests: {}, strikes: {}, counted: {},
+      resyncAt: -Infinity};
     this.clients.set(id, client);
     return client;
   }
@@ -75,7 +84,8 @@ class Hub {
     let room = this.rooms.get(projectId);
     if (!room) {
       room = {projectId, projectName: access.projectName || '', ownerEmail: access.ownerEmail || '',
-        members: new Set(), leader: null, log: [], seq: 0, emptySince: null,
+        members: new Set(), leader: null, log: [], seq: 0, emptySince: null, lastOpAt: -Infinity,
+        backedSeq: 0,
         epoch: this.now().toString(36) + Math.random().toString(36).slice(2, 8)};
       this.rooms.set(projectId, room);
     }
@@ -86,6 +96,9 @@ class Hub {
     client.joinedAt = this.now();
     client.screen = '';
     client.editor = '';
+    client.digests = {};
+    client.strikes = {};
+    client.counted = {};
     this.electLeader(room, id);
     this.send(id, {t: 'joined', projectId, epoch: room.epoch, leaderId: room.leader, log: room.log,
       cursors: this.cursorsInRoom(room, id)});
@@ -209,10 +222,120 @@ class Hub {
     const entry = {seq: ++room.seq, from: id, name: client.name, color: client.color,
       screen: String(screen), kind, data, at: this.now()};
     room.log.push(entry);
+    room.lastOpAt = entry.at;
     this.trim(room);
     for (const m of room.members) {
       if (m !== id) this.send(m, {t: 'op', projectId: room.projectId, op: entry});
     }
+  }
+
+  // ---- persistent syncer ----
+
+  // Called every SYNC_MS. Everyone answers with {t:'digest'} for the screens listed.
+  syncTick() {
+    for (const room of this.rooms.values()) {
+      if (room.members.size === 0) continue;
+      const screens = [...new Set([...room.members]
+        .map(m => this.clients.get(m).screen).filter(Boolean))].slice(0, 10);
+      for (const m of room.members) {
+        this.send(m, {t: 'sync', projectId: room.projectId, epoch: room.epoch, seq: room.seq,
+          screens});
+      }
+    }
+  }
+
+  // A fingerprint of one screen: {screen, blocks, designer} (short strings; '' = not loaded).
+  digest(id, msg) {
+    const client = this.clients.get(id);
+    if (!client || !client.projectId || typeof msg.screen !== 'string') return;
+    const room = this.rooms.get(client.projectId);
+    if (!room) return;
+    const screen = msg.screen.slice(0, 100);
+    const clip = v => (typeof v === 'string' ? v.slice(0, 64) : '');
+    const entry = {blocks: clip(msg.blocks), designer: clip(msg.designer), at: this.now()};
+    if (!entry.blocks && !entry.designer) return;
+    client.digests[screen] = entry;
+    this.compare(room, screen);
+  }
+
+  // Compares each follower's latest fingerprint of a screen with the main client's, once per
+  // report, when both come from the same round and nothing was being edited.
+  compare(room, screen) {
+    const leader = this.clients.get(room.leader);
+    const ld = leader && leader.digests[screen];
+    if (!ld) return;
+    for (const m of room.members) {
+      const f = this.clients.get(m);
+      const fd = f && m !== room.leader && f.digests[screen];
+      if (!fd || f.counted[screen] === fd.at || Math.abs(fd.at - ld.at) > 2 * QUIET_MS ||
+          this.now() - Math.max(fd.at, ld.at) > DIGEST_FRESH_MS) {
+        continue;
+      }
+      if (this.now() - room.lastOpAt < QUIET_MS) continue;  // try again with the next report
+      f.counted[screen] = fd.at;
+      const blocksDiffer = !!(fd.blocks && ld.blocks && fd.blocks !== ld.blocks);
+      const designerDiffer = !!(fd.designer && ld.designer && fd.designer !== ld.designer);
+      if (!blocksDiffer && !designerDiffer) {
+        f.strikes[screen] = 0;
+        continue;
+      }
+      f.strikes[screen] = (f.strikes[screen] || 0) + 1;
+      if (f.strikes[screen] >= 2 && this.now() - f.resyncAt >= RESYNC_MIN_GAP_MS) {
+        f.strikes[screen] = 0;
+        f.resyncAt = this.now();
+        this.send(room.leader, {t: 'snapshot-request', screen, forId: m, blocks: blocksDiffer,
+          designer: designerDiffer});
+      }
+    }
+  }
+
+  // The main client's answer to a snapshot-request, passed on to the client that needs it.
+  snapshot(id, msg) {
+    const client = this.clients.get(id);
+    if (!client || !client.projectId) return false;
+    const room = this.rooms.get(client.projectId);
+    if (!room || room.leader !== id || !room.members.has(msg.forId)) return false;
+    this.send(msg.forId, {t: 'resync', screen: String(msg.screen || '').slice(0, 100),
+      blocks: typeof msg.blocks === 'string' ? msg.blocks : null, designer: !!msg.designer});
+    return true;
+  }
+
+  // ---- backups ----
+
+  // Projects that have changed since their last backup and who can make the backup (the main
+  // client's account). The caller reports success with backedUp().
+  backupsDue() {
+    const due = [];
+    for (const room of this.rooms.values()) {
+      if (room.members.size > 0 && room.leader && room.seq !== room.backedSeq) {
+        due.push({projectId: room.projectId, clientId: room.leader, seq: room.seq});
+      }
+    }
+    return due;
+  }
+
+  backedUp(projectId, seq) {
+    const room = this.rooms.get(String(projectId));
+    if (room) room.backedSeq = seq;
+  }
+
+  // A backup was restored: start the project's session over and send everyone's page to reload.
+  restored(projectId, byName) {
+    const room = this.rooms.get(String(projectId));
+    if (!room) return;
+    room.log = [];
+    room.seq = 0;
+    room.backedSeq = 0;
+    room.epoch = this.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    for (const m of room.members) this.send(m, {t: 'reload', by: byName});
+  }
+
+  // Tell everyone in a project something that makes their page start over (a restored backup).
+  broadcastToProject(projectId, msg) {
+    const room = this.rooms.get(String(projectId));
+    if (!room) return 0;
+    for (const m of room.members) this.send(m, msg);
+    return room.members.size;
   }
 
   trim(room) {
@@ -257,4 +380,4 @@ class Hub {
   }
 }
 
-module.exports = {Hub, LOG_SOFT_LIMIT, EMPTY_ROOM_TTL_MS};
+module.exports = {Hub, SYNC_MS, LOG_SOFT_LIMIT, EMPTY_ROOM_TTL_MS};

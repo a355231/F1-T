@@ -361,7 +361,8 @@ public class OdeAuthFilter implements Filter {
         return false;
       }
       // Everyone can be signed out at once (see TeamLogin.signEveryoneOut).
-      return this.ts >= TeamLogin.signedOutBefore();
+      return this.ts >= TeamLogin.signedOutBefore()
+          && this.ts >= TeamLogin.userSignedOutBefore(this.userId);
     }
   }
 

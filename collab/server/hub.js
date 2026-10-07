@@ -9,17 +9,26 @@
 // WebSocket users are authenticated with their App Inventor session cookie, and project access is
 // checked with App Inventor before a client may join a project's room.
 
+const fs = require('fs');
 const http = require('http');
+const net = require('net');
+const os = require('os');
 const {WebSocketServer} = require('ws');
-const {Hub} = require('./rooms');
+const {Hub, SYNC_MS} = require('./rooms');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const UPSTREAM = new URL(process.env.AI_UPSTREAM || 'http://127.0.0.1:8888');
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
+const BACKUP_MS = parseInt(process.env.BACKUP_MS || '60000', 10);
+const VERSION_FILE = process.env.AI_VERSION_FILE || '/opt/appinventor/version';
+const DATA_DIR = process.env.AI_DATA_DIR || '/opt/appinventor';
+const STARTED_AT = Date.now();
 
 const sockets = new Map();
 const cookies = new Map();
+const now = Date.now;
+let alerts = [];
 const hub = new Hub((id, msg) => {
   const ws = sockets.get(id);
   if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -79,15 +88,16 @@ function proxy(req, res) {
   req.pipe(upstreamReq);
 }
 
-function askAppInventor(path, cookie) {
+function askAppInventor(path, cookie, method = 'GET') {
   return new Promise(resolve => {
     const req = http.request({
       hostname: UPSTREAM.hostname,
       port: UPSTREAM.port || 80,
-      method: 'GET',
+      method,
       path,
-      headers: {cookie: cookie || '', accept: 'application/json'},
-      timeout: 10000,
+      headers: Object.assign({cookie: cookie || '', accept: 'application/json'},
+        method === 'GET' ? {} : {'content-length': '0'}),
+      timeout: 30000,
     }, res => {
       let body = '';
       res.setEncoding('utf8');
@@ -134,7 +144,14 @@ const server = http.createServer((req, res) => {
       online: s.clients.map(c => ({name: c.name, projectName: c.projectName, screen: c.screen,
         editor: c.editor, companion: c.companion, main: c.main})),
       rooms: s.rooms.map(r => ({members: r.members.length, ops: r.ops})),
+      version: readVersion(),
+      uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
+      alerts,
     }, null, 2));
+    return;
+  }
+  if (req.url.split('?')[0].startsWith('/collab/admin')) {
+    handleAdmin(req, res);
     return;
   }
   proxy(req, res);
@@ -159,9 +176,11 @@ server.on('upgrade', async (req, socket, head) => {
 
 function onConnection(ws, me, cookie) {
   const client = hub.addClient({userId: me.userId, email: me.email});
+  client.restoreAt = 0;
   sockets.set(client.id, ws);
   cookies.set(client.id, cookie);
   hub.welcome(client.id);
+  ws.send(JSON.stringify({t: 'alerts', list: alerts}));
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
   ws.on('message', async raw => {
@@ -205,6 +224,24 @@ function onConnection(ws, me, cookie) {
       case 'op':
         hub.op(client.id, msg);
         break;
+      case 'digest':
+        hub.digest(client.id, msg);
+        break;
+      case 'snapshot':
+        hub.snapshot(client.id, msg);
+        break;
+      case 'restoring':
+        // The sender is about to put an older backup back: everyone in the project stops saving.
+        if (client.projectId && now() - (client.restoreAt || 0) > 10 * 1000) {
+          client.restoreAt = now();
+          hub.broadcastToProject(client.projectId, {t: 'freeze', by: client.name});
+        }
+        break;
+      case 'restored':
+        if (client.projectId) {
+          hub.restored(client.projectId, client.name);
+        }
+        break;
       case 'ping':
         ws.send(JSON.stringify({t: 'pong'}));
         break;
@@ -240,6 +277,151 @@ setInterval(() => {
     ws.ping();
   }
 }, 20000).unref();
+
+
+// ---- admin page: who is online, kick a person ----
+
+const ADMIN_PAGE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Team admin</title>
+<style>body{font:15px system-ui,sans-serif;max-width:640px;margin:20px auto;padding:0 12px}
+table{width:100%;border-collapse:collapse}td,th{padding:6px 8px;border-bottom:1px solid #ddd;text-align:left}
+button{cursor:pointer}.warn{background:#fff3cd;padding:8px;margin:8px 0;border-radius:4px}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}</style>
+<h2>Team admin</h2><div id=alerts></div><div id=info></div>
+<table id=t><thead><tr><th>Name<th>Where<th>Companion<th></tr></thead><tbody></tbody></table>
+<h3>Sign everyone out</h3>
+<p>Asks everyone to sign in again with the same team code. You stay signed in.
+<form id=so><input id=code type=password placeholder="Current team code" autocomplete=off>
+<button>Sign everyone out</button></form><p id=msg></p>
+<script>
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+async function load(){
+  const r=await fetch('/collab/admin/data',{cache:'no-store'});
+  if(!r.ok){document.body.innerHTML='<p>Sign in to App Inventor first, then reload this page.';return}
+  const d=await r.json();
+  document.getElementById('alerts').innerHTML=d.alerts.map(a=>'<div class=warn>'+esc(a)+'</div>').join('');
+  document.getElementById('info').textContent='Version '+d.version+' - up '+Math.floor(d.uptimeSeconds/60)+' min';
+  document.querySelector('#t tbody').innerHTML=d.online.map(c=>'<tr><td><span class=dot style="background:'+esc(c.color)+'"></span>'+esc(c.name)+(c.me?' (you)':'')
+   +'<td>'+esc(c.projectName?c.projectName+' / '+(c.screen||'-')+' / '+(c.editor||'-'):'not in a project')
+   +'<td>'+(c.companion?'yes':'')+'<td>'+(c.me?'':'<button data-n="'+esc(c.name)+'">Sign out</button>')+'</tr>').join('');
+}
+document.addEventListener('click',async e=>{const n=e.target.dataset&&e.target.dataset.n;if(!n)return;
+  if(!confirm('Sign '+n+' out? They can sign back in with the team code.'))return;
+  await fetch('/collab/admin/kick?name='+encodeURIComponent(n),{method:'POST'});load()});
+document.getElementById('so').onsubmit=async e=>{e.preventDefault();
+  const r=await fetch('/ode/collab/teamcode',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:'signout=true&new=&current='+encodeURIComponent(document.getElementById('code').value)});
+  if(r.ok)await fetch('/collab/admin/revalidate',{method:'POST'});
+  document.getElementById('msg').textContent=r.ok?'Everyone else was signed out.':(await r.json()).error||'Failed';document.getElementById('code').value='';load()};
+load();setInterval(load,5000);
+</script>`;
+
+async function handleAdmin(req, res) {
+  const path = req.url.split('?')[0];
+  const cookie = req.headers.cookie || '';
+  const me = await askAppInventor('/ode/collab/whoami', cookie);
+  const json = (code, body) => {
+    res.writeHead(code, {'content-type': 'application/json', 'cache-control': 'no-store'});
+    res.end(JSON.stringify(body));
+  };
+  if (!me || !me.userId) {
+    if (path === '/collab/admin') {
+      res.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
+      res.end('<p>Sign in to App Inventor first, then reload this page.');
+    } else {
+      json(401, {error: 'not signed in'});
+    }
+    return;
+  }
+  if (path === '/collab/admin' && req.method === 'GET') {
+    res.writeHead(200, {'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store'});
+    res.end(ADMIN_PAGE);
+  } else if (path === '/collab/admin/data') {
+    json(200, {
+      version: readVersion(), uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000), alerts,
+      online: hub.roster().map(c => ({name: c.name, color: c.color, projectName: c.projectName,
+        screen: c.screen, editor: c.editor, companion: c.companion, me: c.email === me.email})),
+    });
+  } else if (path === '/collab/admin/kick' && req.method === 'POST') {
+    const name = new URL(req.url, 'http://x').searchParams.get('name') || '';
+    const out = await askAppInventor('/ode/collab/kick?name=' + encodeURIComponent(name), cookie, 'POST');
+    if (!out || !out.ok) return json(400, {error: 'Could not sign that person out.'});
+    for (const [id, ws] of sockets) {
+      const c = hub.clients.get(id);
+      if (c && c.userId === out.userId) ws.close(4001, 'signed out');
+    }
+    json(200, {ok: true});
+  } else if (path === '/collab/admin/revalidate' && req.method === 'POST') {
+    // After a sign-out made through /ode/collab/teamcode: drop everyone whose login stopped working.
+    json(200, {ok: true});
+    setTimeout(() => revalidateEveryone(), 500);
+  } else {
+    json(404, {error: 'unknown'});
+  }
+}
+
+// ---- persistent syncer, backups, health ----
+
+setInterval(() => hub.syncTick(), SYNC_MS).unref();
+
+let backingUp = false;
+async function runBackups() {
+  if (backingUp) return;
+  backingUp = true;
+  try {
+    for (const due of hub.backupsDue()) {
+      const cookie = cookies.get(due.clientId);
+      if (!cookie) continue;
+      const result = await askAppInventor('/ode/collab/backup?projectId=' + due.projectId, cookie,
+        'POST');
+      // enabled=false means this server keeps no backups: stop asking until a restart.
+      if (result && result.ok) hub.backedUp(due.projectId, due.seq);
+    }
+  } finally {
+    backingUp = false;
+  }
+}
+setInterval(runBackups, BACKUP_MS).unref();
+
+function readVersion() {
+  try {
+    return fs.readFileSync(VERSION_FILE, 'utf8').trim();
+  } catch (e) {
+    return 'unknown';
+  }
+}
+
+function portOpen(port, host = '127.0.0.1') {
+  return new Promise(resolve => {
+    const sock = net.connect({port, host});
+    sock.setTimeout(2000);
+    sock.on('connect', () => { sock.destroy(); resolve(true); });
+    sock.on('timeout', () => { sock.destroy(); resolve(false); });
+    sock.on('error', () => resolve(false));
+  });
+}
+
+// Things worth telling the team about: a full disk, little memory, App Inventor not answering.
+async function checkHealth() {
+  const list = [];
+  try {
+    const st = fs.statfsSync(DATA_DIR);
+    const freeMb = Math.floor(st.bavail * st.bsize / 1048576);
+    if (freeMb < 300) list.push('The Raspberry Pi is almost out of disk space (' + freeMb + ' MB left).');
+  } catch (e) { /* not available here */ }
+  const freeMem = os.freemem() / 1048576;
+  if (freeMem < 120) list.push('The Raspberry Pi is low on memory (' + Math.floor(freeMem) + ' MB free).');
+  if (!(await portOpen(UPSTREAM.port || 80, UPSTREAM.hostname))) {
+    list.push('App Inventor is not answering. It may be restarting; saving is paused.');
+  }
+  if (JSON.stringify(list) !== JSON.stringify(alerts)) {
+    alerts = list;
+    for (const ws of sockets.values()) {
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({t: 'alerts', list}));
+    }
+  }
+}
+setInterval(checkHealth, 30 * 1000).unref();
+setTimeout(checkHealth, 3000).unref();
 
 server.listen(PORT, HOST, () => {
   console.log(`App Inventor collaboration hub on http://${HOST}:${PORT} -> ${UPSTREAM.href}`);
