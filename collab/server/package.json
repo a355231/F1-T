@@ -13,6 +13,8 @@
     "node": ">=18"
   },
   "dependencies": {
+    "dompurify": "^3.4.16",
+    "marked": "^18.1.0",
     "ws": "^8.18.0"
   }
 }

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>AI helper</title>
+<link rel="stylesheet" href="/collab/ai/static/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="avatar small" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 2l1.9 6.1L20 10l-6.1 1.9L12 18l-1.9-6.1L4 10l6.1-1.9z"/></svg></span>
+    <div>
+      <div class="title">AI helper</div>
+      <div class="sub" id="sub">Loading…</div>
+    </div>
+  </div>
+  <button id="modeBtn" class="pill" type="button" title="Full-app mode: type /override and the PIN">Small fixes</button>
+</header>
+
+<main id="chat" aria-live="polite">
+  <div class="wrap" id="wrap">
+    <section id="empty" class="empty">
+      <h1>What should we work on?</h1>
+      <div class="suggest">
+        <button type="button" data-fill="Explain how this project works, screen by screen.">Explain how this project works</button>
+        <button type="button" data-fill="Look at the blocks on Screen1 and tell me about any problems you see.">Look for problems in the blocks</button>
+        <button type="button" data-fill="/goal Check every screen for problems and propose the fixes, one at a time.">/goal Check every screen</button>
+        <button type="button" data-fill="Draw a simple logo for this app as a picture, and add it to the project.">Draw a logo and add it</button>
+      </div>
+      <p class="fine" id="notSet" hidden>The helper is not set up on this server yet.</p>
+    </section>
+    <div id="messages"></div>
+  </div>
+</main>
+
+<button id="jump" class="jump" type="button" hidden>New messages ↓</button>
+
+<div id="goalBar" class="goalbar" hidden>
+  <div class="grow">
+    <div class="gtop"><span class="gstate">Working…</span><span class="gprog"></span><span class="gtime">0:00</span></div>
+    <div class="gbar"><i id="gfill"></i></div>
+    <div class="gtext"></div>
+  </div>
+  <button id="gstop" class="ghalt" type="button">Stop</button>
+</div>
+
+<form id="composer" class="composer" autocomplete="off">
+  <div id="slash" class="slash" hidden></div>
+  <div class="box">
+    <textarea id="input" rows="1" placeholder="Ask about this project, or type / for commands" aria-label="Message"></textarea>
+    <button id="send" class="send" type="submit" aria-label="Send">
+      <svg class="i-send" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 4l-7 7h4v9h6v-9h4z"/></svg>
+      <svg class="i-stop" viewBox="0 0 24 24" width="14" height="14"><rect x="5" y="5" width="14" height="14" rx="3" fill="currentColor"/></svg>
+    </button>
+  </div>
+  <div class="hint">Enter sends · Shift+Enter for a new line · Esc stops</div>
+</form>
+
+<script src="/collab/ai/static/marked.js"></script>
+<script src="/collab/ai/static/purify.js"></script>
+<script src="/collab/ai/static/app.js"></script>
+</body>
+</html>

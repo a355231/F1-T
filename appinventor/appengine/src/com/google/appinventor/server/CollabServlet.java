@@ -220,6 +220,16 @@ public class CollabServlet extends OdeServlet {
           writeFiles(userId, projectId, req, resp);
           return;
         }
+        case "/writemedia": {
+          if (!post) {
+            send(resp, HttpServletResponse.SC_METHOD_NOT_ALLOWED, error("use POST"));
+            return;
+          }
+          long projectId = projectId(req);
+          storageIo.assertUserHasProject(userId, projectId);
+          writeMedia(userId, projectId, req, resp);
+          return;
+        }
         case "/teamcode":
           if (!post) {
             send(resp, HttpServletResponse.SC_METHOD_NOT_ALLOWED, error("use POST"));
@@ -421,6 +431,88 @@ public class CollabServlet extends OdeServlet {
       }
     }
     return null;
+  }
+
+  private static final int MAX_MEDIA = 3;
+  private static final int MAX_MEDIA_BYTES = 1024 * 1024;
+  private static final Pattern PICTURE_NAME =
+      Pattern.compile("[A-Za-z][A-Za-z0-9_]{0,40}\\.(png|jpe?g)");
+
+  /**
+   * Adds PNG or JPG pictures to the project's assets, for the AI helper. Body:
+   * {"media": [{"name": "logo.png", "data": "BASE64"}]}. Nothing else can be written this way. A
+   * backup is made first, and a picture with the same name as an existing one replaces it.
+   */
+  private void writeMedia(String userId, long projectId, HttpServletRequest req,
+      HttpServletResponse resp) throws IOException {
+    StringBuilder body = new StringBuilder();
+    char[] buf = new char[8192];
+    int n;
+    java.io.Reader reader = req.getReader();
+    while ((n = reader.read(buf)) > 0) {
+      body.append(buf, 0, n);
+      if (body.length() > 2 * 1024 * 1024) {
+        send(resp, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, error("too large"));
+        return;
+      }
+    }
+    JSONArray media = new JSONObject(body.toString()).getJSONArray("media");
+    if (media.length() == 0 || media.length() > MAX_MEDIA) {
+      send(resp, HttpServletResponse.SC_BAD_REQUEST, error("1 to " + MAX_MEDIA + " pictures at a time"));
+      return;
+    }
+    List<String> paths = new ArrayList<>();
+    List<byte[]> contents = new ArrayList<>();
+    for (int i = 0; i < media.length(); i++) {
+      JSONObject m = media.getJSONObject(i);
+      String name = m.optString("name", "");
+      if (!PICTURE_NAME.matcher(name).matches()) {
+        send(resp, HttpServletResponse.SC_BAD_REQUEST,
+            error("picture names are letters, digits and underscores, ending in .png or .jpg"));
+        return;
+      }
+      byte[] bytes;
+      try {
+        bytes = java.util.Base64.getDecoder().decode(m.optString("data", ""));
+      } catch (IllegalArgumentException e) {
+        send(resp, HttpServletResponse.SC_BAD_REQUEST, error("a picture is not valid base64"));
+        return;
+      }
+      if (bytes.length == 0 || bytes.length > MAX_MEDIA_BYTES) {
+        send(resp, HttpServletResponse.SC_BAD_REQUEST, error("a picture is too big (over 1 MB)"));
+        return;
+      }
+      if (!isPng(bytes) && !isJpeg(bytes)) {
+        send(resp, HttpServletResponse.SC_BAD_REQUEST, error("that is not a PNG or JPG picture: " + name));
+        return;
+      }
+      paths.add("assets/" + name);
+      contents.add(bytes);
+    }
+    backups.backup(userId, projectId, System.currentTimeMillis());
+    List<String> existing = storageIo.getProjectSourceFiles(userId, projectId);
+    List<String> created = new ArrayList<>();
+    for (String path : paths) {
+      if (!existing.contains(path)) {
+        created.add(path);
+      }
+    }
+    if (!created.isEmpty()) {
+      storageIo.addSourceFilesToProject(userId, projectId, true, created.toArray(new String[0]));
+    }
+    for (int i = 0; i < paths.size(); i++) {
+      storageIo.uploadRawFileForce(projectId, paths.get(i), userId, contents.get(i));
+    }
+    LOG.info("AI pictures added to project " + projectId + " by " + userInfoProvider.getUserEmail());
+    send(resp, 200, new JSONObject().put("ok", true).put("files", paths.size()));
+  }
+
+  private static boolean isPng(byte[] b) {
+    return b.length > 8 && (b[0] & 0xff) == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G';
+  }
+
+  private static boolean isJpeg(byte[] b) {
+    return b.length > 3 && (b[0] & 0xff) == 0xff && (b[1] & 0xff) == 0xd8 && (b[2] & 0xff) == 0xff;
   }
 
   private static long projectId(HttpServletRequest req) {

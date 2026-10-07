@@ -286,35 +286,53 @@ and prints your `https://….ts.net` address. Both links work at the same time.
 
 ## AI helper
 
-Press **Ctrl+I+M** (hold Ctrl and I, then M), or use **AI helper** in the Team panel, to open the
-helper in its own window. It works only on the project that is open: it reads that project's
-designer and blocks files, answers questions about them, and **proposes** changes to them.
+Press **Ctrl+I+M** (hold Ctrl and I, then M), or click **AI helper** in the Team panel, to open it in
+its own window. It works on the project that is open and streams its answers as it writes them, like
+a chat app. It can:
 
-**Small mode (the default).** The helper makes small bug fixes and additions: 1 to 3 existing
-screen or blocks files, none more than 50% bigger. It declines to build a whole app.
+* **Read the project**: every screen's designer and blocks files. It answers questions about them.
+* **Search the web**, if Brave Search is set up, and names the sites it used.
+* **Draw pictures**: `create_svg` draws an SVG, `svg_to_png` turns it into a PNG, shown in the chat.
+  A proposal can then add the PNG to the project's pictures.
+* **Propose changes.** Nothing changes until someone presses **Apply**. Then the project is backed up
+  first, everyone reloads, and the change can be undone from the backups list.
+* **`/goal`** works toward a goal in several steps. It shows a plan that ticks off as it goes, a timer
+  and a Stop button. It stops after 25 steps or 15 minutes. Proposals still need Apply, and closing
+  the window stops the goal.
 
-**Full-app mode.** Type `/override` and the PIN in the helper's box. For one hour, in this project
-and for the person who entered the PIN, the helper may build a complete small app: up to 12 files
-in one change, including up to 4 new screens (each a designer file and a blocks file). It may also
-rewrite the project's existing screens, so for a new app start from an empty project. `/override`
-alone shows whether the mode is on, and `/override off` ends it early. Restarting the hub also ends
-it. The helper cannot add images, sounds or other media.
+**Small mode (the default).** Small bug fixes and additions: 1 to 3 existing screen or blocks files,
+none more than 50% bigger. It declines to build a whole app.
 
-Nothing changes until someone presses **Apply**. The server then backs up the project first, and
-everyone with it open reloads. The change can be undone from the backups list. The PIN is checked on
-the Pi and is never sent to the model, and the helper doesn't keep the `/override` line in the
-conversation. Five wrong PINs from anyone on the team stop all PIN attempts for 15 minutes.
+**Full-app mode.** Type `/override` and the PIN in the helper's box. For one hour, in this project and
+for the person who entered the PIN, the helper may build a complete small app: up to 12 files in one
+change, including up to 4 new screens (each a designer file and a blocks file). It may also rewrite the
+project's existing screens, so for a new app start from an empty project. `/override` alone shows
+whether the mode is on, and `/override off` ends it early. Restarting the hub also ends it.
+
+**In the window:** Enter sends, Shift+Enter starts a new line, Esc or the square button stops, `/`
+lists the commands, Copy works on answers and code blocks, and Try again redoes the last question.
+
+Nothing changes until someone presses Apply. The PIN is checked on the Pi and is never sent to the
+model. Five wrong PINs from anyone on the team stop all PIN attempts for 15 minutes.
 
 Set it up on the Pi:
-* `sudo /opt/appinventor/set-ai.sh` asks for the OpenRouter key and model name.
-* `sudo /opt/appinventor/set-ai.sh --pin` asks for the full-app PIN (typing is hidden). Run it again
-  to change the PIN.
-* `--status` shows what is set. `--off` turns the helper off and removes the key and the PIN.
+* `sudo /opt/appinventor/set-ai.sh` asks for the OpenRouter key and the model name.
+* `sudo /opt/appinventor/set-ai.sh --pin` asks for the full-app PIN (typing is hidden).
+* `sudo /opt/appinventor/set-ai.sh --search` asks for a Brave Search key (free plan is enough). This is
+  optional. Get one at https://brave.com/search/api/.
+* `--status` shows what is set. `--off` turns the helper off and removes the key, PIN and search key.
+* Pictures need `librsvg2-bin`; the Pi build installs it. If it is missing:
+  `sudo apt install librsvg2-bin`.
 
-The key, the model and the PIN are stored in `/opt/appinventor/ai.env`, readable only by root, and
-are **not in the source**. Questions are limited to 12 a minute per person and 300 a day for the
-team. Anyone with the team code can use the helper; the PIN is what unlocks full-app mode. The
-project's files are sent to OpenRouter's model when someone asks a question.
+Keys, the model and the PIN are stored in `/opt/appinventor/ai.env`, readable only by root, and are
+**not in the source**. They never reach a browser or the model. Questions are limited to 12 a minute
+per person and 300 a day for the team (a goal counts as five). Anyone with the team code can use the
+helper; the PIN is what unlocks full-app mode.
+
+Privacy and safety: the project's files and your questions are sent to OpenRouter's model when you
+ask. Web results are read as data, never as instructions. The helper gets search snippets only; it
+cannot open arbitrary pages, so the Pi's own network stays out of its reach. Pictures are checked
+before they are drawn: no scripts, no embedded pages or images, and no links to other files.
 
 ## Speed
 

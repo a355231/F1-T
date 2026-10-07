@@ -30,7 +30,7 @@ if [ ! -x "$JDK/bin/javac" ]; then
   tar -xzf "$tmp/jdk.tgz" -C "$JDK" --strip-components=1
   rm -rf "$tmp"
 fi
-apt-get install -y ant rsync
+apt-get install -y ant rsync librsvg2-bin
 
 # The GWT compiler peaks at about 3 GB with a 2.5 GB heap. On Pis with less than 6 GB of memory,
 # add swap for the build and take it away afterwards.
