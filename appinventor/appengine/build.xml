@@ -36,9 +36,11 @@
     <equals arg1="${release}" arg2="true" />
   </condition>
 
+  <!-- ant -Dclient.dev.flags="-style obfuscated -optimize 9" for a small, fast single-file build -->
+  <property name="client.dev.flags" value="-style pretty"/>
   <condition property="client.flags"
              value="-optimize 9 -localWorkers 8"
-             else="-style pretty">
+             else="${client.dev.flags}">
     <equals arg1="${release}" arg2="true" />
   </condition>
 

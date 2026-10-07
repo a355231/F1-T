@@ -58,7 +58,8 @@ trap cleanup EXIT
 echo "== Building App Inventor (this takes a while on a Pi)"
 chown -R "$RUN_AS:$RUN_AS" "$ROOT"
 sudo -u "$RUN_AS" -H env JAVA_HOME="$JDK" PATH="$JDK/bin:$PATH" \
-  bash -c "cd '$ROOT/appinventor' && ant -q MakeAuthKey && ant -q -Dgwt.heap=$heap noplay"
+  bash -c "cd '$ROOT/appinventor' && ant -q MakeAuthKey &&
+    ant -q -Dgwt.heap=$heap '-Dclient.dev.flags=-style obfuscated -optimize 9' noplay"
 
 echo "== Installing into $BASE"
 mkdir -p "$BASE/war" "$BASE/hub" "$BASE/tools"
@@ -74,4 +75,6 @@ sudo -u "$RUN_AS" -H bash -c "cd '$BASE/hub' && npm install --omit=dev --no-audi
 
 echo "== Starting (and starting on every boot)"
 systemctl enable appinventor collab-hub cloudflared-quick
-systemctl restart appinventor collab-hub cloudflared-quick
+systemctl restart appinventor collab-hub
+# Left running if it already is, so the internet address stays the same across updates.
+systemctl start cloudflared-quick

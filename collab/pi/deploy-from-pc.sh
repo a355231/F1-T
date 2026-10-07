@@ -10,7 +10,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
   echo "== Building App Inventor (web IDE only, no companion app)"
-  (cd "$ROOT/appinventor" && { [ -f "$HOME/.appinventor/authkey.zip" ] || ant MakeAuthKey; } && ant noplay)
+  (cd "$ROOT/appinventor" && { [ -f "$HOME/.appinventor/authkey.zip" ] || ant MakeAuthKey; } &&
+    ant '-Dclient.dev.flags=-style obfuscated -optimize 9' noplay)
 fi
 
 echo "== Copying to $TARGET"
@@ -26,6 +27,6 @@ echo "== Applying the Pi's team code and restarting"
 # The team code stays on the Pi; apply-config.sh copies it into the new build without printing it.
 ssh "$TARGET" '/opt/appinventor/apply-config.sh &&
   cd /opt/appinventor/hub && npm install --omit=dev --no-audit --no-fund &&
-  sudo systemctl restart appinventor collab-hub cloudflared-quick'
+  sudo systemctl restart appinventor collab-hub && sudo systemctl start cloudflared-quick'
 
 echo "Done. Internet address: ssh $TARGET /opt/appinventor/tunnel-url.sh"
