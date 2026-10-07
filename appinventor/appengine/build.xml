@@ -615,8 +615,26 @@
        YaClientApp GWT application
        CheckYaClientApp - checks whether it is already up-to-date.
        ===================================================================== -->
+  <!-- The up-to-date check below only looks at source files, so remember which GWT flags built
+       the client and throw the old client away when they change. -->
+  <target name="CheckClientFlags" depends="AiRebindLib">
+    <loadfile property="old.client.flags" srcFile="${local.build.dir}/client-flags.txt"
+              failonerror="false"/>
+    <condition property="client.flags.changed">
+      <not><equals arg1="${old.client.flags}" arg2="${client.flags}" trim="true"/></not>
+    </condition>
+    <antcall target="DropOldClient"/>
+    <echo file="${local.build.dir}/client-flags.txt" message="${client.flags}"/>
+  </target>
+
+  <target name="DropOldClient" if="client.flags.changed">
+    <echo message="GWT flags changed; rebuilding the client with: ${client.flags}"/>
+    <delete dir="${build.war.dir}/ode"/>
+    <delete dir="${build.extra.dir}"/>
+  </target>
+
   <target name="CheckYaClientApp"
-          depends="common_CommonUtils,common_CommonVersion,components_CommonConstants,AiClientLib,AiRebindLib,CopyToBuildWar">
+          depends="common_CommonUtils,common_CommonVersion,components_CommonConstants,AiClientLib,AiRebindLib,CopyToBuildWar,CheckClientFlags">
     <!-- If ode.nocache.js is up-to-date, set YaClientApp.uptodate to true.
          Otherwise, set YaClientApp.uptodate to false -->
     <uptodate property="YaClientApp.uptodate"
