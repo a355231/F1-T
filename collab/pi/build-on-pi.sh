@@ -72,7 +72,7 @@ install -m 755 "$ROOT/collab/pi/apply-config.sh" "$ROOT/collab/pi/set-team-code.
   "$ROOT/collab/pi/move-data.sh" "$ROOT/collab/pi/watchdog.sh" "$ROOT/collab/pi/update.sh" \
   "$ROOT/collab/pi/stable-link.sh" "$ROOT/collab/pi/set-build-server.sh" "$ROOT/collab/pi/set-ai.sh" "$BASE/"
 echo "$ROOT" > "$BASE/repo"
-(cd "$ROOT" && git rev-parse --short HEAD) > "$BASE/version" 2>/dev/null || echo unknown > "$BASE/version"
+git -c safe.directory="$ROOT" -C "$ROOT" rev-parse --short HEAD > "$BASE/version" 2>/dev/null || echo unknown > "$BASE/version"
 chown -R "$RUN_AS:$RUN_AS" "$BASE"
 sudo -u "$RUN_AS" -H "$BASE/apply-config.sh"
 sudo -u "$RUN_AS" -H bash -c "cd '$BASE/hub' && npm install --omit=dev --no-audit --no-fund --silent"
