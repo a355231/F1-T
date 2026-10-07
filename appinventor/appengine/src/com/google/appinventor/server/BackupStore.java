@@ -154,6 +154,7 @@ final class BackupStore {
     Path file = folder(projectId).resolve(id + ".zip");
     byte[] zipBytes = Files.readAllBytes(file);
     Set<String> inBackup = new HashSet<>();
+    Set<String> present = new HashSet<>(storageIo.getProjectSourceFiles(userId, projectId));
     try (ZipInputStream in = new ZipInputStream(new ByteArrayInputStream(zipBytes))) {
       ZipEntry e;
       while ((e = in.getNextEntry()) != null) {
@@ -164,6 +165,10 @@ final class BackupStore {
           buf.write(chunk, 0, n);
         }
         inBackup.add(e.getName());
+        if (!present.contains(e.getName())) {
+          // A file deleted since the backup is registered with the project again first.
+          storageIo.addSourceFilesToProject(userId, projectId, true, e.getName());
+        }
         storageIo.uploadRawFileForce(projectId, e.getName(), userId, buf.toByteArray());
       }
     }

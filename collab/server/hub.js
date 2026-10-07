@@ -73,6 +73,9 @@ function clientAddress(req) {
 }
 
 function proxy(req, res) {
+  // Only the hub itself may ask App Inventor for full-app changes (see ai.js), so a browser's copy
+  // of this header is dropped here.
+  delete req.headers['x-collab-ai-mode'];
   const cacheable = perf.isCacheable(req);
   if (cacheable) {
     const entry = staticCache.get(req.url);
@@ -142,7 +145,7 @@ function proxy(req, res) {
   req.pipe(upstreamReq);
 }
 
-function askAppInventor(path, cookie, method = 'GET', body = null) {
+function askAppInventor(path, cookie, method = 'GET', body = null, extraHeaders = {}) {
   return new Promise(resolve => {
     const req = http.request({
       agent: perf.agent,
@@ -152,7 +155,8 @@ function askAppInventor(path, cookie, method = 'GET', body = null) {
       path,
       headers: Object.assign({cookie: cookie || '', accept: 'application/json'},
         method === 'GET' ? {} : body === null ? {'content-length': '0'} :
-          {'content-length': Buffer.byteLength(body), 'content-type': 'application/json'}),
+          {'content-length': Buffer.byteLength(body), 'content-type': 'application/json'},
+        extraHeaders),
       timeout: 30000,
     }, res => {
       let body = '';

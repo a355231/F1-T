@@ -266,19 +266,34 @@ and prints your `https://….ts.net` address. Both links work at the same time.
 ## AI helper
 
 Press **Ctrl+I+M** (hold Ctrl and I, then M), or use **AI helper** in the Team panel, to open the
-helper in its own window. It can read the open project's designer and blocks files, answer
-questions about them, and **propose** small bug fixes or additions. It will decline to build a
-whole app. Nothing changes until someone presses **Apply**; then App Inventor refuses anything
-but a small change (1 to 3 existing screen or blocks files, no file more than 50% bigger), makes a
-backup first, and everyone reloads. The change is on the same footing as a restore, so it can be
-undone from the backups list. Questions are limited to 12 a minute per person and 300 a day for the
-team.
+helper in its own window. It works only on the project that is open: it reads that project's
+designer and blocks files, answers questions about them, and **proposes** changes to them.
 
-The helper uses OpenRouter. The key and the model name are **not in the source**; set them on the
-Pi: `sudo /opt/appinventor/set-ai.sh` (asks for both, hidden, stored in `/opt/appinventor/ai.env`
-readable only by root, never sent to browsers). `--status` and `--off` also exist. Remember that
-anyone with the team code can use the helper, and that the project's files are sent to OpenRouter's
-model when someone asks a question.
+**Small mode (the default).** The helper makes small bug fixes and additions: 1 to 3 existing
+screen or blocks files, none more than 50% bigger. It declines to build a whole app.
+
+**Full-app mode.** Type `/override` and the PIN in the helper's box. For one hour, in this project
+and for the person who entered the PIN, the helper may build a complete small app: up to 12 files
+in one change, including up to 4 new screens (each a designer file and a blocks file). It may also
+rewrite the project's existing screens, so for a new app start from an empty project. `/override`
+alone shows whether the mode is on, and `/override off` ends it early. Restarting the hub also ends
+it. The helper cannot add images, sounds or other media.
+
+Nothing changes until someone presses **Apply**. The server then backs up the project first, and
+everyone with it open reloads. The change can be undone from the backups list. The PIN is checked on
+the Pi and is never sent to the model, and the helper doesn't keep the `/override` line in the
+conversation. Five wrong PINs from anyone on the team stop all PIN attempts for 15 minutes.
+
+Set it up on the Pi:
+* `sudo /opt/appinventor/set-ai.sh` asks for the OpenRouter key and model name.
+* `sudo /opt/appinventor/set-ai.sh --pin` asks for the full-app PIN (typing is hidden). Run it again
+  to change the PIN.
+* `--status` shows what is set. `--off` turns the helper off and removes the key and the PIN.
+
+The key, the model and the PIN are stored in `/opt/appinventor/ai.env`, readable only by root, and
+are **not in the source**. Questions are limited to 12 a minute per person and 300 a day for the
+team. Anyone with the team code can use the helper; the PIN is what unlocks full-app mode. The
+project's files are sent to OpenRouter's model when someone asks a question.
 
 ## Speed
 

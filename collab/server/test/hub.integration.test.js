@@ -54,6 +54,9 @@ test.before(async () => {
       hits[url.pathname] = (hits[url.pathname] || 0) + 1;
       return res.end(JSON.stringify({rows: BIG}));
     }
+    if (url.pathname === '/echo-headers') {
+      return res.end(JSON.stringify(req.headers));
+    }
     if (url.pathname === '/_ah/admin') {
       return res.end('{"admin":true}');
     }
@@ -267,4 +270,9 @@ test('files with a hash in their name are cached for a year; dynamic replies are
   assert.ok(zlib.gunzipSync(d1.body).toString().includes('function f'));
   await fetchRaw('/ode/dynamic', {'accept-encoding': 'gzip'});
   assert.strictEqual(hits['/ode/dynamic'], 2, 'dynamic replies always go to App Inventor');
+});
+
+test('a browser cannot ask App Inventor for full-app changes; the hub removes that header', async () => {
+  const r = await fetchRaw('/echo-headers', {'x-collab-ai-mode': 'full'});
+  assert.strictEqual(JSON.parse(r.body.toString())['x-collab-ai-mode'], undefined);
 });

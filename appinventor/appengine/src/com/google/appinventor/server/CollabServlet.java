@@ -9,9 +9,13 @@ import com.google.appinventor.server.storage.StorageIoInstanceHolder;
 import com.google.appinventor.shared.rpc.user.User;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
@@ -293,14 +297,27 @@ public class CollabServlet extends OdeServlet {
 
   private static final int MAX_WRITE_FILES = 3;
   private static final int MAX_WRITE_BYTES = 400 * 1024;
+  // Full-app mode (see collab/server/ai.js): the hub sends this header only for a change that a
+  // person asked the AI helper to make after entering the PIN. The hub removes it from anything a
+  // browser sends, so nobody else can ask for it.
+  private static final String AI_MODE_HEADER = "x-collab-ai-mode";
+  private static final int FULL_MAX_FILES = 12;
+  private static final int FULL_MAX_NEW_SCREENS = 4;
+  private static final int FULL_MAX_BYTES = 1536 * 1024;
+  private static final Pattern NEW_SCREEN_FILE =
+      Pattern.compile("[A-Za-z][A-Za-z0-9_]*\\.(scm|bky)");
 
   /**
    * Changes a few designer (.scm) and blocks (.bky) files of a project; used by the AI helper.
-   * Body: {"files": {"path": "new content", ...}}. Only files that exist can be changed, a file
-   * may not grow by more than half (plus 4 KB), and a backup is made first, so it can be undone.
+   * Body: {"files": {"path": "new content", ...}}. Normally only existing files can change, at most
+   * 3 at once, and a file may not grow by more than half (plus 4 KB). In full-app mode (the
+   * AI_MODE_HEADER) up to 12 files may change, and up to 4 new screens may be added, each as a
+   * .scm and a .bky file in the folder of the existing screens. A backup is made first, so that
+   * it can be undone.
    */
   private void writeFiles(String userId, long projectId, HttpServletRequest req,
       HttpServletResponse resp) throws IOException {
+    boolean full = "full".equals(req.getHeader(AI_MODE_HEADER));
     StringBuilder body = new StringBuilder();
     char[] buf = new char[8192];
     int n;
@@ -313,37 +330,97 @@ public class CollabServlet extends OdeServlet {
       }
     }
     JSONObject files = new JSONObject(body.toString()).getJSONObject("files");
-    if (files.length() == 0 || files.length() > MAX_WRITE_FILES) {
+    int maxFiles = full ? FULL_MAX_FILES : MAX_WRITE_FILES;
+    if (files.length() == 0 || files.length() > maxFiles) {
       send(resp, HttpServletResponse.SC_BAD_REQUEST,
-          error("a change touches 1 to " + MAX_WRITE_FILES + " files"));
+          error("a change touches 1 to " + maxFiles + " files"));
       return;
     }
-    List<String> existing = storageIo.getProjectSourceFiles(userId, projectId);
-    List<String> paths = new java.util.ArrayList<>();
-    for (java.util.Iterator<?> it = files.keys(); it.hasNext();) {
+    List<String> paths = new ArrayList<>();
+    for (Iterator<?> it = files.keys(); it.hasNext();) {
       paths.add((String) it.next());
     }
-    for (String path : paths) {
-      String content = files.getString(path);
-      byte[] old = existing.contains(path) ? storageIo.downloadRawFile(userId, projectId, path) : null;
-      if (old == null || !(path.endsWith(".scm") || path.endsWith(".bky"))) {
-        send(resp, HttpServletResponse.SC_BAD_REQUEST,
-            error("only existing screen (.scm) and blocks (.bky) files can be changed: " + path));
-        return;
-      }
-      int size = content.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-      if (size > MAX_WRITE_BYTES || size > old.length * 1.5 + 4096) {
-        send(resp, HttpServletResponse.SC_BAD_REQUEST,
-            error(path + " would change too much for a small fix"));
-        return;
-      }
+    String problem = fileProblem(userId, projectId, files, paths, full);
+    if (problem != null) {
+      send(resp, HttpServletResponse.SC_BAD_REQUEST, error(problem));
+      return;
     }
     backups.backup(userId, projectId, System.currentTimeMillis());
+    List<String> existing = storageIo.getProjectSourceFiles(userId, projectId);
+    List<String> created = new ArrayList<>();
+    for (String path : paths) {
+      if (!existing.contains(path)) {
+        created.add(path);
+      }
+    }
+    if (!created.isEmpty()) {
+      // A new file is registered with the project before its contents are stored.
+      storageIo.addSourceFilesToProject(userId, projectId, true, created.toArray(new String[0]));
+    }
     for (String path : paths) {
       storageIo.uploadFileForce(projectId, path, userId, files.getString(path), "UTF-8");
     }
-    LOG.info("AI change applied to project " + projectId + " by " + userInfoProvider.getUserEmail());
-    send(resp, 200, new JSONObject().put("ok", true).put("files", files.length()));
+    LOG.info((full ? "Full-app AI change" : "AI change") + " applied to project " + projectId
+        + " by " + userInfoProvider.getUserEmail());
+    send(resp, 200, new JSONObject().put("ok", true).put("files", paths.size()));
+  }
+
+  /** Why these changes are not allowed, or null if they are. */
+  private String fileProblem(String userId, long projectId, JSONObject files, List<String> paths,
+      boolean full) throws IOException {
+    List<String> existing = storageIo.getProjectSourceFiles(userId, projectId);
+    String folder = screenFolder(existing);
+    int totalBytes = 0;
+    int newScreens = 0;
+    for (String path : paths) {
+      if (!path.endsWith(".scm") && !path.endsWith(".bky")) {
+        return "only screen (.scm) and blocks (.bky) files can be changed: " + path;
+      }
+      int size = files.getString(path).getBytes(StandardCharsets.UTF_8).length;
+      if (size > MAX_WRITE_BYTES) {
+        return path + " is too big for one change";
+      }
+      totalBytes += size;
+      if (existing.contains(path)) {
+        if (!full) {
+          byte[] old = storageIo.downloadRawFile(userId, projectId, path);
+          if (old != null && size > old.length * 1.5 + 4096) {
+            return path + " would change too much for a small fix";
+          }
+        }
+      } else if (!full) {
+        return "only existing screen (.scm) and blocks (.bky) files can be changed: " + path;
+      } else if (folder == null || !path.startsWith(folder)
+          || !NEW_SCREEN_FILE.matcher(path.substring(folder.length())).matches()) {
+        return "a new file must be a screen in the same folder as the others: " + path;
+      } else {
+        String base = path.substring(0, path.lastIndexOf('.'));
+        String partner = base + (path.endsWith(".scm") ? ".bky" : ".scm");
+        if (!paths.contains(partner)) {
+          return "a new screen needs both " + base + ".scm and " + base + ".bky in the same change";
+        }
+        if (path.endsWith(".scm")) {
+          newScreens++;
+        }
+      }
+    }
+    if (full && totalBytes > FULL_MAX_BYTES) {
+      return "that change is too big at once";
+    }
+    if (newScreens > FULL_MAX_NEW_SCREENS) {
+      return "at most " + FULL_MAX_NEW_SCREENS + " new screens at a time";
+    }
+    return null;
+  }
+
+  /** The folder the project's screens are in, such as "src/appinventor/.../Project/", or null. */
+  private static String screenFolder(List<String> files) {
+    for (String f : files) {
+      if (f.endsWith(".scm")) {
+        return f.substring(0, f.lastIndexOf('/') + 1);
+      }
+    }
+    return null;
   }
 
   private static long projectId(HttpServletRequest req) {
