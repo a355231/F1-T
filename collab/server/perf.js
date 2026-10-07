@@ -16,10 +16,17 @@ const agent = new http.Agent({keepAlive: true, maxSockets: 64, keepAliveMsecs: 3
 
 const MAX_ENTRY_BYTES = 40 * 1024 * 1024;
 const MAX_CACHE_BYTES = parseInt(process.env.STATIC_CACHE_MB || '120', 10) * 1024 * 1024;
-const SHORT_TTL_MS = 60 * 1000;
+// How long a file that is not named by a hash is kept here. A deploy always restarts the hub (see
+// deploy-from-pc.sh and build-on-pi.sh), which empties this cache, so the copy kept here cannot outlive the
+// build it came from. Keeping it longer means a big file such as the font is not fetched again from App
+// Inventor, and compressed again, every minute someone is using the editor.
+const STATIC_TTL_MS = 10 * 60 * 1000;
+const NOCACHE_TTL_MS = 5 * 60 * 1000;
 const MIN_COMPRESS_BYTES = 1024;
 
-const COMPRESSIBLE = /^(text\/|application\/(javascript|x-javascript|json|xml|x-gwt-rpc|wasm)|image\/svg)/i;
+// Text, scripts and TrueType/OpenType fonts are compressed on the way to the browser. Fonts are not already
+// compressed (WOFF and WOFF2 are, so they are left out), and the browser gets the same bytes once decoded.
+const COMPRESSIBLE = /^(text\/|font\/(ttf|otf)|application\/(javascript|x-javascript|json|xml|x-gwt-rpc|wasm|x-font-ttf|x-font-opentype|font-sfnt|vnd\.ms-fontobject)|image\/svg)/i;
 const STATIC_EXT = /\.(js|css|png|jpe?g|gif|svg|ico|woff2?|ttf|otf|map|wasm|json|html?|rpc|txt|xml|mp3|ogg|wav)$/i;
 const HASHED = /\/[0-9A-F]{32}\.[A-Za-z.]+$/;
 const NEVER = /^\/(collab|login|_ah)(\/|$)|^\/ode\/collab/i;
@@ -77,7 +84,7 @@ class StaticCache {
     const hashed = isHashed(url);
     const etag = '"' + crypto.createHash('sha1').update(body).digest('base64').slice(0, 22) + '"';
     const entry = {headers, body, etag, at: now, forever: hashed,
-      ttl: /\.nocache\.js/.test(url) ? 30 * 1000 : SHORT_TTL_MS, variants: {}, size: body.length};
+      ttl: /\.nocache\.js/.test(url) ? NOCACHE_TTL_MS : STATIC_TTL_MS, variants: {}, size: body.length};
     if (this.bytes + entry.size > MAX_CACHE_BYTES) {
       for (const [k, e] of this.entries) if (!e.forever) this.drop(k);
       if (this.bytes + entry.size > MAX_CACHE_BYTES) {

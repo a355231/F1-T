@@ -357,10 +357,11 @@ other files. Pictures made here can be seen only by the person who made them.
 
 ## Speed
 
-The hub reuses its connections to App Inventor, compresses text (Brotli or gzip) on the way to the
-browser, and keeps scripts, images and styles in memory with long-lived cache headers, so a
-returning browser downloads almost nothing. The App Inventor service starts with a larger Java
-heap. `/collab/status` shows the cache's hits and misses.
+The hub reuses its connections to App Inventor, compresses text and TrueType/OpenType fonts (Brotli or
+gzip) on the way to the browser, and keeps scripts, fonts, images and styles in memory. A file the hub
+keeps is reused for ten minutes (five for the `.nocache.js` stubs); a deploy restarts the hub, which
+empties that memory. A returning browser downloads almost nothing. The App Inventor service starts with a
+larger Java heap. `/collab/status` shows the cache's hits and misses.
 
 ## Limits
 
