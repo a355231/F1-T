@@ -3,7 +3,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const {execFileSync} = require('node:child_process');
-const {Assistant, toolsFor} = require('../ai');
+const {Assistant, checkAttachments, trimToolResults, modelTakesImages} = require('../ai');
+const registry = require('../ai-registry');
+const proj = require('../ai-project');
 const {Hub} = require('../rooms');
 
 const PIN_VALUE = 'test-pin-42';
@@ -25,6 +27,24 @@ const toolTurn = (name, args, id = 'call_1', textBefore = '') => [
   '[DONE]',
 ];
 
+// A small real picture, in base64: its first bytes are the PNG signature and its size is in the header.
+const PNG_B64 = Buffer.concat([
+  Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'),
+  Buffer.from([0, 0, 0, 2, 0, 0, 0, 3]),
+  Buffer.alloc(16),
+]).toString('base64');
+
+const SCM = proj.writeScm({authURL: [], YaVersion: '208', Source: 'Form', Properties: {
+  $Name: 'Screen1', $Type: 'Form', $Version: '27', AppName: 'Pong', Title: 'Pong', Uuid: '0', $Components: [
+    {$Name: 'Label1', $Type: 'Label', $Version: '5', Text: 'Score', Uuid: '11'},
+  ]}});
+const BKY = '<xml xmlns="https://developers.google.com/blockly/xml"></xml>';
+const PROJECT_FILES = {
+  'src/a/Screen1.scm': SCM,
+  'src/a/Screen1.bky': BKY,
+  'youngandroidproject/project.properties': 'main=a.Screen1\nname=Pong\n',
+};
+
 function fakeRes() {
   const r = {status: 0, headers: {}, text: '', body: null, writableEnded: false, listeners: {},
     writeHead(s, h) { this.status = s; Object.assign(this.headers, h || {}); },
@@ -41,11 +61,18 @@ function fakeReq(url, method, body, cookie = 'AppInventor=ann') {
 }
 const events = res => res.text.split('\n\n').filter(s => s.startsWith('data:')).map(s => JSON.parse(s.slice(5)));
 
+// Builds an assistant with a fake App Inventor (ask), a fake model (fetchImpl) that answers from a script,
+// and a clock that the test can move. A script step may be a function of the request, so that it can
+// use ids the tools just made. options.models lists the models OpenRouter knows, for the vision check.
 function setup(script, options = {}) {
   process.env.OPENROUTER_API_KEY = 'sk-test';
   process.env.OPENROUTER_MODEL = 'some/model';
   process.env.AI_OVERRIDE_PIN = PIN_VALUE;
   delete process.env.BRAVE_API_KEY;
+  if (options.vision !== undefined) process.env.AI_VISION = options.vision;
+  else delete process.env.AI_VISION;
+  const {models, vision, ...rest} = options;
+  const modelList = models || [{id: 'some/model', architecture: {input_modalities: ['text']}}];
   let now = 1000000000000;
   const asked = [];
   const hub = new Hub(() => {});
@@ -56,20 +83,25 @@ function setup(script, options = {}) {
       return {userId: 'u-' + name, email: name + '@team.local'};
     }
     if (path.startsWith('/ode/collab/access')) return {ok: true, projectName: 'Pong'};
-    if (path.startsWith('/ode/collab/files')) return {files: [{path: 'src/a/Screen1.scm', bytes: 10}]};
+    if (path.startsWith('/ode/collab/bundle')) return {ok: true, files: PROJECT_FILES};
+    if (path.startsWith('/ode/collab/files')) return {files: Object.keys(PROJECT_FILES).map(p => ({path: p, bytes: PROJECT_FILES[p].length}))};
     if (path.startsWith('/ode/collab/file?')) return {text: 'file text', bytes: 9};
+    if (path.startsWith('/ode/collab/rawfile')) return {ok: true, path: 'assets/logo.png', mime: 'image/png', bytes: 40, data: PNG_B64};
     if (path.startsWith('/ode/collab/writefiles') || path.startsWith('/ode/collab/writemedia')) return {ok: true};
     return null;
   };
   const calls = [];
   const fetchImpl = async (url, opts) => {
+    if (url !== 'https://openrouter.ai/api/v1/chat/completions' && !url.startsWith('http://127.0.0.1')) {
+      // The model list, for the vision check.
+      return {ok: true, json: async () => ({data: modelList})};
+    }
     calls.push({url, headers: opts.headers, payload: JSON.parse(opts.body), signal: opts.signal});
     const next = script.shift();
-    // A script step may be a function of the request, so that it can use ids the tools just made.
     const turn = typeof next === 'function' ? next(JSON.parse(opts.body)) : (next || textTurn('(no more script)'));
     return {ok: true, body: sseBody(turn)};
   };
-  const ai = new Assistant(Object.assign({ask, hub, fetchImpl, now: () => now}, options));
+  const ai = new Assistant(Object.assign({ask, hub, fetchImpl, now: () => now}, rest));
   return {ai, asked, calls, hub, advance: ms => { now += ms; }};
 }
 
@@ -78,6 +110,11 @@ async function say(ai, who, text, projectId = '5') {
   await ai.handle(fakeReq('/collab/ai/stream', 'POST', {projectId, messages: [{role: 'user', content: text}]}, 'AppInventor=' + who), res);
   return events(res);
 }
+async function sayWith(ai, who, text, images, projectId = '5') {
+  const res = fakeRes();
+  await ai.handle(fakeReq('/collab/ai/stream', 'POST', {projectId, images, messages: [{role: 'user', content: text}]}, 'AppInventor=' + who), res);
+  return {res, evs: events(res)};
+}
 async function apply(ai, who, id, projectId = '5') {
   const res = fakeRes();
   await ai.handle(fakeReq('/collab/ai/apply', 'POST', {projectId, id}, 'AppInventor=' + who), res);
@@ -85,6 +122,13 @@ async function apply(ai, who, id, projectId = '5') {
 }
 const systemOf = call => call.payload.messages[0].content;
 const texts = evs => evs.filter(e => e.type === 'text').map(e => e.delta).join('');
+const toolNames = call => (call.payload.tools || []).map(t => t.function.name);
+const idOf = (payload, kind) => {
+  const text = payload.messages.map(m => typeof m.content === 'string' ? m.content : '').join('\n');
+  const m = new RegExp('id (' + kind + '_[0-9a-f]+)').exec(text);
+  return m ? m[1] : 'missing';
+};
+const toolErr = evs => evs.find(e => e.type === 'tool' && e.state === 'error');
 
 test('without a key and model the helper says it is not set up and calls nobody', async () => {
   const t = setup([]);
@@ -105,14 +149,15 @@ test('answers stream: each piece of text is passed on as it arrives, then the st
 });
 
 test('the model reads the project through a tool, shows the tool as it works, then answers', async () => {
-  const t = setup([toolTurn('read_file', {path: 'src/a/Screen1.scm'}, 'call_9', 'Let me look. '), textTurn('All fine.')]);
+  const t = setup([toolTurn('read_file', {path: 'src/a/Screen1.bky'}, 'call_9', 'Let me look. '), textTurn('All fine.')]);
   const evs = await say(t.ai, 'ann', 'what is in here?');
   assert.strictEqual(texts(evs), 'Let me look. All fine.');
   const toolEvents = evs.filter(e => e.type === 'tool');
   assert.deepStrictEqual(toolEvents.map(e => e.state), ['running', 'done']);
   assert.strictEqual(toolEvents[0].name, 'read_file');
-  assert.strictEqual(toolEvents[0].label, 'Reading Screen1.scm');
-  assert.ok(t.calls[1].payload.messages.some(m => m.role === 'tool' && m.tool_call_id === 'call_9' && m.content === 'file text'));
+  assert.strictEqual(toolEvents[0].label, 'Reading Screen1.bky');
+  const result = t.calls[1].payload.messages.find(m => m.role === 'tool' && m.tool_call_id === 'call_9');
+  assert.match(result.content, /xml/, 'the file is numbered and shown');
   assert.doesNotMatch(JSON.stringify(t.calls[0].payload.messages), /sk-test/, 'the key is never shown to the model');
 });
 
@@ -134,15 +179,8 @@ test('small changes stop at three files; invalid proposals become a tool error t
   const t = setup([toolTurn('propose_change', {summary: 's', files: four}), textTurn('Sorry.')]);
   const evs = await say(t.ai, 'ann', 'rewrite everything');
   assert.strictEqual(evs.find(e => e.type === 'proposal'), undefined);
-  const failed = evs.find(e => e.type === 'tool' && e.state === 'error');
-  assert.match(failed.detail, /propose 1 to 3/);
+  assert.match(toolErr(evs).detail, /at most 3 files/);
 });
-
-const idOf = (payload, kind) => {
-  const text = payload.messages.map(m => m.content || '').join('\n');
-  const m = new RegExp('id (' + kind + '_[0-9a-f]+)').exec(text);
-  return m ? m[1] : 'missing';
-};
 
 test('an SVG picture is shown as it is drawn, turned into a PNG, and kept for its owner only', {skip: !rsvgInstalled && 'rsvg-convert is not installed here'}, async () => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60"><rect width="120" height="60" fill="#e53935"/></svg>';
@@ -175,7 +213,7 @@ test('a picture with a script is refused with a plain reason', async () => {
   const t = setup([toolTurn('create_svg', {name: 'Bad', svg: '<svg><script>x()</script></svg>'}), textTurn('Sorry.')]);
   const evs = await say(t.ai, 'ann', 'draw');
   assert.strictEqual(evs.find(e => e.type === 'artifact'), undefined);
-  assert.match(evs.find(e => e.type === 'tool' && e.state === 'error').detail, /not allowed/);
+  assert.match(toolErr(evs).detail, /not allowed/);
 });
 
 test('a PNG picture is added to the project only when the person applies the proposal', {skip: !rsvgInstalled && 'rsvg-convert is not installed here'}, async () => {
@@ -198,10 +236,10 @@ test('a PNG picture is added to the project only when the person applies the pro
   assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'no source files were touched');
 });
 
-test('a picture name that is not a PNG or JPG name is refused', async () => {
+test('a picture name that is not a PNG name is refused', async () => {
   const t = setup([toolTurn('propose_change', {summary: 'x', media: [{name: '../evil.svg', picture_id: 'nope'}]}), textTurn('Sorry.')]);
   const evs = await say(t.ai, 'ann', 'add a file');
-  assert.match(evs.find(e => e.type === 'tool' && e.state === 'error').detail, /picture names/);
+  assert.match(toolErr(evs).detail, /picture names/);
 });
 
 test('/override: a wrong PIN changes nothing, and the model never hears about it', async () => {
@@ -254,8 +292,7 @@ test('/goal: the helper plans first, shows the plan, and stops when it says it i
   ]);
   const evs = await say(t.ai, 'ann', '/goal check the screens');
   assert.match(systemOf(t.calls[0]), /GOAL MODE[\s\S]*check the screens/);
-  assert.ok(toolsFor({full: false, search: false, goal: true}).some(x => x.function.name === 'update_plan'));
-  assert.ok(!toolsFor({full: false, search: false, goal: false}).some(x => x.function.name === 'update_plan'));
+  assert.ok(toolNames(t.calls[0]).includes('update_plan'));
   const plan = evs.find(e => e.type === 'plan');
   assert.deepStrictEqual(plan.steps.map(s => s.status), ['doing', 'todo']);
   assert.match(texts(evs), /All done/);
@@ -283,9 +320,11 @@ test('web search is offered only when a search key is set, and is used through t
   process.env.BRAVE_API_KEY = 'brave-key';
   const evs = await say(t.ai, 'ann', 'search for quiz app ideas');
   delete process.env.BRAVE_API_KEY;
-  assert.ok(t.calls[0].payload.tools.some(x => x.function.name === 'web_search'));
+  assert.ok(toolNames(t.calls[0]).includes('web_search'));
   assert.strictEqual(evs.find(e => e.type === 'tool' && e.name === 'web_search' && e.state === 'done').detail, '1 results');
-  assert.ok(toolsFor({full: false, search: false, goal: false}).every(x => x.function.name !== 'web_search'));
+  const t2 = setup([textTurn('no search')]);
+  await say(t2.ai, 'ann', 'hi');
+  assert.ok(!toolNames(t2.calls[0]).includes('web_search'));
 });
 
 test('applying a full-app change sends the header that allows it; a small change does not', async () => {
@@ -338,4 +377,177 @@ test('the browser files are only served from the fixed list', async () => {
   const res = fakeRes();
   await t.ai.handle(fakeReq('/collab/ai/static/..%2Fai.js', 'GET', null), res);
   assert.strictEqual(res.status, 404);
+});
+
+// ---- the draft: changes are made in the helper's copy and only proposed ----
+
+test('a component added in the draft reaches the project only when the proposal is applied', async () => {
+  const t = setup([
+    toolTurn('scm_add_component', {screen: 'Screen1', type: 'Button', name: 'Button1', properties: {Text: 'Start'}}, 'd1'),
+    toolTurn('check_project', {}, 'd2'),
+    toolTurn('propose_draft', {summary: 'Adds a Start button'}, 'd3'),
+    textTurn('Press Apply to add the button.'),
+  ]);
+  const evs = await say(t.ai, 'ann', 'add a start button');
+  assert.deepStrictEqual(evs.filter(e => e.type === 'tool' && e.state === 'error'), []);
+  const proposal = evs.find(e => e.type === 'proposal');
+  assert.deepStrictEqual(proposal.files, [{path: 'src/a/Screen1.scm', isNew: false}]);
+  assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'nothing written before Apply');
+  assert.match(texts(evs), /Press Apply/);
+  assert.strictEqual((await apply(t.ai, 'ann', proposal.id)).status, 200);
+  const written = JSON.parse(t.asked.find(a => a.path.startsWith('/ode/collab/writefiles')).body).files['src/a/Screen1.scm'];
+  const obj = proj.parseScm(written);
+  assert.ok(proj.findNode(obj, 'Button1'), 'the new button is in the screen');
+  assert.ok(proj.findNode(obj, 'Label1'), 'the old label is kept');
+});
+
+test('the draft checks names and property names against App Inventor before anything is changed', async () => {
+  const t = setup([
+    toolTurn('scm_add_component', {screen: 'Screen1', type: 'Buton', name: 'B1'}, 'x1'),
+    toolTurn('scm_set_property', {screen: 'Screen1', component: 'Label1', property: 'Colour', value: 'red'}, 'x2'),
+    textTurn('I could not add it.'),
+  ]);
+  const evs = await say(t.ai, 'ann', 'add a button');
+  const errors = evs.filter(e => e.type === 'tool' && e.state === 'error').map(e => e.detail);
+  assert.match(errors[0], /unknown component type "Buton"/);
+  assert.match(errors[1], /no designer property "Colour"/);
+  assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')));
+});
+
+test('new screens are offered only in full-app mode, and then need both their files', async () => {
+  const t = setup([textTurn('no')]);
+  await say(t.ai, 'ann', 'a new screen');
+  assert.ok(!toolNames(t.calls[0]).includes('scm_new_screen'), 'not offered in small mode');
+
+  const f = setup([
+    toolTurn('scm_new_screen', {name: 'Quiz', app_name: 'Quiz'}, 'n1'),
+    toolTurn('propose_draft', {summary: 'A quiz screen'}, 'n2'),
+    textTurn('Press Apply.'),
+  ]);
+  await say(f.ai, 'ann', '/override ' + PIN_VALUE);
+  const evs = await say(f.ai, 'ann', 'add a quiz screen');
+  assert.ok(toolNames(f.calls[0]).includes('scm_new_screen'));
+  const proposal = evs.find(e => e.type === 'proposal');
+  assert.deepStrictEqual(proposal.files, [{path: 'src/a/Quiz.scm', isNew: true}, {path: 'src/a/Quiz.bky', isNew: true}]);
+  assert.strictEqual((await apply(f.ai, 'ann', proposal.id)).status, 200);
+  assert.deepStrictEqual(f.asked.filter(x => x.path.startsWith('/ode/collab/writefiles')).pop().headers, {'x-collab-ai-mode': 'full'});
+});
+
+test('a handler for a component that is not on the screen is refused, and check_project names the problems', async () => {
+  const t = setup([
+    toolTurn('bky_add_event_handler', {screen: 'Screen1', component: 'Button9', event: 'Click'}, 'h1'),
+    toolTurn('check_project', {}, 'h2'),
+    textTurn('Done.'),
+  ]);
+  const evs = await say(t.ai, 'ann', 'wire a button');
+  assert.match(toolErr(evs).detail, /no component named Button9/);
+  const check = t.calls[2].payload.messages.find(m => m.role === 'tool' && m.tool_call_id === 'h2');
+  assert.match(check.content, /No problems found/);
+});
+
+test('scratch notes are kept for the person and project, and only the names are listed', async () => {
+  const t = setup([
+    toolTurn('scratch_write', {key: 'plan', text: 'Button, then Label'}, 's1'),
+    toolTurn('scratch_read', {key: 'plan'}, 's2'),
+    textTurn('ok'),
+  ]);
+  await say(t.ai, 'ann', 'remember this');
+  const read = t.calls[1].payload.messages.find(m => m.tool_call_id === 's1');
+  assert.strictEqual(read.content, 'Noted.');
+  assert.strictEqual(t.calls[2].payload.messages.find(m => m.tool_call_id === 's2').content, 'Button, then Label');
+});
+
+test('ask_user shows the question and ends the answer, so the person replies in their next message', async () => {
+  const t = setup([toolTurn('ask_user', {question: 'Which colour should the button be?'}, 'q1'), textTurn('never sent')]);
+  const evs = await say(t.ai, 'ann', 'add a button');
+  assert.deepStrictEqual(evs.filter(e => e.type === 'question').map(e => e.text), ['Which colour should the button be?']);
+  assert.strictEqual(t.calls.length, 1, 'no further model call');
+});
+
+// ---- pictures the model can look at ----
+
+test('without a picture-reading model, view_picture is not offered and attached pictures are not sent', async () => {
+  const t = setup([textTurn('I cannot see it.')]);
+  const {evs} = await sayWith(t.ai, 'ann', 'what is this?', [{name: 'a.png', mime: 'image/png', data: PNG_B64}]);
+  assert.ok(!toolNames(t.calls[0]).includes('view_picture'));
+  assert.strictEqual(typeof t.calls[0].payload.messages.at(-1).content, 'string');
+  assert.match(t.calls[0].payload.messages.at(-1).content, /cannot look at pictures/);
+  assert.match(evs.find(e => e.type === 'status').text, /cannot look at pictures/);
+  assert.doesNotMatch(JSON.stringify(t.calls), /image_url/);
+});
+
+test('with a picture-reading model (listed by OpenRouter), the project picture is shown to the model', async () => {
+  const t = setup([toolTurn('view_picture', {path: 'assets/logo.png'}, 'v1'), textTurn('The logo is a small red square.')], {
+    models: [{id: 'some/model', architecture: {modality: 'text+image->text', input_modalities: ['text', 'image']}}],
+  });
+  const evs = await say(t.ai, 'ann', 'look at the logo');
+  assert.ok(toolNames(t.calls[0]).includes('view_picture'));
+  const shown = t.calls[1].payload.messages.find(m => m.role === 'user' && Array.isArray(m.content));
+  assert.ok(shown, 'a message with the picture follows the tool result');
+  assert.strictEqual(shown.content[1].type, 'image_url');
+  assert.ok(shown.content[1].image_url.url.startsWith('data:image/png;base64,iVBORw0KGgo'));
+  assert.match(texts(evs), /red square/);
+  const artifact = evs.find(e => e.type === 'artifact');
+  assert.strictEqual(artifact.kind, 'png');
+});
+
+test('AI_VISION overrides the model list: 1 turns pictures on, 0 turns them off', async () => {
+  const on = setup([textTurn('ok')], {vision: '1'});
+  await say(on.ai, 'ann', 'hi');
+  assert.ok(toolNames(on.calls[0]).includes('view_picture'));
+  const off = setup([textTurn('ok')], {vision: '0', models: [{id: 'some/model', architecture: {input_modalities: ['text', 'image']}}]});
+  await say(off.ai, 'ann', 'hi');
+  assert.ok(!toolNames(off.calls[0]).includes('view_picture'));
+});
+
+test('an attached picture is checked by its contents, and a fake one is refused', async () => {
+  const t = setup([]);
+  const bad = await sayWith(t.ai, 'ann', 'look', [{name: 'x.png', mime: 'image/png', data: Buffer.from('not a picture').toString('base64')}]);
+  assert.strictEqual(bad.res.status, 400);
+  assert.match(JSON.parse(bad.res.body).error, /does not look like/);
+  assert.strictEqual(t.calls.length, 0);
+});
+
+test('with a picture-reading model, an attached picture goes to the model with the message, not kept after it', async () => {
+  const t = setup([textTurn('A red square.'), textTurn('Still red.')], {vision: '1'});
+  await sayWith(t.ai, 'ann', 'what colour?', [{name: 'a.png', mime: 'image/png', data: PNG_B64}]);
+  const last = t.calls[0].payload.messages.at(-1);
+  assert.strictEqual(last.role, 'user');
+  assert.strictEqual(last.content[0].text, 'what colour?');
+  assert.strictEqual(last.content[1].type, 'image_url');
+});
+
+// ---- small helpers ----
+
+test('checkAttachments keeps only real pictures of the four types, at most three', () => {
+  const ok = checkAttachments([{name: 'a.png', mime: 'image/png', data: PNG_B64}]);
+  assert.strictEqual(ok.images.length, 1);
+  assert.match(checkAttachments([{name: 'a.svg', mime: 'image/svg+xml', data: 'PHN2Zz4='}]).error, /not a PNG, JPEG, GIF or WebP/);
+  assert.match(checkAttachments([1, 2, 3, 4].map(() => ({name: 'a', mime: 'image/png', data: PNG_B64}))).error, /at most 3/);
+  assert.deepStrictEqual(checkAttachments(undefined), {images: []});
+});
+
+test('modelTakesImages reads OpenRouter\'s two forms of the model list', () => {
+  assert.strictEqual(modelTakesImages({architecture: {input_modalities: ['text', 'image']}}), true);
+  assert.strictEqual(modelTakesImages({architecture: {input_modalities: ['text']}}), false);
+  assert.strictEqual(modelTakesImages({architecture: {modality: 'text+image->text'}}), true);
+  assert.strictEqual(modelTakesImages({architecture: {modality: 'text->text'}}), false);
+  assert.strictEqual(modelTakesImages({}), false);
+});
+
+test('old tool results are shortened first when an answer runs long', () => {
+  const big = 'x'.repeat(150000);
+  const messages = [{role: 'user', content: 'hi'}, {role: 'tool', content: big}, {role: 'tool', content: big}, {role: 'tool', content: 'small'}];
+  trimToolResults(messages);
+  assert.match(messages[1].content, /shortened/);
+  assert.strictEqual(messages[3].content, 'small', 'the newest result is kept');
+});
+
+test('the draft refuses files outside the screens, and grows only so far in small mode', async () => {
+  const draft = new registry.Draft({projectId: '5', cookie: 'AppInventor=ann', ask: async () => ({ok: true, files: PROJECT_FILES}), full: false});
+  await assert.rejects(draft.write('youngandroidproject/project.properties', 'x'), /not a designer or blocks file/);
+  await assert.rejects(draft.write('src/a/New.scm', 'x'), /new screens need full-app mode/);
+  await assert.rejects(draft.write('src/a/Screen1.scm', 'x'.repeat(20000)), /grow too much/);
+  await draft.write('src/a/Screen1.scm', SCM);
+  assert.strictEqual(draft.changed.size, 1);
 });

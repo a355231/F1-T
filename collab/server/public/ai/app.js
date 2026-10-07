@@ -104,9 +104,21 @@
     empty.hidden = true;
   }
 
-  function addUser(text) {
+  function addUser(text, images) {
     hideEmpty();
     var row = el('div', 'msg user');
+    if (images && images.length) {
+      var strip = el('div', 'thumbs');
+      images.forEach(function (p) {
+        var t = el('div', 'thumb');
+        var img = document.createElement('img');
+        img.alt = p.name;
+        img.src = p.url;
+        t.appendChild(img);
+        strip.appendChild(t);
+      });
+      row.appendChild(strip);
+    }
     row.appendChild(el('div', 'bubble', text));
     list.appendChild(row);
     keepBottom();
@@ -198,10 +210,11 @@
     var img = document.createElement('img');
     img.alt = ev.title || 'picture';
     img.src = '/collab/ai/artifact?id=' + encodeURIComponent(ev.id);
-    img.width = Math.min(ev.width, 280);
+    if (ev.width) img.width = Math.min(ev.width, 280);
     box.appendChild(img);
     var cap = el('figcaption');
-    cap.appendChild(el('span', '', (ev.title || 'Picture') + ' · ' + ev.width + ' × ' + ev.height + (ev.kind === 'png' ? ' PNG' : ' SVG')));
+    var what = ev.kind === 'svg' ? 'SVG' : ev.kind === 'png' ? 'PNG' : 'picture';
+    cap.appendChild(el('span', '', (ev.title || 'Picture') + (ev.width ? ' · ' + ev.width + ' × ' + ev.height : '') + ' · ' + what));
     var link = el('a', '', 'Open');
     link.href = img.src;
     link.target = '_blank';
@@ -290,6 +303,14 @@
     api.block(el('div', 'notice' + (isError ? ' error' : ''), text));
   }
 
+  // A question the helper asks: the person answers in their next message.
+  function question(api, text) {
+    var card = el('div', 'notice question');
+    card.appendChild(el('strong', '', 'The helper asks: '));
+    card.appendChild(document.createTextNode(text));
+    api.block(card);
+  }
+
   function onEvent(api, ev) {
     switch (ev.type) {
       case 'text': api.text(ev.delta); break;
@@ -298,6 +319,7 @@
       case 'proposal': proposal(api, ev); break;
       case 'plan': plan(api, ev.steps || []); break;
       case 'status': notice(api, ev.text, false); break;
+      case 'question': question(api, ev.text); break;
       case 'error': notice(api, ev.message, true); break;
       default: break;
     }
@@ -423,24 +445,29 @@
 
   function send(text, opts) {
     text = String(text || '').trim();
-    if (!text || controller || !projectId) return;
-    closeSlash();
     var isOverride = /^\/override\b/i.test(text);
     var isGoal = /^\/goal\b/i.test(text);
+    var images = isOverride ? [] : pending.slice();
+    if (!text && images.length) text = images.length > 1 ? 'What is in these pictures?' : 'What is in this picture?';
+    if (!text || controller || !projectId) return;
+    closeSlash();
     var shown = text;
     if (isOverride) {
       shown = /^\/override\s+off\b/i.test(text) ? '/override off'
         : /^\/override\s+\S/.test(text) ? '/override (PIN hidden)' : '/override';
     }
-    var row = addUser(shown);
+    var row = addUser(shown, images);
     if (!isOverride) history.push({role: 'user', content: text});
     input.value = '';
+    pending = [];
+    renderThumbs();
     autosize();
     var api = newAssistant();
     controller = new AbortController();
     setBusy(true);
     if (isGoal) startGoal(text.replace(/^\/goal\s*/i, ''));
     var body = {projectId: projectId, messages: isOverride ? [{role: 'user', content: text}] : history.slice(-20)};
+    if (images.length) body.images = images.map(function (p) { return {name: p.name, mime: p.mime, data: p.data}; });
     streamRequest(body, controller.signal, function (ev) {
       onEvent(api, ev);
       keepBottom();
@@ -490,6 +517,96 @@
   $('gstop').onclick = function () { if (controller) controller.abort(); };
 
   // ---- the composer ----
+
+  // Pictures the person attaches (only when the model in use can look at pictures).
+  var MAX_PICTURES = 3;
+  var MAX_PICTURE_BYTES = 1536 * 1024;
+  var PICTURE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+  var HINT = $('hint').textContent;
+  var pending = [];
+  var visionOn = false;
+  var attach = $('attach');
+  var fileInput = $('file');
+  var thumbs = $('thumbs');
+
+  function renderThumbs() {
+    thumbs.innerHTML = '';
+    pending.forEach(function (p, i) {
+      var t = el('div', 'thumb');
+      var img = document.createElement('img');
+      img.alt = p.name;
+      img.src = p.url;
+      t.appendChild(img);
+      var x = el('button', '', '\u00d7');
+      x.type = 'button';
+      x.setAttribute('aria-label', 'Remove ' + p.name);
+      x.onclick = function () {
+        URL.revokeObjectURL(p.url);
+        pending.splice(i, 1);
+        renderThumbs();
+      };
+      t.appendChild(x);
+      thumbs.appendChild(t);
+    });
+    thumbs.hidden = !pending.length;
+  }
+
+  function flash(text) {
+    var h = $('hint');
+    h.textContent = text;
+    clearTimeout(flash.timer);
+    flash.timer = setTimeout(function () { h.textContent = HINT; }, 4000);
+  }
+
+  function addFiles(list) {
+    if (!visionOn) {
+      flash('This model cannot look at pictures.');
+      return;
+    }
+    Array.prototype.forEach.call(list || [], function (file) {
+      if (pending.length >= MAX_PICTURES) {
+        flash('Up to ' + MAX_PICTURES + ' pictures at a time.');
+      } else if (PICTURE_TYPES.indexOf(file.type) < 0) {
+        flash(file.name + ' is not a PNG, JPEG, GIF or WebP picture.');
+      } else if (file.size > MAX_PICTURE_BYTES) {
+        flash(file.name + ' is too big (over 1.5 MB).');
+      } else {
+        var reader = new FileReader();
+        reader.onload = function () {
+          var m = /^data:[^;]+;base64,(.*)$/.exec(String(reader.result));
+          if (!m || pending.length >= MAX_PICTURES) return;
+          pending.push({name: file.name.slice(0, 80), mime: file.type, data: m[1], url: URL.createObjectURL(file)});
+          renderThumbs();
+        };
+        reader.readAsDataURL(file);
+      }
+    });
+  }
+
+  attach.onclick = function () { fileInput.click(); };
+  fileInput.onchange = function () {
+    addFiles(fileInput.files);
+    fileInput.value = '';
+  };
+  input.addEventListener('paste', function (e) {
+    var files = [];
+    Array.prototype.forEach.call((e.clipboardData && e.clipboardData.items) || [], function (it) {
+      if (it.kind === 'file' && /^image\//.test(it.type)) files.push(it.getAsFile());
+    });
+    if (files.length) {
+      e.preventDefault();
+      addFiles(files);
+    }
+  });
+  $('composer').addEventListener('dragover', function (e) {
+    if (e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0) e.preventDefault();
+  });
+  $('composer').addEventListener('drop', function (e) {
+    if (e.dataTransfer && e.dataTransfer.files.length) {
+      e.preventDefault();
+      addFiles(e.dataTransfer.files);
+    }
+  });
 
   function autosize() {
     input.style.height = 'auto';
@@ -619,6 +736,8 @@
           return;
         }
         fullUntil = s.fullUntil || 0;
+        visionOn = !!s.vision;
+        attach.hidden = !visionOn;
         showMode();
         $('sub').textContent = 'Signed in as ' + s.name + (s.search ? ' · web search on' : '');
         if (!s.configured) $('notSet').hidden = false;

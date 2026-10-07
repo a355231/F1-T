@@ -220,6 +220,55 @@ public class CollabServlet extends OdeServlet {
           writeFiles(userId, projectId, req, resp);
           return;
         }
+        case "/bundle": {
+          // Every designer, blocks and properties file of the project in one reply (for the AI helper).
+          long projectId = projectId(req);
+          storageIo.assertUserHasProject(userId, projectId);
+          JSONObject out = new JSONObject();
+          int total = 0;
+          for (String f : storageIo.getProjectSourceFiles(userId, projectId)) {
+            if (!(f.endsWith(".scm") || f.endsWith(".bky") || f.endsWith("project.properties"))) {
+              continue;
+            }
+            byte[] content = storageIo.downloadRawFile(userId, projectId, f);
+            if (content == null) {
+              continue;
+            }
+            total += content.length;
+            if (total > MAX_BUNDLE_BYTES) {
+              send(resp, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
+                  error("the project is too big to read at once"));
+              return;
+            }
+            out.put(f, new String(content, java.nio.charset.StandardCharsets.UTF_8));
+          }
+          send(resp, 200, new JSONObject().put("ok", true).put("files", out));
+          return;
+        }
+        case "/rawfile": {
+          // One picture of the project (assets/*.png, *.jpg, *.gif), base64, for the AI helper to look at.
+          long projectId = projectId(req);
+          storageIo.assertUserHasProject(userId, projectId);
+          String file = req.getParameter("path");
+          if (file == null || !PICTURE_ASSET.matcher(file).matches()) {
+            send(resp, HttpServletResponse.SC_BAD_REQUEST, error("only pictures in assets/ can be read"));
+            return;
+          }
+          if (!storageIo.getProjectSourceFiles(userId, projectId).contains(file)) {
+            send(resp, HttpServletResponse.SC_NOT_FOUND, error("no such picture"));
+            return;
+          }
+          byte[] content = storageIo.downloadRawFile(userId, projectId, file);
+          if (content == null || content.length > MAX_RAW_BYTES) {
+            send(resp, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, error("that picture is too big to view"));
+            return;
+          }
+          String lower = file.toLowerCase(java.util.Locale.ROOT);
+          String mime = lower.endsWith(".gif") ? "image/gif" : (lower.endsWith(".png") ? "image/png" : "image/jpeg");
+          send(resp, 200, new JSONObject().put("ok", true).put("path", file).put("mime", mime)
+              .put("bytes", content.length).put("data", java.util.Base64.getEncoder().encodeToString(content)));
+          return;
+        }
         case "/writemedia": {
           if (!post) {
             send(resp, HttpServletResponse.SC_METHOD_NOT_ALLOWED, error("use POST"));
@@ -433,6 +482,10 @@ public class CollabServlet extends OdeServlet {
     return null;
   }
 
+  private static final int MAX_BUNDLE_BYTES = 3 * 1024 * 1024;
+  private static final int MAX_RAW_BYTES = 2 * 1024 * 1024;
+  private static final Pattern PICTURE_ASSET =
+      Pattern.compile("assets/[^/]{1,80}\\.(png|jpe?g|gif)", Pattern.CASE_INSENSITIVE);
   private static final int MAX_MEDIA = 3;
   private static final int MAX_MEDIA_BYTES = 1024 * 1024;
   private static final Pattern PICTURE_NAME =

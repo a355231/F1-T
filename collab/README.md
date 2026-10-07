@@ -287,21 +287,34 @@ and prints your `https://….ts.net` address. Both links work at the same time.
 ## AI helper
 
 Press **Ctrl+I+M** (hold Ctrl and I, then M), or click **AI helper** in the Team panel, to open it in
-its own window. It works on the project that is open and streams its answers as it writes them, like
-a chat app. It can:
+its own window. It works on the project that is open, and its answers stream in as they are written,
+like a chat app. The helper works on a draft copy of the project. A change reaches the project only when
+someone presses **Apply**; then the project is backed up first and everyone reloads.
 
-* **Read the project**: every screen's designer and blocks files. It answers questions about them.
-* **Search the web**, if Brave Search is set up, and names the sites it used.
-* **Draw pictures**: `create_svg` draws an SVG, `svg_to_png` turns it into a PNG, shown in the chat.
-  A proposal can then add the PNG to the project's pictures.
-* **Propose changes.** Nothing changes until someone presses **Apply**. Then the project is backed up
-  first, everyone reloads, and the change can be undone from the backups list.
+**What it can do**
+
+* **Read and check the project**: list the files, read a file (400 lines at a time), search every file,
+  outline a screen's components and blocks, and run `check_project`, which finds components and blocks
+  that do not exist, duplicate names and handlers, and missing settings.
+* **Change screens**: add, set, remove and rename components (checked against App Inventor's own list of
+  components, properties and events); add event handlers and blocks in App Inventor's format, with
+  examples built in; edit a piece of text in a file.
+* **Look things up**: a component's properties, methods and events; the component types by category;
+  documentation pages from App Inventor, Android, MDN, Python, W3C, GitHub, Wikipedia, Stack Overflow,
+  Microsoft Learn and Oracle, read as text (https only); web search, if Brave Search is set up.
+* **Calculate and take notes**: exact arithmetic, the time on the Pi, and up to 40 notes kept for an hour.
+* **Draw pictures**: `create_svg` draws an SVG, `svg_to_png` turns it into a PNG, and a proposal can add
+  the PNG to the project's pictures.
+* **Look at pictures**, when the model in use accepts images: pictures in the project, pictures it drew,
+  and pictures you attach. Attach with the paperclip, paste, or drop them on the box: up to three, PNG,
+  JPEG, GIF or WebP, 1.5 MB each. The paperclip only shows when the model can look at pictures.
+* **Ask you a question** when it needs a choice, such as a colour. You answer in your next message.
+* **Propose changes.** Nothing changes until someone presses Apply.
 * **`/goal`** works toward a goal in several steps. It shows a plan that ticks off as it goes, a timer
-  and a Stop button. It stops after 25 steps or 15 minutes. Proposals still need Apply, and closing
-  the window stops the goal.
+  and a Stop button. It stops after 40 steps or 20 minutes. Closing the window stops the goal.
 
-**Small mode (the default).** Small bug fixes and additions: 1 to 3 existing screen or blocks files,
-none more than 50% bigger. It declines to build a whole app.
+**Small mode (the default).** Small fixes and additions: up to 3 existing screen or blocks files, none
+more than half again as big, and no new screens. It declines to build a whole app.
 
 **Full-app mode.** Type `/override` and the PIN in the helper's box. For one hour, in this project and
 for the person who entered the PIN, the helper may build a complete small app: up to 12 files in one
@@ -309,11 +322,17 @@ change, including up to 4 new screens (each a designer file and a blocks file). 
 project's existing screens, so for a new app start from an empty project. `/override` alone shows
 whether the mode is on, and `/override off` ends it early. Restarting the hub also ends it.
 
+**Pictures and the model.** Looking at pictures needs a model that accepts image input. The helper asks
+OpenRouter's list of models whether the configured one does, and remembers the answer for six hours.
+To set it by hand, add `AI_VISION=1` (or `AI_VISION=0`) to `/opt/appinventor/ai.env`.
+
 **In the window:** Enter sends, Shift+Enter starts a new line, Esc or the square button stops, `/`
 lists the commands, Copy works on answers and code blocks, and Try again redoes the last question.
 
-Nothing changes until someone presses Apply. The PIN is checked on the Pi and is never sent to the
-model. Five wrong PINs from anyone on the team stop all PIN attempts for 15 minutes.
+**Not included:** running the app or the emulator, seeing how a screen looks, arbitrary web pages (only
+the documentation sites above), changing anything outside the open project, the server's settings or
+other projects, and files other than screens and PNG or JPG pictures. The helper checks structure and
+names, not whether the blocks do what you intended; App Inventor still reports block errors when it opens.
 
 Set it up on the Pi:
 * `sudo /opt/appinventor/set-ai.sh` asks for the OpenRouter key and the model name.
@@ -321,7 +340,7 @@ Set it up on the Pi:
 * `sudo /opt/appinventor/set-ai.sh --search` asks for a Brave Search key (free plan is enough). This is
   optional. Get one at https://brave.com/search/api/.
 * `--status` shows what is set. `--off` turns the helper off and removes the key, PIN and search key.
-* Pictures need `librsvg2-bin`; the Pi build installs it. If it is missing:
+* Pictures made here need `librsvg2-bin`; the Pi build installs it. If it is missing:
   `sudo apt install librsvg2-bin`.
 
 Keys, the model and the PIN are stored in `/opt/appinventor/ai.env`, readable only by root, and are
@@ -329,10 +348,12 @@ Keys, the model and the PIN are stored in `/opt/appinventor/ai.env`, readable on
 per person and 300 a day for the team (a goal counts as five). Anyone with the team code can use the
 helper; the PIN is what unlocks full-app mode.
 
-Privacy and safety: the project's files and your questions are sent to OpenRouter's model when you
-ask. Web results are read as data, never as instructions. The helper gets search snippets only; it
-cannot open arbitrary pages, so the Pi's own network stays out of its reach. Pictures are checked
-before they are drawn: no scripts, no embedded pages or images, and no links to other files.
+Privacy and safety: the project's screen files and your questions are sent to OpenRouter's model when
+you ask, and so are any pictures you attach or the helper looks at. Web and documentation results are read as data, never as
+instructions. The helper cannot open arbitrary pages: documentation is read only from the sites listed
+above, over https, and only when they resolve to public addresses, with no redirects followed. Pictures
+made here are checked before they are drawn: no scripts, no embedded pages or images, and no links to
+other files. Pictures made here can be seen only by the person who made them.
 
 ## Speed
 

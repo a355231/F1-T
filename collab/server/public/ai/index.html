@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
+<link rel="icon" href="data:,">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
@@ -48,14 +49,19 @@
 
 <form id="composer" class="composer" autocomplete="off">
   <div id="slash" class="slash" hidden></div>
+  <div id="thumbs" class="thumbs" hidden></div>
   <div class="box">
+    <button id="attach" class="attach" type="button" aria-label="Attach a picture" title="Attach a picture" hidden>
+      <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M16.5 6.5l-7.8 7.8a2 2 0 102.8 2.8l7.8-7.8a4 4 0 00-5.7-5.7L5.9 10.9a6 6 0 008.5 8.5l6.4-6.4-1.4-1.4-6.4 6.4a4 4 0 01-5.7-5.7l7.8-7.8z"/></svg>
+    </button>
+    <input id="file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
     <textarea id="input" rows="1" placeholder="Ask about this project, or type / for commands" aria-label="Message"></textarea>
     <button id="send" class="send" type="submit" aria-label="Send">
       <svg class="i-send" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 4l-7 7h4v9h6v-9h4z"/></svg>
       <svg class="i-stop" viewBox="0 0 24 24" width="14" height="14"><rect x="5" y="5" width="14" height="14" rx="3" fill="currentColor"/></svg>
     </button>
   </div>
-  <div class="hint">Enter sends · Shift+Enter for a new line · Esc stops</div>
+  <div class="hint" id="hint">Enter sends · Shift+Enter for a new line · Esc stops</div>
 </form>
 
 <script src="/collab/ai/static/marked.js"></script>
