@@ -888,6 +888,29 @@ test('a tool call cut off by the length limit is not run; the model is asked to 
   assert.strictEqual(texts(evs), 'I will go step by step.');
 });
 
+const cutText = [
+  {choices: [{delta: {content: 'A very long plan that never ends'}}]},
+  {choices: [{delta: {}, finish_reason: 'length'}]},
+  '[DONE]',
+];
+
+test('an answer cut off in plain words carries on in smaller pieces instead of giving up', async () => {
+  const t = setup([cutText, textTurn('Done, in short.')]);
+  const evs = await say(t.ai, 'ann', 'build it');
+  assert.match(evs.find(e => e.type === 'status').text, /smaller pieces/);
+  const note = t.calls[1].payload.messages.at(-1);
+  assert.strictEqual(note.role, 'user');
+  assert.match(note.content, /Do not repeat it/);
+  assert.match(texts(evs), /Done, in short\./);
+});
+
+test('an answer that is cut off again and again is given up with a clear message', async () => {
+  const t = setup([cutText, cutText, cutText, cutText, cutText, textTurn('never reached')]);
+  const evs = await say(t.ai, 'ann', 'build it');
+  assert.strictEqual(t.calls.length, 5);
+  assert.ok(evs.some(e => e.type === 'status' && /too many times/.test(e.text)));
+});
+
 test('a long tool call shows as it is written, so the window does not look stuck', async () => {
   const t = setup([toolTurn('draft_write', {path: 'src/a/Screen1.bky', content: 'x'.repeat(3000)}, 'big1'), textTurn('Written.')]);
   const evs = await say(t.ai, 'ann', 'write it');

@@ -66,6 +66,9 @@ const RUN_EVENTS_MAX = 20000;
 const WRITING_BYTES = 1000;         // a tool call this long is shown while it is written
 const TOO_BIG_NOTE = 'Your last message was cut off because it was too long, so the tool call in it was not run. ' +
   'Do the same work in smaller pieces: one component, one event handler or one short section of a file per call.';
+const TOO_LONG_TEXT_NOTE = 'Your last message was cut off because it was too long. Do not repeat it. Carry on with the next ' +
+  'step using the tools, one small piece per call, and keep what you write in words short.';
+const CUT_OFF_MAX = 4;              // this many cut-offs in a row and the answer is given up
 const COMMAND = /^\s*\/(override|goal)\b/i;
 const NOT_SET_UP = 'The AI helper is not set up yet. Whoever runs the Raspberry Pi needs to run: ' +
   'sudo /opt/appinventor/set-ai.sh';
@@ -691,6 +694,7 @@ class Assistant {
     const limit = goal ? this.goalSteps : SMALL_STEPS;
     const deadline = this.now() + (goal ? this.goalMs : SMALL_MS);
     try {
+      let cutOff = 0;
       for (let step = 0; step < limit; step++) {
         if (this.now() > deadline) {
           emit({type: 'status', text: 'Stopped: the time for this goal is up. Ask again to keep going.'});
@@ -700,21 +704,25 @@ class Assistant {
         const reply = await this.streamWithRetry(messages, registry.definitions(run), ctx.signal, emit);
         stats.steps++;
         if (reply.truncated) {
-          // The model ran out of room part way through. A half-written tool call is never run.
+          // The model ran out of room part way through. A half-written tool call is never run. The model is
+          // told and goes on in smaller pieces; only if that keeps happening is the answer given up.
           this.log('the model ran out of room (' + reply.tool_calls.length + ' tool call(s) cut off)');
           for (const call of reply.tool_calls) {
             emit({type: 'tool', id: call.id, name: call.function.name, state: 'error',
               label: 'Writing ' + call.function.name.replace(/_/g, ' '), detail: 'too long, skipped'});
           }
-          if (!reply.tool_calls.length) {
-            emit({type: 'status', text: 'The answer was cut off because it was too long.'});
+          if (++cutOff > CUT_OFF_MAX) {
+            emit({type: 'status', text: 'The answer was cut off too many times because it was too long. Ask for a smaller piece, or ask again to carry on.'});
             return;
           }
-          emit({type: 'status', text: 'The helper tried to write too much in one go, so that step was skipped. It will work in smaller pieces.'});
+          emit({type: 'status', text: reply.tool_calls.length
+            ? 'The helper tried to write too much in one go, so that step was skipped. It will work in smaller pieces.'
+            : 'The helper wrote more than fits in one go. It will carry on in smaller pieces.'});
           messages.push({role: 'assistant', content: reply.content || '(cut off)'});
-          messages.push({role: 'user', content: TOO_BIG_NOTE});
+          messages.push({role: 'user', content: reply.tool_calls.length ? TOO_BIG_NOTE : TOO_LONG_TEXT_NOTE});
           continue;
         }
+        cutOff = 0;
         if (!reply.tool_calls.length) return;
         stats.tools += reply.tool_calls.length;
         messages.push({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls});
