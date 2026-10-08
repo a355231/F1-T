@@ -53,7 +53,7 @@ const PIN_MAX_WRONG = 5;
 const PIN_LOCK_MS = 15 * 60 * 1000;
 // A model that sends nothing for this long is cut off, and no single answer may run longer than TURN_MS.
 const IDLE_MS = 60 * 1000;
-const TURN_MS = 5 * 60 * 1000;
+const TURN_MS = 10 * 60 * 1000;     // one model answer can run for minutes on a slow model; a longer one is cut off
 const STALLED = 'The AI service stopped sending its answer, so it was cut off. Try asking again.';
 const TOO_LONG = 'That answer ran past the time limit and was cut off. Try asking for something smaller.';
 const MAX_TOKENS = () => parseInt(process.env.AI_MAX_TOKENS || '8000', 10);
@@ -68,8 +68,32 @@ const TOO_BIG_NOTE = 'Your last message was cut off because it was too long, so 
   'Do the same work in smaller pieces: one component, one event handler or one short section of a file per call.';
 const TOO_LONG_TEXT_NOTE = 'Your last message was cut off because it was too long. Do not repeat it. Carry on with the next ' +
   'step using the tools, one small piece per call, and keep what you write in words short.';
-const CUT_OFF_MAX = 4;              // this many cut-offs in a row and the answer is given up
-const COMMAND = /^\s*\/(override|goal)\b/i;
+const CUT_OFF_MAX = 4;              // this many cut-offs in a row and the helper pauses, and asks to be told to carry on
+const PAUSED_LONG = 'The helper paused, because its answers kept running past their length. Send a message to carry on.';
+const COMMAND = /^\s*\/(override|goal|plan|discard)\b/i;
+// How hard the helper works, from the slider. It changes how much it reads and checks, not the model's own
+// reasoning: reasoning counts against the length of an answer, and that is what cut answers off.
+const EFFORTS = ['low', 'medium', 'high'];
+const EFFORT_NOTE = {
+  low: 'Effort is LOW: make the change the person asked for, check it once with check_project, and propose it. ' +
+    'Look around only as much as the change needs.',
+  medium: '',
+  high: 'Effort is HIGH: before you change anything, read the parts it touches (screen_outline, blocks_outline, ' +
+    'read_file). After each change, run check_project. Before you propose, review the whole result against what the ' +
+    'person asked for, and say in your summary what you checked.',
+};
+const PLAN_NOTE = 'PLANNING ONLY: the person wants a plan, not changes. You can read and check the project, look things ' +
+  'up and ask questions, but you cannot change the project or propose changes. Say what you would do, step by step, ' +
+  'and what the person would need to decide. Keep it short and clear.';
+const NUDGE_NOTE = 'The app is not complete yet, and nothing can be applied until it is. If you need an answer from the ' +
+  'person, call ask_user and stop. Otherwise carry on with the next part of the app, using the tools. When check_project ' +
+  'reports no problems and the app does what was asked, call propose_draft with complete set to true.';
+const NUDGE_MAX = 3;                // full-app mode: answers in a row that stop with the app unfinished, before the helper stops
+const SAME_STEP_MAX = 8;            // the same tool calls this many steps in a row are a loop: the helper stops and says so
+const LOOPING = 'The helper kept repeating the same step, so it has stopped. Send a message to carry on, or ask it to try another way.';
+const STILL_BUILDING = 'Still building: the app is not complete, so there is no Apply button yet. Send a message to keep going.';
+// Tools that change the draft. Their successful calls mark an answer as one that built something.
+const EDITS = new Set(registry.TOOLS.filter(t => t.mode === 'draft').map(t => t.name));
 const NOT_SET_UP = 'The AI helper is not set up yet. Whoever runs the Raspberry Pi needs to run: ' +
   'sudo /opt/appinventor/set-ai.sh';
 
@@ -501,7 +525,8 @@ class Assistant {
       return res.end(JSON.stringify({error: 'The helper is still working on your last request in this project. ' +
         'Wait for it to finish, or press Stop.'}));
     }
-    const run = this.startRun(me, cookie, projectId, access, history, attached.images);
+    const effort = EFFORTS.indexOf(data.effort) >= 0 ? data.effort : 'medium';
+    const run = this.startRun(me, cookie, projectId, access, history, attached.images, effort);
     return this.attach(run, res, 0);
   }
 
@@ -515,14 +540,14 @@ class Assistant {
     return run && !run.done ? run : null;
   }
 
-  startRun(me, cookie, projectId, access, history, images) {
+  startRun(me, cookie, projectId, access, history, images, effort = 'medium') {
     const key = this.runKey(me.userId, projectId);
     const old = this.runs.get(key);
     if (old) clearTimeout(old.keepTimer);
     const question = history[history.length - 1].content.trim();
     const run = {key, userId: me.userId, projectId, by: me.email.split('@')[0], events: [], seq: 0, done: false,
       watchers: new Map(), controller: new AbortController(), orphanTimer: null, keepTimer: null,
-      startedAt: Date.now(), stats: {steps: 0, tools: 0},
+      startedAt: Date.now(), stats: {steps: 0, tools: 0}, effort,
       question: /^\s*\/override\b/i.test(question) ? '/override' : question.slice(0, 6000)};
     this.runs.set(key, run);
     this.work(run, {me, cookie, projectId, access, history, images});
@@ -533,20 +558,27 @@ class Assistant {
   async work(run, {me, cookie, projectId, access, history, images}) {
     const emit = ev => this.publish(run, ev);
     const question = run.question;
-    const ctx = {me, cookie, projectId, access, emit, signal: run.controller.signal, images, stats: run.stats};
+    const ctx = {me, cookie, projectId, access, emit, signal: run.controller.signal, images, stats: run.stats, effort: run.effort};
     let how = 'finished';
     this.log(run.by + ' asked (project ' + projectId + (this.fullActive(me.userId, projectId) ? ', full-app mode' : '') +
       (COMMAND.test(question) ? ', ' + COMMAND.exec(question)[1].toLowerCase() : '') + ')');
     try {
       const command = COMMAND.exec(question);
-      if (command && command[1].toLowerCase() === 'override') {
+      const name = command ? command[1].toLowerCase() : '';
+      if (name === 'override') {
         emit({type: 'text', delta: this.override(me, projectId, history[history.length - 1].content.trim())});
-      } else if (command) {
-        const goal = history[history.length - 1].content.trim().replace(COMMAND, '').trim();
-        if (!goal) {
-          emit({type: 'text', delta: 'Tell me the goal after /goal, for example: /goal make a quiz app with a score screen.'});
+      } else if (name === 'discard') {
+        emit({type: 'text', delta: this.discard(me, projectId)});
+      } else if (name) {
+        // /goal and /plan: the rest of the message is the goal, or the idea to plan.
+        const rest = history[history.length - 1].content.trim().replace(COMMAND, '').trim();
+        if (!rest) {
+          emit({type: 'text', delta: name === 'goal'
+            ? 'Tell me the goal after /goal, for example: /goal make a quiz app with a score screen.'
+            : 'Tell me what to plan after /plan, for example: /plan add a high score screen.'});
         } else {
-          await this.converse(Object.assign(ctx, {history: history.slice(0, -1).concat([{role: 'user', content: goal}]).filter(m => !COMMAND.test(m.content)), goal}));
+          const asked = history.slice(0, -1).concat([{role: 'user', content: rest}]).filter(m => !COMMAND.test(m.content));
+          await this.converse(Object.assign(ctx, {history: asked, goal: name === 'goal' ? rest : null, plan: name === 'plan'}));
         }
       } else {
         // Commands are never shown to the model, even if an older message in the list has one.
@@ -643,6 +675,8 @@ class Assistant {
   // message to the next, until it is proposed or full-app mode ends.
   async converse(ctx) {
     const {me, projectId, access, goal, emit} = ctx;
+    const plan = !!ctx.plan;
+    const effort = ctx.effort || 'medium';
     const stats = ctx.stats || {steps: 0, tools: 0};
     if (!this.configured()) {
       emit({type: 'text', delta: NOT_SET_UP});
@@ -652,7 +686,8 @@ class Assistant {
       emit({type: 'error', message: 'Too many questions for now. Wait a minute and try again.'});
       return;
     }
-    const full = this.fullActive(me.userId, projectId);
+    // Planning changes nothing, so it does not touch the unfinished app of full-app mode.
+    const full = !plan && this.fullActive(me.userId, projectId);
     const key = me.userId + '|' + projectId;
     const vision = await this.vision();
     const search = !!SEARCH_KEY();
@@ -666,14 +701,15 @@ class Assistant {
           draft.dropped.join(', ') + '.');
       }
     } else {
-      if (this.drafts.delete(key)) notes.push('Full-app mode has ended, so the unfinished app draft was discarded.');
+      if (!plan && this.drafts.delete(key)) notes.push('Full-app mode has ended, so the unfinished app draft was discarded.');
       draft = new registry.Draft({projectId, cookie: ctx.cookie, ask: this.ask, full: false});
     }
     const dropped = draft.dropped.splice(0);
     for (const n of notes) emit({type: 'status', text: n});
     const run = {me, cookie: ctx.cookie, projectId, access, full, vision, emit, goal: !!goal, assistant: this,
-      ask: this.ask, signal: ctx.signal, imagesShown: 0, draft, state: {proposed: false}};
+      ask: this.ask, signal: ctx.signal, imagesShown: 0, draft, readOnly: plan, state: {proposed: false, edited: false}};
     const system = [full ? SYSTEM_FULL : SYSTEM, search ? SEARCH_NOTE : '', vision ? VISION_NOTE : '',
+      plan ? PLAN_NOTE : EFFORT_NOTE[effort],
       full && draft.changed.size ? 'The draft from earlier messages has ' + draft.changed.size + ' changed file(s): ' +
         [...draft.changed.keys()].join(', ') + '. Continue from it.' : '',
       dropped.length ? 'Changes to these files were dropped, because the project changed under them: ' + dropped.join(', ') + '.' : '',
@@ -691,10 +727,15 @@ class Assistant {
         emit({type: 'status', text: 'This model cannot look at pictures, so the picture you attached was not shown to it.'});
       }
     }
-    const limit = goal ? this.goalSteps : SMALL_STEPS;
-    const deadline = this.now() + (goal ? this.goalMs : SMALL_MS);
+    // Full-app mode has no step or time limit: it goes on until the app is complete, or the person presses Stop.
+    // Any other answer is kept to a number of steps and a time, so that one question cannot run for ever.
+    const limit = full ? Infinity : goal ? this.goalSteps : SMALL_STEPS;
+    const deadline = full ? Infinity : this.now() + (goal ? this.goalMs : SMALL_MS);
+    let cutOff = 0;           // answers in a row that ran out of room
+    let nudges = 0;           // full-app mode: answers in a row that stopped with the app unfinished
+    let lastStep = '';
+    let sameStep = 0;         // how many steps in a row were exactly the same tool calls
     try {
-      let cutOff = 0;
       for (let step = 0; step < limit; step++) {
         if (this.now() > deadline) {
           emit({type: 'status', text: 'Stopped: the time for this goal is up. Ask again to keep going.'});
@@ -704,26 +745,44 @@ class Assistant {
         const reply = await this.streamWithRetry(messages, registry.definitions(run), ctx.signal, emit);
         stats.steps++;
         if (reply.truncated) {
-          // The model ran out of room part way through. A half-written tool call is never run. The model is
-          // told and goes on in smaller pieces; only if that keeps happening is the answer given up.
+          // The model ran out of room part way through. A half-written tool call is never run. The model is told,
+          // and carries on in smaller pieces; only if that keeps happening is the helper paused.
           this.log('the model ran out of room (' + reply.tool_calls.length + ' tool call(s) cut off)');
           for (const call of reply.tool_calls) {
             emit({type: 'tool', id: call.id, name: call.function.name, state: 'error',
               label: 'Writing ' + call.function.name.replace(/_/g, ' '), detail: 'too long, skipped'});
           }
           if (++cutOff > CUT_OFF_MAX) {
-            emit({type: 'status', text: 'The answer was cut off too many times because it was too long. Ask for a smaller piece, or ask again to carry on.'});
+            emit({type: 'status', text: PAUSED_LONG});
             return;
           }
           emit({type: 'status', text: reply.tool_calls.length
-            ? 'The helper tried to write too much in one go, so that step was skipped. It will work in smaller pieces.'
-            : 'The helper wrote more than fits in one go. It will carry on in smaller pieces.'});
+            ? 'That step was too long to finish in one go, so the helper is splitting it into smaller pieces.'
+            : 'The helper wrote more than fits in one go, so it is carrying on in smaller pieces.'});
           messages.push({role: 'assistant', content: reply.content || '(cut off)'});
           messages.push({role: 'user', content: reply.tool_calls.length ? TOO_BIG_NOTE : TOO_LONG_TEXT_NOTE});
           continue;
         }
         cutOff = 0;
-        if (!reply.tool_calls.length) return;
+        if (!reply.tool_calls.length) {
+          // Full-app mode: an answer that built part of the app and stopped before it was complete is asked to carry on.
+          if (full && run.state.edited && !run.state.proposed && draft.changed.size && nudges < NUDGE_MAX) {
+            nudges++;
+            messages.push({role: 'assistant', content: reply.content || '(no text)'});
+            messages.push({role: 'user', content: NUDGE_NOTE});
+            continue;
+          }
+          return;
+        }
+        nudges = 0;
+        // The same tool calls again and again, with nothing new in between, is a loop: stop before running them again.
+        const signature = reply.tool_calls.map(c => c.function.name + ' ' + c.function.arguments).join('\n');
+        sameStep = signature === lastStep ? sameStep + 1 : 1;
+        lastStep = signature;
+        if (sameStep >= SAME_STEP_MAX) {
+          emit({type: 'status', text: LOOPING});
+          return;
+        }
         stats.tools += reply.tool_calls.length;
         messages.push({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls});
         const pictures = [];
@@ -731,6 +790,7 @@ class Assistant {
         for (const call of reply.tool_calls) {
           const out = await registry.run(call.function.name, call.function.arguments, Object.assign({}, run, {callId: call.id}));
           let text = String(out.text);
+          if (EDITS.has(call.function.name) && !/^Error/.test(text)) run.state.edited = true;
           if (out.images && out.images.length && vision) {
             if (run.imagesShown + out.images.length <= IMAGES_PER_ANSWER) {
               run.imagesShown += out.images.length;
@@ -753,10 +813,9 @@ class Assistant {
         ? 'Stopped: the step limit for this goal was reached. Ask again to keep going.'
         : 'That took too many steps. Try asking for something smaller.'});
     } finally {
-      // In full-app mode the person is asked to Apply only once the app is complete; until then, say so.
-      if (full && draft.changed.size && !run.state.proposed) {
-        emit({type: 'status', text: 'Not ready to apply yet: ' + draft.changed.size + ' file(s) are in the draft. ' +
-          'The Apply button appears once the whole app is built and checks clean.'});
+      // In full-app mode the app is offered for Apply only once it is complete; until then, say so.
+      if (full && run.state.edited && draft.changed.size && !run.state.proposed && !(ctx.signal && ctx.signal.aborted)) {
+        emit({type: 'status', text: STILL_BUILDING});
       }
     }
   }
@@ -875,6 +934,13 @@ class Assistant {
       const t = setTimeout(resolve, ms);
       if (signal) signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, {once: true});
     });
+  }
+
+  // /discard throws away the unfinished app. Nothing in the project has changed: that happens only on Apply.
+  discard(me, projectId) {
+    if (!this.drafts.delete(this.runKey(me.userId, projectId))) return 'There is no unfinished app to throw away.';
+    return 'The unfinished app is thrown away. Nothing in the project was changed.' +
+      (this.fullActive(me.userId, projectId) ? ' Full-app mode is still on.' : '');
   }
 
   // /override shows the mode, /override off ends it, and /override <PIN> turns full-app mode on for an

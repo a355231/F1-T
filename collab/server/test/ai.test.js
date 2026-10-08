@@ -647,10 +647,32 @@ test('a problem the project already had does not stop a complete app from being 
   assert.ok(evs.some(e => e.type === 'proposal'));
 });
 
-test('a partly built app is kept between messages, shown as not ready, and finished in the next one', async () => {
+// ---- full-app mode builds on until the app is complete; a question or a plan leaves an unfinished app alone ----
+
+async function sayWithEffort(ai, who, text, effort) {
+  const res = fakeRes();
+  await ai.handle(fakeReq('/collab/ai/stream', 'POST', {projectId: '5', effort, messages: [{role: 'user', content: text}]}, 'AppInventor=' + who), res);
+  return events(res);
+}
+
+test('in full-app mode, an answer that stops with the app unfinished is asked to carry on, and the app is proposed once complete', async () => {
   const t = setup([
     toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
-    textTurn('The quiz screen is started. Next I will add the questions.'),
+    textTurn('The quiz screen is started.'),
+    toolTurn('propose_draft', {summary: 'A quiz app', complete: true}, 'd2'),
+    textTurn('Press Apply.'),
+  ]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  const evs = await say(t.ai, 'ann', 'start a quiz app');
+  assert.match(t.calls[2].payload.messages.at(-1).content, /not complete yet/);
+  assert.strictEqual(evs.filter(e => e.type === 'proposal').length, 1);
+  assert.ok(!evs.some(e => e.type === 'status' && /Still building/.test(e.text)));
+});
+
+test('an unfinished app is kept between messages and shown as still building; the next message finishes it', async () => {
+  const t = setup([
+    toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
+    textTurn('Started. Next the questions.'), textTurn('Next the score.'), textTurn('Next the buttons.'), textTurn('Later.'),
     toolTurn('draft_status', {}, 'd1'),
     toolTurn('propose_draft', {summary: 'A quiz app', complete: true}, 'd2'),
     textTurn('Press Apply.'),
@@ -658,18 +680,124 @@ test('a partly built app is kept between messages, shown as not ready, and finis
   await say(t.ai, 'ann', '/override ' + PIN_VALUE);
   const first = await say(t.ai, 'ann', 'start a quiz app');
   assert.ok(!first.some(e => e.type === 'proposal'), 'nothing to apply yet');
-  assert.ok(first.some(e => e.type === 'status' && /Not ready to apply yet/.test(e.text)));
+  assert.ok(first.some(e => e.type === 'status' && /Still building/.test(e.text)));
   const second = await say(t.ai, 'ann', 'continue');
-  assert.match(systemOf(t.calls[2]), /draft from earlier messages has 2 changed file/);
+  assert.match(systemOf(t.calls[5]), /draft from earlier messages has 2 changed file/);
   const proposal = second.find(e => e.type === 'proposal');
   assert.deepStrictEqual(proposal.files, [{path: 'src/a/Quiz.scm', isNew: true}, {path: 'src/a/Quiz.bky', isNew: true}]);
-  assert.ok(!second.some(e => e.type === 'status' && /Not ready/.test(e.text)), 'no longer waiting');
+  assert.ok(!second.some(e => e.type === 'status' && /Still building/.test(e.text)));
+});
+
+test('a question asked while an app is unfinished is answered, and does not start more building', async () => {
+  const t = setup([
+    toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
+    textTurn('Started.'), textTurn('Next.'), textTurn('Later.'), textTurn('Done for now.'),
+    textTurn('It is a quiz with two screens.'),
+  ]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  await say(t.ai, 'ann', 'start a quiz app');
+  const evs = await say(t.ai, 'ann', 'what does the quiz screen do?');
+  assert.strictEqual(t.calls.length, 6, 'one answer, and no nudges');
+  assert.match(texts(evs), /two screens/);
+  assert.ok(!evs.some(e => e.type === 'status'));
+});
+
+test('full-app mode has no step or time limit; any other answer has a few steps and a few minutes', async () => {
+  const read = i => toolTurn('read_file', {path: 'src/a/Screen1.scm', from: i + 1}, 'r' + i);
+  const full = setup([...Array.from({length: 20}, (_, i) => read(i)), textTurn('Done.')]);
+  await say(full.ai, 'ann', '/override ' + PIN_VALUE);
+  const evs = await say(full.ai, 'ann', 'go through the screen line by line');
+  assert.strictEqual(full.calls.length, 21);
+  assert.ok(!evs.some(e => e.type === 'status'), 'no limit was reached');
+  assert.match(texts(evs), /Done\./);
+
+  const small = setup([...Array.from({length: 20}, (_, i) => read(i)), textTurn('Done.')]);
+  const smallEvs = await say(small.ai, 'ann', 'go through the screen line by line');
+  assert.strictEqual(small.calls.length, 14);
+  assert.match(smallEvs.find(e => e.type === 'status').text, /too many steps/);
+
+  // Each model answer takes five minutes on the clock: a small change runs out of time after the first.
+  let clock = null;
+  const slow = setup(Array.from({length: 3}, (_, i) => () => {
+    clock.advance(5 * 60 * 1000);
+    return read(i);
+  }).concat([textTurn('Done.')]));
+  clock = slow;
+  const slowEvs = await say(slow.ai, 'ann', 'go through the screen line by line');
+  assert.strictEqual(slow.calls.length, 1, 'a small change stops after four minutes');
+  assert.match(slowEvs.find(e => e.type === 'status').text, /time for this goal is up/);
+});
+
+test('the same step over and over is a loop: the helper stops, and says so', async () => {
+  const t = setup(Array.from({length: 12}, (_, i) => toolTurn('list_files', {}, 'L' + i)));
+  const evs = await say(t.ai, 'ann', 'look around');
+  assert.strictEqual(t.calls.length, 8);
+  assert.match(evs.find(e => e.type === 'status').text, /repeating the same step/);
+});
+
+test('/plan says what it would do, and cannot change the project even when the model tries', async () => {
+  const t = setup([toolTurn('draft_write', {path: 'src/a/Screen1.bky', content: BKY}, 'p1'), textTurn('Here is the plan.')]);
+  assert.match(texts(await say(t.ai, 'ann', '/plan')), /Tell me what to plan/);
+  assert.strictEqual(t.calls.length, 0);
+  const evs = await say(t.ai, 'ann', '/plan add a high score screen');
+  const offered = toolNames(t.calls[0]);
+  assert.ok(offered.includes('check_project') && offered.includes('ask_user'));
+  for (const name of ['draft_write', 'scm_add_component', 'bky_add_blocks', 'propose_draft']) assert.ok(!offered.includes(name), name);
+  assert.match(systemOf(t.calls[0]), /PLANNING ONLY/);
+  assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'nothing was written');
+  assert.match(t.calls[1].payload.messages.at(-1).content, /not available here/);
+  assert.match(texts(evs), /Here is the plan\./);
+});
+
+test('/plan leaves an unfinished app alone, so the next message carries on from it', async () => {
+  const t = setup([
+    toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
+    textTurn('Started.'), textTurn('Next.'), textTurn('Later.'), textTurn('Done for now.'),
+    textTurn('Here is a plan.'),
+    textTurn('Carrying on.'),
+  ]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  await say(t.ai, 'ann', 'start a quiz app');
+  await say(t.ai, 'ann', '/plan add a score screen');
+  await say(t.ai, 'ann', 'carry on');
+  assert.match(systemOf(t.calls[6]), /draft from earlier messages has 2 changed file/);
+});
+
+test('/discard throws away an unfinished app without a model answer, and says so when there is none', async () => {
+  const t = setup([toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'), textTurn('Started.'), textTurn('Next.'), textTurn('Later.'), textTurn('Done for now.')]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  await say(t.ai, 'ann', 'start a quiz app');
+  const calls = t.calls.length;
+  assert.match(texts(await say(t.ai, 'ann', '/discard')), /thrown away\. Nothing in the project was changed\. Full-app mode is still on\./);
+  assert.strictEqual(t.calls.length, calls);
+  assert.match(texts(await say(t.ai, 'ann', '/discard')), /There is no unfinished app/);
+});
+
+test('in full-app mode, an answer cut off in plain words carries on, and nobody is told it was cut off', async () => {
+  const t = setup([cutText, textTurn('Carrying on.')]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  const evs = await say(t.ai, 'ann', 'build a quiz');
+  assert.ok(!evs.some(e => e.type === 'status' && /cut off/i.test(e.text)));
+  assert.match(texts(evs), /Carrying on\./);
+});
+
+test('the effort level changes how carefully the helper works; an unknown level counts as medium', async () => {
+  const t = setup([textTurn('a'), textTurn('b'), textTurn('c'), textTurn('d')]);
+  await sayWithEffort(t.ai, 'ann', 'hi', 'high');
+  assert.match(systemOf(t.calls[0]), /Effort is HIGH/);
+  await sayWithEffort(t.ai, 'ann', 'hi', 'low');
+  assert.match(systemOf(t.calls[1]), /Effort is LOW/);
+  await sayWithEffort(t.ai, 'ann', 'hi', 'medium');
+  assert.doesNotMatch(systemOf(t.calls[2]), /Effort is/);
+  const evs = await sayWithEffort(t.ai, 'ann', 'hi', 'extreme');
+  assert.doesNotMatch(systemOf(t.calls[3]), /Effort is/);
+  assert.ok(!evs.some(e => e.type === 'error'));
 });
 
 test('turning full-app mode off throws the unfinished app away; the next app starts from the project', async () => {
   const t = setup([
     toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
-    textTurn('Started.'),
+    textTurn('Started.'), textTurn('Next.'), textTurn('Later.'), textTurn('Done for now.'),
     toolTurn('draft_status', {}, 'd1'),
     textTurn('Nothing yet.'),
   ]);
@@ -678,8 +806,8 @@ test('turning full-app mode off throws the unfinished app away; the next app sta
   assert.match(texts(await say(t.ai, 'ann', '/override off')), /draft was discarded/);
   await say(t.ai, 'ann', '/override ' + PIN_VALUE);
   await say(t.ai, 'ann', 'what changed?');
-  assert.ok(!systemOf(t.calls[2]).includes('draft from earlier messages'));
-  assert.ok(t.calls[3].payload.messages.some(m => m.role === 'tool' && m.content === 'Nothing has been changed yet.'));
+  assert.ok(!systemOf(t.calls[5]).includes('draft from earlier messages'));
+  assert.ok(t.calls[6].payload.messages.some(m => m.role === 'tool' && m.content === 'Nothing has been changed yet.'));
 });
 
 // ---- a model that stops responding is cut off, instead of leaving the person waiting ----
@@ -880,7 +1008,7 @@ test('a tool call cut off by the length limit is not run; the model is asked to 
   const t = setup([cut, textTurn('I will go step by step.')]);
   const evs = await say(t.ai, 'ann', 'write all the blocks');
   assert.ok(evs.some(e => e.type === 'tool' && e.id === 'w1' && e.state === 'error' && /too long/.test(e.detail)));
-  assert.match(evs.find(e => e.type === 'status').text, /too much in one go/);
+  assert.match(evs.find(e => e.type === 'status').text, /too long to finish in one go/);
   assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'nothing was written');
   const note = t.calls[1].payload.messages.at(-1);
   assert.strictEqual(note.role, 'user');
@@ -908,7 +1036,7 @@ test('an answer that is cut off again and again is given up with a clear message
   const t = setup([cutText, cutText, cutText, cutText, cutText, textTurn('never reached')]);
   const evs = await say(t.ai, 'ann', 'build it');
   assert.strictEqual(t.calls.length, 5);
-  assert.ok(evs.some(e => e.type === 'status' && /too many times/.test(e.text)));
+  assert.ok(evs.some(e => e.type === 'status' && /paused/.test(e.text)));
 });
 
 test('a long tool call shows as it is written, so the window does not look stuck', async () => {

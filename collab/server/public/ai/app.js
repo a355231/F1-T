@@ -25,9 +25,19 @@
   var CROSS = '<svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/></svg>';
   var COPY = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 15V6.5A1.5 1.5 0 0 1 6.5 5H15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
   var RETRY = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4.5h4.5"/></svg>';
+  // The slash menu. Some commands are handled here, some by the server, and /check, /explain and /fix are
+  // questions the window sends to the model for the person.
   var COMMANDS = [
-    {cmd: '/goal', help: 'Work toward a goal in steps, with a plan', example: '/goal Check every screen for problems'},
-    {cmd: '/override', help: 'Full-app mode, with the PIN', example: '/override <PIN>'},
+    {cmd: '/goal', help: 'Work toward a goal in steps, with a plan'},
+    {cmd: '/plan', help: 'Plan a change, without changing anything'},
+    {cmd: '/check', help: 'Check the project and say what is wrong'},
+    {cmd: '/explain', help: 'Explain how the project works'},
+    {cmd: '/fix', help: 'Make the smallest change that fixes one problem'},
+    {cmd: '/effort', help: 'How hard the helper works: low, medium or high'},
+    {cmd: '/override', help: 'Full-app mode, with the PIN'},
+    {cmd: '/discard', help: 'Throw away an unfinished full app'},
+    {cmd: '/new', help: 'Start a new conversation'},
+    {cmd: '/help', help: 'List the commands'},
   ];
 
   var history = [];       // what the model sees: {role, content}
@@ -583,28 +593,161 @@
     }
   }
 
+  // ---- effort: how hard the helper works, from the slider under the box (remembered on this computer) ----
+
+  var EFFORTS = ['low', 'medium', 'high'];
+  var EFFORT_TEXT = {low: 'Low', medium: 'Medium', high: 'High'};
+  var EFFORT_WHAT = {
+    low: 'Quick changes, checked once.',
+    medium: 'The usual care.',
+    high: 'It reads and checks more before it proposes.',
+  };
+  var effortInput = $('effort');
+  var effortOut = $('effortOut');
+  var effort = 'medium';
+  try {
+    var kept = localStorage.getItem('aihelper.effort');
+    if (EFFORTS.indexOf(kept) >= 0) effort = kept;
+  } catch (e) {
+    // no storage here: medium
+  }
+
+  function setEffort(level) {
+    effort = level;
+    effortInput.value = String(EFFORTS.indexOf(level));
+    effortInput.setAttribute('aria-valuetext', EFFORT_TEXT[level]);
+    effortInput.title = EFFORT_WHAT[level];
+    effortOut.textContent = EFFORT_TEXT[level];
+    try {
+      localStorage.setItem('aihelper.effort', level);
+    } catch (e) {
+      // not remembered
+    }
+  }
+  effortInput.oninput = function () { setEffort(EFFORTS[Number(effortInput.value)] || 'medium'); };
+  setEffort(effort);
+
+  // ---- commands ----
+
+  var HELP = [
+    '**Commands** (type `/` to see them)',
+    '',
+    '- `/goal <goal>`: work toward a goal in steps, with a plan and a Stop button',
+    '- `/plan <idea>`: plan a change, without changing anything',
+    '- `/check [focus]`: check the project and say what is wrong',
+    '- `/explain [focus]`: explain how the project works',
+    '- `/fix <problem>`: make the smallest change that fixes one problem',
+    '- `/effort low`, `medium` or `high`: how hard the helper works (the slider does the same)',
+    '- `/override <PIN>`: full-app mode for an hour; `/override off` turns it off',
+    '- `/discard`: throw away an unfinished full app',
+    '- `/new`: start a new conversation (also `/clear`)',
+    '- `/help`: this list',
+  ].join('\n');
+
+  // A reply from the window itself, not from the model: it is shown as an answer, and kept out of the conversation.
+  function showLocal(md) {
+    var api = newAssistant();
+    api.thinking.remove();
+    api.full = md;
+    var body = el('div', 'md');
+    api.block(body);
+    renderInto(body, md);
+    api.row.dataset.text = md;
+    api.finish();
+    keepBottom();
+    save();
+  }
+
+  // /new (also /clear) starts again. An unfinished full app stays until /discard or /override off.
+  function newConversation() {
+    if (controller) {
+      showLocal('Wait for the answer to finish, or press Stop, before you start a new conversation.');
+      return;
+    }
+    list.innerHTML = '';
+    history = [];
+    pending = [];
+    renderThumbs();
+    goalBar.hidden = true;
+    clearInterval(goalTimer);
+    jump.hidden = true;
+    stick = true;
+    empty.hidden = false;
+    save();
+  }
+
+  // The commands the window does itself: they never reach the model.
+  function runLocal(name, arg, typed) {
+    input.value = '';
+    autosize();
+    if (name === 'new' || name === 'clear') {
+      newConversation();
+      return;
+    }
+    addUser(typed);
+    if (name === 'help') {
+      showLocal(HELP);
+    } else if (!arg) {
+      showLocal('Effort is **' + EFFORT_TEXT[effort] + '**. Move the slider under the box, or type `/effort low`, `/effort medium` or `/effort high`.');
+    } else if (EFFORTS.indexOf(arg.toLowerCase()) < 0) {
+      showLocal('Choose `low`, `medium` or `high`, for example `/effort high`.');
+    } else {
+      setEffort(arg.toLowerCase());
+      showLocal('Effort is now **' + EFFORT_TEXT[effort] + '**. ' + EFFORT_WHAT[effort]);
+    }
+  }
+
+  function focusOn(focus) {
+    return focus ? ' Focus on: ' + focus + '.' : '';
+  }
+
   function send(text, opts) {
     text = String(text || '').trim();
-    var isOverride = /^\/override\b/i.test(text);
-    var isGoal = /^\/goal\b/i.test(text);
-    var images = isOverride ? [] : pending.slice();
-    if (!text && images.length) text = images.length > 1 ? 'What is in these pictures?' : 'What is in this picture?';
-    if (!text || controller || !projectId) return;
     closeSlash();
+    var m = /^\/([a-z]+)\s*([\s\S]*)$/i.exec(text);
+    var name = m ? m[1].toLowerCase() : '';
+    var arg = m ? m[2].trim() : '';
+    if (name === 'help' || name === 'effort' || name === 'new' || name === 'clear') {
+      runLocal(name, arg, text);
+      return;
+    }
+    // Some commands are a question for the model: the person sees the command, and the model gets the question.
+    var question = text;
+    if (name === 'check') {
+      question = 'Check the open project with check_project and the outlines, and tell me what is wrong, in plain words. ' +
+        'Change nothing yet.' + focusOn(arg);
+    } else if (name === 'explain') {
+      question = 'Explain how the open project works, screen by screen.' + focusOn(arg);
+    } else if (name === 'fix') {
+      if (!arg) {
+        showLocal('Tell me what to fix after `/fix`, for example: `/fix the score does not reset`.');
+        return;
+      }
+      question = 'Make a small fix in the open project for this: ' + arg + '. Make the smallest change that fixes it, ' +
+        'check it, and propose it.';
+    }
+    var isOverride = name === 'override';
+    var isGoal = name === 'goal';
+    var images = isOverride ? [] : pending.slice();
+    if (!text && images.length) {
+      text = images.length > 1 ? 'What is in these pictures?' : 'What is in this picture?';
+      question = text;
+    }
+    if (!text || controller || !projectId) return;
     var shown = text;
     if (isOverride) {
       shown = /^\/override\s+off\b/i.test(text) ? '/override off'
         : /^\/override\s+\S/.test(text) ? '/override (PIN hidden)' : '/override';
     }
     var row = addUser(shown, images);
-    if (!isOverride) history.push({role: 'user', content: text});
+    if (!isOverride) history.push({role: 'user', content: question});
     input.value = '';
     pending = [];
     renderThumbs();
     autosize();
     var api = newAssistant();
     if (isGoal) startGoal(text.replace(/^\/goal\s*/i, ''));
-    var body = {projectId: projectId, messages: isOverride ? [{role: 'user', content: text}] : history.slice(-20)};
+    var body = {projectId: projectId, effort: effort, messages: isOverride ? [{role: 'user', content: text}] : history.slice(-20)};
     if (images.length) body.images = images.map(function (p) { return {name: p.name, mime: p.mime, data: p.data}; });
     runStream(api, body, {goal: isGoal, override: isOverride, row: row});
   }

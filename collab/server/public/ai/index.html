@@ -61,7 +61,14 @@
       <svg class="i-stop" viewBox="0 0 24 24" width="14" height="14"><rect x="5" y="5" width="14" height="14" rx="3" fill="currentColor"/></svg>
     </button>
   </div>
-  <div class="hint" id="hint">Enter sends · Shift+Enter for a new line · Esc stops</div>
+  <div class="tools">
+    <label class="effort" title="How hard the helper works">
+      <span>Effort</span>
+      <input id="effort" type="range" min="0" max="2" step="1" value="1" aria-label="Effort: how hard the helper works">
+      <output id="effortOut" for="effort">Medium</output>
+    </label>
+    <div class="hint" id="hint">Enter sends · Shift+Enter for a new line · Esc stops</div>
+  </div>
 </form>
 
 <script src="/collab/ai/static/marked.js"></script>

@@ -311,7 +311,19 @@ someone presses **Apply**; then the project is backed up first and everyone relo
 * **Ask you a question** when it needs a choice, such as a colour. You answer in your next message.
 * **Propose changes.** Nothing changes until someone presses Apply.
 * **`/goal`** works toward a goal in several steps. It shows a plan that ticks off as it goes, a timer
-  and a Stop button. It stops after 40 steps or 20 minutes. Closing the window stops the goal.
+  and a Stop button. It stops after 40 steps or 20 minutes, unless full-app mode is on. Closing the window
+  stops the goal.
+* **`/plan <idea>`** plans a change and says what it would do. It can read and check the project, look
+  things up and ask questions, but it cannot change anything or propose a change, even if the model tries.
+* **`/check [focus]`**, **`/explain [focus]`** and **`/fix <problem>`** ask the model to check the project,
+  explain it, or make the smallest change that fixes one problem. You see the command; the model gets the question.
+* **`/discard`** throws away an unfinished full app. **`/new`** (also `/clear`) starts a new conversation.
+  **`/help`** lists the commands. `/effort low|medium|high` sets the effort, like the slider.
+* **Effort** (the slider under the box, remembered on this computer): how hard the helper works. Low makes
+  the change and checks it once; High reads the parts it touches, checks after each change and reviews the
+  whole result before it proposes. It changes how much the helper checks, not the model's own reasoning,
+  because reasoning counts against the length of an answer.
+* **A step that keeps repeating** (the same tool calls, eight times in a row) stops the helper, and says so.
 
 **Small mode (the default).** Small fixes and additions: up to 3 existing screen or blocks files, none
 more than half again as big, and no new screens. It declines to build a whole app.
@@ -320,12 +332,14 @@ more than half again as big, and no new screens. It declines to build a whole ap
 for the person who entered the PIN, the helper may build a complete small app: up to 12 files in one
 change, including up to 4 new screens (each a designer file and a blocks file). It may also rewrite the
 project's existing screens, so for a new app start from an empty project. `/override` alone shows
-whether the mode is on, and `/override off` ends it early. Restarting the hub also ends it.
+whether the mode is on, and `/override off` ends it early. Restarting the hub also ends it. Full-app mode
+has no step or time limit: the helper goes on until the app is complete, or until you press Stop.
 
 The app can be built over as many messages as it takes: the helper keeps the unfinished app between them,
 for an hour after the last message. **Apply appears only once the whole app is built and `check_project`
-reports no problems** (problems the project already had do not count). Until then the helper says what is
-still to build, and a proposal that is not complete is refused. If someone else changes a file the helper is
+reports no problems** (problems the project already had do not count). If the helper stops with the app
+unfinished, it is asked to carry on, up to three times in a row; if it still stops, the window says
+"Still building" and what is left to do. A proposal that is not complete is refused. If someone else changes a file the helper is
 working on, the helper's change to that file is dropped, and the helper says so. `/override off` throws
 away the unfinished app.
 
@@ -344,9 +358,10 @@ big), the window says "Still working…", and a long tool call shows how much ha
 If the model service stops sending an answer for a minute, the helper tries again, up to three tries in all;
 it does the same when the service ends an answer early, or is busy or unreachable for a moment. The window
 says so and takes back what the failed try had shown. After that it gives up and says so, so the window never
-stays busy for good (`AI_IDLE_MS` in `ai.env` changes the minute). No single answer may run longer than five
-minutes. If the model runs out of room in the middle of a tool call (`AI_MAX_TOKENS`, 8000 by default), that
-call is skipped, and the helper is asked to do the same work in smaller pieces.
+stays busy for good (`AI_IDLE_MS` in `ai.env` changes the minute). No single model answer may run longer than
+ten minutes. If the model runs out of room (`AI_MAX_TOKENS`, 8000 by default), the answer is never shown cut
+short: a half-written tool call is skipped, and the helper is asked to carry on in smaller pieces. Only if that
+happens four times in a row does the helper pause and ask to be told to carry on.
 
 To see what the helper did when something goes wrong, run
 `sudo journalctl -u collab-hub --since "1 hour ago" | grep "\[ai\]"`. It lists who asked, retries, stops and

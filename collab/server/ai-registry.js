@@ -622,8 +622,15 @@ const TOOLS = [
 
 const BY_NAME = new Map(TOOLS.map(t => [t.name, t]));
 
+// /plan may look at the project, the web and the pictures, and ask questions. It may not change anything.
+const PLANNING = new Set(['list_files', 'read_file', 'search_project', 'screen_outline', 'blocks_outline', 'check_project',
+  'project_settings', 'list_pictures', 'component_info', 'component_types', 'blocks_examples', 'current_time',
+  'calculate', 'web_search', 'fetch_doc', 'draft_status', 'update_plan', 'ask_user', 'scratch_read', 'scratch_list',
+  'view_picture']);
+
 // Whether a tool may be offered or used right now.
 function allowed(t, ctx) {
+  if (ctx.readOnly && !PLANNING.has(t.name)) return false;
   if (t.needs === 'search') return !!ctx.assistant.searchKey();
   if (t.needs === 'full') return !!ctx.full;
   if (t.needs === 'vision') return !!ctx.vision;
