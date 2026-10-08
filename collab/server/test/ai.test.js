@@ -90,7 +90,10 @@ function fakeReq(url, method, body, cookie = 'AppInventor=ann') {
   req[Symbol.asyncIterator] = async function* () { if (body) yield JSON.stringify(body); };
   return req;
 }
-const events = res => res.text.split('\n\n').filter(s => s.startsWith('data:')).map(s => JSON.parse(s.slice(5)));
+// The events in what the helper wrote to a response. Each block has an id line and a data line; pings are noise.
+const dataOf = block => block.split('\n').find(l => l.startsWith('data:'));
+const events = res => res.text.split('\n\n').map(dataOf).filter(Boolean).map(l => JSON.parse(l.slice(5))).filter(e => e.type !== 'ping');
+const ids = res => res.text.split('\n\n').map(b => /^id: (\d+)/m.exec(b)).filter(Boolean).map(m => +m[1]);
 
 // Builds an assistant with a fake App Inventor (ask), a fake model (fetchImpl) that answers from a script,
 // and a clock that the test can move. A script step may be a function of the request, so that it can
@@ -130,11 +133,13 @@ function setup(script, options = {}) {
     calls.push({url, headers: opts.headers, payload: JSON.parse(opts.body), signal: opts.signal});
     const next = script.shift();
     if (next === STALL) return {ok: true, body: stalledBody(opts.signal)};
+    if (next && next.status) return {ok: false, status: next.status};
+    if (next && next.premature) return {ok: true, body: sseBody(next.premature)};
     if (next && next.paced !== undefined) return {ok: true, body: pacedBody(next.paced, next.gap, opts.signal)};
     const turn = typeof next === 'function' ? next(JSON.parse(opts.body)) : (next || textTurn('(no more script)'));
     return {ok: true, body: sseBody(turn)};
   };
-  const ai = new Assistant(Object.assign({ask, hub, fetchImpl, now: () => now}, rest));
+  const ai = new Assistant(Object.assign({ask, hub, fetchImpl, now: () => now, log: () => {}, retryWaitMs: 5}, rest));
   return {ai, asked, calls, hub, advance: ms => { now += ms; }};
 }
 
@@ -680,7 +685,7 @@ test('turning full-app mode off throws the unfinished app away; the next app sta
 // ---- a model that stops responding is cut off, instead of leaving the person waiting ----
 
 test('a model that stops sending is cut off after the idle time, and the person is told', async () => {
-  const t = setup([STALL], {idleMs: 40});
+  const t = setup([STALL], {idleMs: 40, retries: 0});
   const evs = await say(t.ai, 'ann', 'hi');
   assert.match(texts(evs), /Let me look/, 'what was sent before the stop is kept');
   assert.match(evs.find(e => e.type === 'error').message, /stopped sending its answer/);
@@ -698,4 +703,209 @@ test('an answer that runs past the time limit is cut off with a message', async 
   const t = setup([{paced: Infinity, gap: 15}], {idleMs: 1000, turnMs: 120});
   const evs = await say(t.ai, 'ann', 'hi');
   assert.match(evs.find(e => e.type === 'error').message, /ran past the time limit/);
+});
+
+// ---- an answer is worked out on the server, so a dropped connection does not end it ----
+
+const until = async (fn, ms = 3000) => {
+  const t0 = Date.now();
+  while (!fn()) {
+    if (Date.now() - t0 > ms) throw new Error('timed out waiting');
+    await new Promise(r => setTimeout(r, 5));
+  }
+};
+const drop = res => (res.listeners.close || []).forEach(fn => fn());      // the browser's connection drops
+const startAnswer = (ai, who, text = 'hi', projectId = '5') => {
+  const res = fakeRes();
+  const finished = ai.handle(fakeReq('/collab/ai/stream', 'POST', {projectId, messages: [{role: 'user', content: text}]}, 'AppInventor=' + who), res);
+  return {res, finished};
+};
+const getJson = async (ai, who, url, method = 'GET', body = null) => {
+  const res = fakeRes();
+  await ai.handle(fakeReq(url, method, body, 'AppInventor=' + who), res);
+  return res;
+};
+const WORDS = n => Array.from({length: n}, (_, i) => 'w' + i + ' ').join('');
+
+test('an answer keeps going after the browser connection drops, and a reconnect gets the rest', async () => {
+  const t = setup([{paced: 12, gap: 15}]);
+  const {res} = startAnswer(t.ai, 'ann');
+  await until(() => texts(events(res)).length >= 6);
+  const lastSeen = ids(res).pop();
+  drop(res);
+  const again = await getJson(t.ai, 'ann', '/collab/ai/resume?projectId=5&after=' + lastSeen);
+  assert.strictEqual(again.status, 200);
+  assert.strictEqual(texts(events(res)) + texts(events(again)), WORDS(12), 'every word once, in order');
+  assert.strictEqual(events(again).at(-1).type, 'done');
+});
+
+test('a browser that reconnects after the end still gets the end, and only what it has not seen', async () => {
+  const t = setup([textTurn('one ', 'two ', 'three')]);
+  const first = await say(t.ai, 'ann', 'hi');
+  assert.strictEqual(texts(first), 'one two three');
+  const res = await getJson(t.ai, 'ann', '/collab/ai/resume?projectId=5&after=0');
+  const all = events(res);
+  assert.deepStrictEqual(all.filter(e => e.type === 'text').map(e => e.delta), ['one ', 'two ', 'three']);
+  const lastText = ids(res)[all.findIndex(e => e.type === 'done') - 1];
+  const rest = events(await getJson(t.ai, 'ann', '/collab/ai/resume?projectId=5&after=' + lastText));
+  assert.deepStrictEqual(rest.map(e => e.type), ['done']);
+});
+
+test('Stop ends an answer that is still going, with no error shown', async () => {
+  const t = setup([{paced: Infinity, gap: 15}], {idleMs: 5000, turnMs: 60000});
+  const {res, finished} = startAnswer(t.ai, 'ann');
+  await until(() => texts(events(res)).length >= 4);
+  const stop = await getJson(t.ai, 'ann', '/collab/ai/stop', 'POST', {projectId: '5'});
+  assert.deepStrictEqual(JSON.parse(stop.body), {ok: true, stopped: true});
+  await finished;
+  const evs = events(res);
+  assert.strictEqual(evs.at(-1).type, 'done');
+  assert.ok(!evs.some(e => e.type === 'error'));
+});
+
+test('an answer that nobody is watching any more is stopped after a while', async () => {
+  const t = setup([{paced: Infinity, gap: 15}], {idleMs: 5000, turnMs: 60000, orphanMs: 60});
+  const {res} = startAnswer(t.ai, 'ann');
+  await until(() => texts(events(res)).length >= 4);
+  drop(res);
+  await until(() => t.ai.runs.get('u-ann|5').done);
+  assert.strictEqual(t.calls[0].signal.aborted, true, 'the call to the model was cancelled');
+});
+
+test('a browser that comes back in time keeps the answer alive', async () => {
+  const t = setup([{paced: 30, gap: 15}], {orphanMs: 120});
+  const {res} = startAnswer(t.ai, 'ann');
+  await until(() => texts(events(res)).length >= 4);
+  const lastSeen = ids(res).pop();
+  drop(res);
+  await new Promise(r => setTimeout(r, 40));                        // away for a moment, less than orphanMs
+  const again = await getJson(t.ai, 'ann', '/collab/ai/resume?projectId=5&after=' + lastSeen);
+  assert.strictEqual(texts(events(res)) + texts(events(again)), WORDS(30));
+  assert.ok(!events(again).some(e => e.type === 'error'));
+});
+
+test('a second request while an answer is running is refused, and a person cannot reach another person\'s answer', async () => {
+  const t = setup([{paced: Infinity, gap: 15}], {idleMs: 5000, turnMs: 60000});
+  const {res, finished} = startAnswer(t.ai, 'ann');
+  await until(() => texts(events(res)).length >= 2);
+  const second = await getJson(t.ai, 'ann', '/collab/ai/stream', 'POST', {projectId: '5', messages: [{role: 'user', content: 'again'}]});
+  assert.strictEqual(second.status, 409);
+  assert.match(JSON.parse(second.body).error, /still working/);
+  assert.strictEqual((await getJson(t.ai, 'bob', '/collab/ai/resume?projectId=5&after=0')).status, 404, 'bob has no answer to resume');
+  assert.strictEqual(JSON.parse((await getJson(t.ai, 'bob', '/collab/ai/stop', 'POST', {projectId: '5'})).body).stopped, false);
+  assert.strictEqual(t.ai.activeRun('u-ann', '5').done, false, 'ann\'s answer is untouched');
+  t.ai.activeRun('u-ann', '5').controller.abort();
+  await finished;
+});
+
+test('the window is told whether an answer is running, and what was asked', async () => {
+  const t = setup([{paced: Infinity, gap: 15}], {idleMs: 5000, turnMs: 60000});
+  const idle = JSON.parse((await getJson(t.ai, 'ann', '/collab/ai/status?projectId=5')).body);
+  assert.strictEqual(idle.running, false);
+  const {res, finished} = startAnswer(t.ai, 'ann', 'build me a quiz');
+  await until(() => texts(events(res)).length >= 2);
+  const busy = JSON.parse((await getJson(t.ai, 'ann', '/collab/ai/status?projectId=5')).body);
+  assert.deepStrictEqual([busy.running, busy.question], [true, 'build me a quiz']);
+  t.ai.activeRun('u-ann', '5').controller.abort();
+  await finished;
+  assert.strictEqual(JSON.parse((await getJson(t.ai, 'ann', '/collab/ai/status?projectId=5')).body).running, false);
+});
+
+test('a quiet answer is kept awake by pings', async () => {
+  const t = setup([{paced: 3, gap: 120}], {pingMs: 20});
+  const {res, finished} = startAnswer(t.ai, 'ann');
+  await finished;
+  assert.ok(res.text.split('"type":"ping"').length - 1 >= 3, 'pings arrived between the words');
+});
+
+// ---- a model call that goes wrong for a moment is tried again, so a goal can carry on ----
+
+test('a stalled model is tried again, what it had shown is taken back, and the answer completes', async () => {
+  const t = setup([STALL, textTurn('All good.')], {idleMs: 40});
+  const evs = await say(t.ai, 'ann', 'hi');
+  const types = evs.map(e => e.type);
+  assert.ok(types.indexOf('reset') > types.indexOf('text'), 'the partial text is taken back');
+  assert.match(evs.find(e => e.type === 'status').text, /stopped responding; trying again \(2 of 3\)/);
+  assert.ok(!evs.some(e => e.type === 'error'));
+  assert.strictEqual(evs.filter(e => e.type === 'text').at(-1).delta, 'All good.');
+  assert.strictEqual(t.calls.length, 2);
+});
+
+test('after three stalls in a row the helper gives up and says so', async () => {
+  const t = setup([STALL, STALL, STALL, textTurn('never reached')], {idleMs: 30});
+  const evs = await say(t.ai, 'ann', 'hi');
+  assert.match(evs.find(e => e.type === 'error').message, /stopped sending its answer/);
+  assert.strictEqual(t.calls.length, 3);
+  assert.strictEqual(evs.at(-1).type, 'done');
+});
+
+test('an answer that ends without an ending is asked for again', async () => {
+  const t = setup([{premature: [{choices: [{delta: {content: 'Let me'}}]}]}, textTurn('Done properly.')]);
+  const evs = await say(t.ai, 'ann', 'hi');
+  assert.ok(evs.some(e => e.type === 'reset'));
+  assert.match(evs.find(e => e.type === 'status').text, /cut its answer short; trying again/);
+  assert.ok(!evs.some(e => e.type === 'error'));
+  assert.strictEqual(evs.filter(e => e.type === 'text').at(-1).delta, 'Done properly.');
+});
+
+test('a busy service is waited out; a refused key is not retried', async () => {
+  const busy = setup([{status: 429}, textTurn('Here I am.')]);
+  const evs = await say(busy.ai, 'ann', 'hi');
+  assert.ok(!evs.some(e => e.type === 'error'));
+  assert.strictEqual(texts(evs), 'Here I am.');
+  const refused = setup([{status: 401}, textTurn('never reached')]);
+  const bad = await say(refused.ai, 'ann', 'hi');
+  assert.match(bad.find(e => e.type === 'error').message, /refused the key/);
+  assert.strictEqual(refused.calls.length, 1);
+});
+
+test('stopping during a wait before a retry ends the answer without trying again', async () => {
+  const t = setup([{status: 503}, textTurn('never reached')], {retryWaitMs: 5000});
+  const {res, finished} = startAnswer(t.ai, 'ann');
+  await until(() => events(res).some(e => e.type === 'status'));
+  t.ai.activeRun('u-ann', '5').controller.abort();
+  await finished;
+  assert.strictEqual(t.calls.length, 1);
+  assert.ok(!events(res).some(e => e.type === 'error'));
+});
+
+// ---- an answer that is too long for the model is cut off, and the helper is asked to write less ----
+
+test('a tool call cut off by the length limit is not run; the model is asked to work in smaller pieces', async () => {
+  const cut = [
+    {choices: [{delta: {tool_calls: [{index: 0, id: 'w1', type: 'function', function: {name: 'draft_write', arguments: '{"path":"src/a/Screen1.bky","content":"<xml'}}]}}]},
+    {choices: [{delta: {}, finish_reason: 'length'}]},
+    '[DONE]',
+  ];
+  const t = setup([cut, textTurn('I will go step by step.')]);
+  const evs = await say(t.ai, 'ann', 'write all the blocks');
+  assert.ok(evs.some(e => e.type === 'tool' && e.id === 'w1' && e.state === 'error' && /too long/.test(e.detail)));
+  assert.match(evs.find(e => e.type === 'status').text, /too much in one go/);
+  assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'nothing was written');
+  const note = t.calls[1].payload.messages.at(-1);
+  assert.strictEqual(note.role, 'user');
+  assert.match(note.content, /cut off because it was too long/);
+  assert.strictEqual(texts(evs), 'I will go step by step.');
+});
+
+test('a long tool call shows as it is written, so the window does not look stuck', async () => {
+  const t = setup([toolTurn('draft_write', {path: 'src/a/Screen1.bky', content: 'x'.repeat(3000)}, 'big1'), textTurn('Written.')]);
+  const evs = await say(t.ai, 'ann', 'write it');
+  const writing = evs.find(e => e.type === 'tool' && e.id === 'big1' && /^Writing/.test(e.label));
+  assert.ok(writing, 'a writing chip appeared');
+  assert.match(writing.detail, /KB so far/);
+  assert.strictEqual(evs.filter(e => e.type === 'tool' && e.id === 'big1').at(-1).state, 'done');
+});
+
+// ---- the log: what happened, never what was said ----
+
+test('the log says what happened, and never what was said or the key', async () => {
+  const lines = [];
+  const t = setup([STALL, toolTurn('list_files', {}, 'L1'), textTurn('A secret answer.')], {idleMs: 30, log: m => lines.push(m)});
+  await say(t.ai, 'ann', 'my private question');
+  const log = lines.join('\n');
+  assert.match(log, /ann asked/);
+  assert.match(log, /stopped responding/);
+  assert.match(log, /ann finished after \d+ s; 2 model answers, 1 tool calls/);
+  assert.doesNotMatch(log, /private question|secret answer|sk-test/);
 });

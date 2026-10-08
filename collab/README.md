@@ -335,9 +335,22 @@ To set it by hand, add `AI_VISION=1` (or `AI_VISION=0`) to `/opt/appinventor/ai.
 
 **In the window:** Enter sends, Shift+Enter starts a new line, Esc or the square button stops, `/`
 lists the commands, Copy works on answers and code blocks, and Try again redoes the last question.
-If the model service stops sending an answer, the answer is cut off after a minute of silence and the
-window says so, so it never stays busy for good (`AI_IDLE_MS` in `ai.env` changes the minute). No
-single answer may run longer than five minutes.
+An answer is worked out on the Pi, not in your browser. If your connection drops, or you reload the
+window, the answer carries on, and the window reconnects by itself (or picks it up again after a reload)
+without losing or repeating anything. **Stop** stops it. If nobody has the window open for three minutes, the
+answer is stopped. While the helper is quiet for a long time (the model is thinking, or writing something
+big), the window says "Still working…", and a long tool call shows how much has been written.
+
+If the model service stops sending an answer for a minute, the helper tries again, up to three tries in all;
+it does the same when the service ends an answer early, or is busy or unreachable for a moment. The window
+says so and takes back what the failed try had shown. After that it gives up and says so, so the window never
+stays busy for good (`AI_IDLE_MS` in `ai.env` changes the minute). No single answer may run longer than five
+minutes. If the model runs out of room in the middle of a tool call (`AI_MAX_TOKENS`, 8000 by default), that
+call is skipped, and the helper is asked to do the same work in smaller pieces.
+
+To see what the helper did when something goes wrong, run
+`sudo journalctl -u collab-hub --since "1 hour ago" | grep "\[ai\]"`. It lists who asked, retries, stops and
+how each answer ended, but never the questions, the answers or the keys.
 
 **Not included:** running the app or the emulator, seeing how a screen looks, arbitrary web pages (only
 the documentation sites above), changing anything outside the open project, the server's settings or

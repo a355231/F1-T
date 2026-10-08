@@ -222,7 +222,19 @@ const TOOLS = [
     label: a => 'Searching for “' + String(a.query || '').slice(0, 30) + '”', run: async (a, ctx) => {
       const query = String(a.query || '');
       if (!query || query.length > 120) throw new Error('give a search of 1 to 120 characters');
-      const re = a.regex ? new RegExp(query, 'i') : null;
+      // A pattern with a repeated group (or a back-reference) can take exponential time on a long line, and the
+      // search runs on the thread that serves everyone's editor. Only simple patterns are allowed.
+      if (a.regex && /\)[*+{]|\\[1-9]|\(\?[=!<]/.test(query)) {
+        throw new Error('that pattern is too complicated; search for plain text, or use a simple pattern without repeated groups');
+      }
+      let re = null;
+      if (a.regex) {
+        try {
+          re = new RegExp(query, 'i');
+        } catch (e) {
+          throw new Error('that is not a valid pattern: ' + e.message.replace(/^Invalid regular expression: /, ''));
+        }
+      }
       const hits = [];
       for (const [path, text] of await ctx.draft.merged()) {
         String(text).split('\n').forEach((line, i) => {

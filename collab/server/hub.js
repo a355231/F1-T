@@ -30,6 +30,9 @@ const BACKUP_MS = parseInt(process.env.BACKUP_MS || '60000', 10);
 const VERSION_FILE = process.env.AI_VERSION_FILE || '/opt/appinventor/version';
 const DATA_DIR = process.env.AI_DATA_DIR || '/opt/appinventor';
 const STARTED_AT = Date.now();
+// A promise that fails with nobody waiting for it would otherwise end the process, and with it every
+// editor's live connection. Log it and carry on.
+process.on('unhandledRejection', err => console.error('Unhandled rejection:', err && err.stack || err));
 
 const sockets = new Map();
 const cookies = new Map();
@@ -255,7 +258,12 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (req.url.split('?')[0].startsWith('/collab/ai')) {
-    ai.handle(req, res);
+    // An error in the helper must never take the whole hub down with it: everyone's editor depends on it.
+    ai.handle(req, res).catch(err => {
+      console.error('AI helper error:', err && err.stack || err);
+      if (!res.headersSent) res.writeHead(500, {'content-type': 'application/json'});
+      if (!res.writableEnded) res.end(JSON.stringify({error: 'The helper had a problem. Try again.'}));
+    });
     return;
   }
   if (req.url.split('?')[0].startsWith('/collab/admin')) {

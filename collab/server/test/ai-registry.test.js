@@ -175,3 +175,11 @@ test('a picture made here can be turned into a PNG, and the media list only take
   assert.match((await run('create_svg', {name: 'Bad', svg: '<svg onload="x"></svg>'}, c)).text, /^Error/);
   assert.match((await run('svg_to_png', {picture_id: 'svg_nope'}, c)).text, /no picture with that id/);
 });
+
+test('a project search with a pattern that could take very long is refused; simple patterns still work', async () => {
+  const c = ctx();
+  assert.match((await run('search_project', {query: '(a+)+$', regex: true}, c)).text, /too complicated/);
+  assert.match((await run('search_project', {query: '(.*)\\1', regex: true}, c)).text, /too complicated/);
+  assert.match((await run('search_project', {query: '(', regex: true}, c)).text, /not a valid pattern/);
+  assert.match((await run('search_project', {query: 'Label\\d+', regex: true}, c)).text, /Screen1\.scm/);
+});

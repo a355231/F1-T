@@ -104,7 +104,9 @@ async function webSearch(query, key, fetchImpl = fetch) {
 }
 
 // Reads an OpenAI-style event stream (`data: {...}` lines) and yields each JSON object in it.
-async function* sseJson(body) {
+// state, when given, is told whether the stream ended with [DONE] (state.sawDone), so that an answer that was cut
+// off can be told from one that finished.
+async function* sseJson(body, state = {}) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -118,7 +120,10 @@ async function* sseJson(body) {
       buf = buf.slice(i + 1);
       if (!line.startsWith('data:')) continue;   // comments such as ": keep-alive" are ignored
       const data = line.slice(5).trim();
-      if (data === '[DONE]') return;
+      if (data === '[DONE]') {
+        state.sawDone = true;
+        return;
+      }
       try {
         yield JSON.parse(data);
       } catch (e) {

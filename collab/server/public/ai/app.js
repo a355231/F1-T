@@ -7,6 +7,9 @@
   var params = new URLSearchParams(location.search);
   var projectId = params.get('projectId') || '';
   var STORE = 'aihelper.' + projectId;
+  var CFG = window.__aiHelperConfig || {};
+  var SILENCE_MS = CFG.silenceMs || 30000;      // nothing at all from the server for this long: reconnect
+  var MAX_RECONNECTS = CFG.reconnects || 40;
   var $ = function (id) { return document.getElementById(id); };
   var chat = $('chat');
   var list = $('messages');
@@ -172,7 +175,45 @@
         });
       }
     };
+    // The service was tried again: what the failed try showed is taken back.
+    api.resetText = function () {
+      if (api.cur) {
+        api.full = api.full.slice(0, api.full.length - api.raw.length);
+        api.cur.remove();
+        api.cur = null;
+        api.raw = '';
+      }
+      Object.keys(api.chips).forEach(function (id) {   // a step still marked as running belongs to the failed try
+        var c = api.chips[id];
+        if (c.classList.contains('running')) {
+          c.remove();
+          delete api.chips[id];
+        }
+      });
+    };
+    // A long quiet stretch (the model is thinking, or writing something big) says so, instead of looking stuck.
+    var quietSince = Date.now();
+    var hint = null;
+    var ticker = setInterval(function () {
+      var s = Math.floor((Date.now() - quietSince) / 1000);
+      if (s < 12) return;
+      if (!hint) {
+        hint = el('div', 'waiting');
+        turn.appendChild(hint);
+        keepBottom();
+      }
+      hint.textContent = 'Still working… ' + Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2);
+    }, 1000);
+    api.alive = function () {
+      quietSince = Date.now();
+      if (hint) {
+        hint.remove();
+        hint = null;
+      }
+    };
     api.finish = function () {
+      clearInterval(ticker);
+      if (hint) hint.remove();
       if (thinking.parentNode) thinking.remove();
       closeText();
       var acts = el('div', 'row-actions keep');
@@ -312,6 +353,7 @@
   }
 
   function onEvent(api, ev) {
+    api.alive();
     switch (ev.type) {
       case 'text': api.text(ev.delta); break;
       case 'tool': chip(api, ev); break;
@@ -320,42 +362,140 @@
       case 'plan': plan(api, ev.steps || []); break;
       case 'status': notice(api, ev.text, false); break;
       case 'question': question(api, ev.text); break;
+      case 'reset': api.resetText(); break;
       case 'error': notice(api, ev.message, true); break;
       default: break;
     }
   }
 
-  function streamRequest(body, signal, onEv) {
-    return fetch('/collab/ai/stream', {method: 'POST', credentials: 'same-origin', signal: signal,
-      headers: {'content-type': 'application/json'}, body: JSON.stringify(body)})
-      .then(function (r) {
-        if (!r.ok) {
-          return r.json().catch(function () { return {}; }).then(function (d) {
-            throw new Error(d.error || 'The helper could not answer.');
-          });
-        }
-        var reader = r.body.getReader();
-        var decoder = new TextDecoder();
-        var buf = '';
-        function pump() {
-          return reader.read().then(function (chunk) {
-            if (chunk.done) return;
-            buf += decoder.decode(chunk.value, {stream: true});
-            var cut;
-            while ((cut = buf.indexOf('\n\n')) >= 0) {
-              var block = buf.slice(0, cut);
-              buf = buf.slice(cut + 2);
-              block.split('\n').forEach(function (line) {
-                if (line.indexOf('data:') === 0) {
-                  try { onEv(JSON.parse(line.slice(5))); } catch (e) { /* a malformed event is skipped */ }
-                }
-              });
-            }
-            return pump();
-          });
-        }
-        return pump();
+  // Sends the question and reads the answer's events. The answer is worked out on the server, so if the
+  // connection drops, or goes silent for SILENCE_MS (the server pings every few seconds, so silence means
+  // the connection is dead), the rest of the answer is asked for again, from the last event seen.
+  // With no body, an answer that is already being written is picked up from its start.
+  function streamRequest(body, signal, onEv, onLink) {
+    var lastSeq = 0;
+    var finished = false;
+    var started = !body;     // has the server taken the question?
+    var failures = 0;
+    var lost = false;
+    var conn = null;
+    var quiet = null;
+
+    function aborted() {
+      var e = new Error('aborted');
+      e.name = 'AbortError';
+      return e;
+    }
+    // Stop means stop: the server keeps working when a connection drops, so it is told.
+    signal.addEventListener('abort', function () {
+      clearTimeout(quiet);
+      if (conn) conn.abort();
+      try {
+        fetch('/collab/ai/stop', {method: 'POST', credentials: 'same-origin', keepalive: true,
+          headers: {'content-type': 'application/json'}, body: JSON.stringify({projectId: projectId})});
+      } catch (e) { /* nothing to stop */ }
+    });
+
+    function listen() {
+      clearTimeout(quiet);
+      quiet = setTimeout(function () { if (conn) conn.abort(); }, SILENCE_MS);
+    }
+
+    function handle(block) {
+      var seq = 0;
+      var data = null;
+      block.split('\n').forEach(function (line) {
+        if (line.indexOf('id:') === 0) seq = parseInt(line.slice(3), 10) || 0;
+        else if (line.indexOf('data:') === 0) data = line.slice(5);
       });
+      if (data === null || (seq && seq <= lastSeq)) return;
+      var ev;
+      try { ev = JSON.parse(data); } catch (e) { return; }   // a malformed event is skipped
+      if (seq) lastSeq = seq;
+      failures = 0;
+      if (lost) {
+        lost = false;
+        onLink('back');
+      }
+      if (ev.type === 'done') finished = true;
+      if (ev.type !== 'ping') onEv(ev);
+    }
+
+    function read(response) {
+      var reader = response.body.getReader();
+      var decoder = new TextDecoder();
+      var buf = '';
+      listen();
+      function pump() {
+        return reader.read().then(function (chunk) {
+          if (chunk.done) return;
+          listen();
+          buf += decoder.decode(chunk.value, {stream: true});
+          var cut;
+          while ((cut = buf.indexOf('\n\n')) >= 0) {
+            var block = buf.slice(0, cut);
+            buf = buf.slice(cut + 2);
+            handle(block);
+          }
+          return pump();
+        });
+      }
+      return pump().then(function () { clearTimeout(quiet); }, function (e) { clearTimeout(quiet); throw e; });
+    }
+
+    function check(r) {
+      if (r.ok) {
+        started = true;
+        return read(r);
+      }
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        var err = new Error(r.status === 404 ? 'The answer was lost (the server may have restarted). Please ask again.'
+          : d.error || 'The helper could not answer.');
+        err.fatal = true;   // the server has answered; asking again would not change that
+        throw err;
+      });
+    }
+
+    function first() {
+      conn = new AbortController();
+      return fetch('/collab/ai/stream', {method: 'POST', credentials: 'same-origin', signal: conn.signal,
+        headers: {'content-type': 'application/json'}, body: JSON.stringify(body)}).then(check);
+    }
+
+    function resume() {
+      conn = new AbortController();
+      return fetch('/collab/ai/resume?projectId=' + encodeURIComponent(projectId) + '&after=' + lastSeq,
+        {credentials: 'same-origin', signal: conn.signal}).then(check);
+    }
+
+    function again() {
+      failures++;
+      if (!lost) {
+        lost = true;
+        onLink('lost');
+      }
+      if (failures > MAX_RECONNECTS) {
+        throw new Error('Lost the connection to the helper. Please ask again.');
+      }
+      return new Promise(function (resolve) { setTimeout(resolve, Math.min(4000, 400 * failures)); }).then(function () {
+        if (signal.aborted) throw aborted();
+        return run(resume);
+      });
+    }
+
+    function run(step) {
+      return step().then(function () {
+        if (finished) return undefined;
+        return again();   // the stream ended with no done event: the connection was cut
+      }, function (e) {
+        if (signal.aborted) throw aborted();
+        if (finished) return undefined;
+        if ((e && e.fatal) || !started) throw e;
+        return again();
+      });
+    }
+
+    return run(body ? first : resume);
   }
 
   function setBusy(on) {
@@ -463,15 +603,21 @@
     renderThumbs();
     autosize();
     var api = newAssistant();
-    controller = new AbortController();
-    setBusy(true);
     if (isGoal) startGoal(text.replace(/^\/goal\s*/i, ''));
     var body = {projectId: projectId, messages: isOverride ? [{role: 'user', content: text}] : history.slice(-20)};
     if (images.length) body.images = images.map(function (p) { return {name: p.name, mime: p.mime, data: p.data}; });
+    runStream(api, body, {goal: isGoal, override: isOverride, row: row});
+  }
+
+  // Shows an answer as its events arrive, and keeps the window busy until the answer is over. With no body,
+  // it picks up an answer that is already being written.
+  function runStream(api, body, opts) {
+    controller = new AbortController();
+    setBusy(true);
     streamRequest(body, controller.signal, function (ev) {
       onEvent(api, ev);
       keepBottom();
-    }).catch(function (e) {
+    }, linkChanged).catch(function (e) {
       if (e && e.name === 'AbortError') {
         notice(api, 'Stopped.', false);
       } else {
@@ -480,20 +626,51 @@
     }).then(function () {
       controller = null;
       setBusy(false);
+      linkChanged('back');
       api.finish();
-      if (isGoal) finishGoal();
-      if (!isOverride && api.full) {
+      if (opts.goal) finishGoal();
+      if (!opts.override && api.full) {
         history.push({role: 'assistant', content: api.full});
         api.row.dataset.text = api.full;
-        var retry = el('button', 'iconbtn');
-        retry.type = 'button';
-        retry.title = 'Try again';
-        retry.innerHTML = RETRY;
-        retry.onclick = function () { retryFrom(row); };
-        api.acts.appendChild(retry);
+        if (opts.row) {
+          var retry = el('button', 'iconbtn');
+          retry.type = 'button';
+          retry.title = 'Try again';
+          retry.innerHTML = RETRY;
+          retry.onclick = function () { retryFrom(opts.row); };
+          api.acts.appendChild(retry);
+        }
       }
       save();
     });
+  }
+
+  // While the connection is down the header says so; the answer itself carries on at the server.
+  var subKept = null;
+  function linkChanged(what) {
+    var sub = $('sub');
+    if (what === 'lost' && subKept === null) {
+      subKept = sub.textContent;
+      sub.textContent = 'Connection lost. Reconnecting…';
+      sub.classList.add('warn');
+    } else if (what === 'back' && subKept !== null) {
+      sub.textContent = subKept;
+      sub.classList.remove('warn');
+      subKept = null;
+    }
+  }
+
+  // The window was opened, or reloaded, while an answer was still being written: pick it up from its start.
+  function attachRun(question) {
+    if (controller) return;
+    var row = null;
+    if (question) {
+      row = addUser(question);
+      history.push({role: 'user', content: question});
+    }
+    var api = newAssistant();
+    notice(api, 'Reconnected to the answer that was still being written.', false);
+    runStream(api, null, {goal: false, override: false, row: row});
   }
 
   // "Try again": drop the last exchange and ask again.
@@ -741,6 +918,7 @@
         showMode();
         $('sub').textContent = 'Signed in as ' + s.name + (s.search ? ' · web search on' : '');
         if (!s.configured) $('notSet').hidden = false;
+        if (s.running) attachRun(s.question);
       })
       .catch(function () { $('sub').textContent = 'Could not reach the team server'; });
   }

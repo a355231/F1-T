@@ -293,3 +293,5 @@ textarea::placeholder { color: var(--muted); }
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
   #chat { scroll-behavior: auto; }
 }
+.waiting { color: var(--muted); font-size: 13px; padding: 4px 0 2px; animation: rise .3s var(--ease) both; }
+#sub.warn { color: var(--danger); }

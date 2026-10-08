@@ -56,6 +56,16 @@ const IDLE_MS = 60 * 1000;
 const TURN_MS = 5 * 60 * 1000;
 const STALLED = 'The AI service stopped sending its answer, so it was cut off. Try asking again.';
 const TOO_LONG = 'That answer ran past the time limit and was cut off. Try asking for something smaller.';
+const MAX_TOKENS = () => parseInt(process.env.AI_MAX_TOKENS || '8000', 10);
+const MODEL_RETRIES = 2;            // a model call that stalls, ends early or fails for a moment is tried again
+const RETRY_WAIT_MS = 2000;
+const PING_MS = 10 * 1000;          // a ping event now and then keeps the connection, and any tunnel, awake
+const RUN_KEEP_MS = 10 * 60 * 1000; // a finished answer's events stay for a browser that reconnects late
+const ORPHAN_MS = 3 * 60 * 1000;    // an answer that nobody is watching is stopped after this long
+const RUN_EVENTS_MAX = 20000;
+const WRITING_BYTES = 1000;         // a tool call this long is shown while it is written
+const TOO_BIG_NOTE = 'Your last message was cut off because it was too long, so the tool call in it was not run. ' +
+  'Do the same work in smaller pieces: one component, one event handler or one short section of a file per call.';
 const COMMAND = /^\s*\/(override|goal)\b/i;
 const NOT_SET_UP = 'The AI helper is not set up yet. Whoever runs the Raspberry Pi needs to run: ' +
   'sudo /opt/appinventor/set-ai.sh';
@@ -75,7 +85,8 @@ How to work:
 - Look before you change. Use check_project, screen_outline, blocks_outline, read_file or search_project. \
 Before you add or change a component, look it up with component_info. For the format of blocks, use blocks_examples.
 - Make changes in the draft: the scm_ tools for components and properties, the bky_ tools for blocks, and \
-draft_replace for a small edit. Then run check_project and fix what it reports.
+draft_replace for a small edit. Then run check_project and fix what it reports. Keep each tool call small: \
+one component or one event handler at a time, never a whole file in one go.
 - When the changes are ready, call propose_draft with a plain summary. Nothing is written until the person \
 presses Apply, so never say a change is applied before they do. Changes still in the draft at the end of \
 your answer are lost, so propose them.
@@ -100,7 +111,8 @@ and screen_outline. Look up each component with component_info before you add it
 - Build the app in the draft: scm_new_screen (at most 4 new screens), scm_add_component, scm_set_property, \
 bky_add_event_handler and bky_add_blocks, with blocks_examples for the block formats. The draft is kept from one \
 message to the next, so a big app can be built over several answers. At the end of each answer, say what is \
-still to build.
+still to build. Keep each tool call small (one component or one event handler at a time, never a whole file \
+in one go): a call that is too long is cut off and skipped.
 - Nothing is shown to the person as ready to apply until the app is complete. When the whole app is built and \
 check_project reports no problems, call propose_draft with complete set to true and a plain summary of what the \
 app does. Only then does the person see the Apply button. A proposal that is not complete is refused, and the \
@@ -207,8 +219,32 @@ function trimToolResults(messages) {
   }
 }
 
+// Shows a long tool call while the model is still writing it. Writing a big file can take minutes with no
+// words in between, and the window would look stuck.
+function showWriting(acc, shown, emit) {
+  const now = Date.now();
+  acc.tool_calls.forEach((slot, i) => {
+    if (!slot || !slot.id || !slot.function.name) return;
+    const size = slot.function.arguments.length;
+    if (size < WRITING_BYTES || (shown[i] && now - shown[i] < 1200)) return;
+    shown[i] = now;
+    emit({type: 'tool', id: slot.id, name: slot.function.name, state: 'running',
+      label: 'Writing ' + slot.function.name.replace(/_/g, ' '), detail: (size / 1024).toFixed(1) + ' KB so far'});
+  });
+}
+
+// Whether a failed model call is worth trying again: the service stopped answering, ended early, or was busy
+// or unreachable for a moment. A refused key, or an answer that ran past its time limit, is not.
+function retryable(e) {
+  if (e.premature || e.transient) return true;
+  if (e.stalled) return !!e.idle;
+  const m = /service answered (\d+)/.exec(String(e.message || ''));
+  if (m) return [408, 425, 429, 500, 502, 503, 504, 529].includes(+m[1]);
+  return /fetch failed|network|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(String(e.message || '') + ' ' + String(e.cause && e.cause.message || ''));
+}
+
 class Assistant {
-  constructor({ask, hub, fetchImpl, now, goalSteps, goalMs, searchImpl, idleMs, turnMs}) {
+  constructor({ask, hub, fetchImpl, now, goalSteps, goalMs, searchImpl, idleMs, turnMs, retries, retryWaitMs, pingMs, orphanMs, keepMs, log}) {
     this.ask = ask;
     this.hub = hub;
     this.fetch = fetchImpl || ((...a) => fetch(...a));
@@ -218,6 +254,13 @@ class Assistant {
     this.searchImpl = searchImpl || tools.webSearch;
     this.idleMs = idleMs || parseInt(process.env.AI_IDLE_MS || String(IDLE_MS), 10);
     this.turnMs = turnMs || TURN_MS;
+    this.retries = retries === undefined ? MODEL_RETRIES : retries;
+    this.retryWaitMs = retryWaitMs === undefined ? RETRY_WAIT_MS : retryWaitMs;
+    this.pingMs = pingMs || PING_MS;
+    this.orphanMs = orphanMs || ORPHAN_MS;
+    this.keepMs = keepMs || RUN_KEEP_MS;
+    this.log = log || ((...a) => console.log('[ai]', ...a));   // what happened, for journalctl: never what was said
+    this.runs = new Map();            // "user|project" -> the answer being worked on, or just finished
     this.drafts = new Map();          // "user|project" -> {draft, at}: full-app drafts kept between messages
     this.proposals = new Map();
     this.artifacts = new Map();       // id -> {owner, kind, data|svg, mime, width, height, at, title}
@@ -375,8 +418,10 @@ class Assistant {
     }
     if (path_ === '/collab/ai/status') {
       const pid = new URL(req.url, 'http://x').searchParams.get('projectId') || '';
+      const live = /^\d+$/.test(pid) ? this.activeRun(me.userId, pid) : null;
       return json(200, {configured: this.configured(), search: !!SEARCH_KEY(), vision: await this.vision(),
-        name: me.email.split('@')[0], fullUntil: /^\d+$/.test(pid) ? this.fullUntil(me.userId, pid) : 0});
+        name: me.email.split('@')[0], fullUntil: /^\d+$/.test(pid) ? this.fullUntil(me.userId, pid) : 0,
+        running: !!live, question: live ? live.question : ''});
     }
     if (path_ === '/collab/ai/artifact' && req.method === 'GET') {
       const id = new URL(req.url, 'http://x').searchParams.get('id');
@@ -392,6 +437,17 @@ class Assistant {
         'x-content-type-options': 'nosniff',
       });
       return res.end(a.kind === 'svg' ? a.svg : a.data);
+    }
+    if (path_ === '/collab/ai/resume' && req.method === 'GET') {
+      // A browser whose connection dropped asks for the rest of its answer.
+      const params = new URL(req.url, 'http://x').searchParams;
+      const pid = params.get('projectId') || '';
+      if (!/^\d+$/.test(pid)) return json(400, {error: 'no project'});
+      const access = await this.ask('/ode/collab/access?projectId=' + pid, cookie);
+      if (!access || !access.ok) return json(403, {error: 'no access to that project'});
+      const run = this.runs.get(this.runKey(me.userId, pid));
+      if (!run) return json(404, {error: 'nothing to resume'});
+      return this.attach(run, res, parseInt(params.get('after') || '0', 10) || 0);
     }
     if (req.method !== 'POST') return json(404, {error: 'unknown'});
     const limit = path_ === '/collab/ai/stream' ? STREAM_BODY_MAX : BODY_MAX;
@@ -412,11 +468,20 @@ class Assistant {
     if (!access || !access.ok) return json(403, {error: 'no access to that project'});
     if (path_ === '/collab/ai/stream') return this.stream(req, res, me, cookie, projectId, access, data);
     if (path_ === '/collab/ai/apply') return this.apply(json, me, cookie, projectId, data);
+    if (path_ === '/collab/ai/stop') {
+      const run = this.activeRun(me.userId, projectId);
+      if (run) {
+        this.log(run.by + ' pressed Stop');
+        run.controller.abort();
+      }
+      return json(200, {ok: true, stopped: !!run});
+    }
     return json(404, {error: 'unknown'});
   }
 
-  // Streams one answer as server-sent events. The browser stops reading when it closes the page or
-  // presses Stop; then the model call is cancelled too.
+  // Starts an answer. It is worked out on the server whether or not a browser keeps watching: if the
+  // connection drops (a tunnel hiccup, a sleeping laptop), the answer carries on, and the browser asks for
+  // the rest with /collab/ai/resume. Only Stop, or nobody watching for orphanMs, ends it early.
   async stream(req, res, me, cookie, projectId, access, data) {
     const history = talkHistory(data);
     if (!history.length || history[history.length - 1].role !== 'user') {
@@ -428,20 +493,53 @@ class Assistant {
       res.writeHead(400, {'content-type': 'application/json'});
       return res.end(JSON.stringify({error: attached.error}));
     }
-    res.writeHead(200, {'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store',
-      'x-accel-buffering': 'no', connection: 'keep-alive'});
-    const controller = new AbortController();
-    res.on('close', () => controller.abort());
-    const emit = ev => { if (!res.writableEnded) res.write('data: ' + JSON.stringify(ev) + '\n\n'); };
-    const ping = setInterval(() => { if (!res.writableEnded) res.write(': keep-alive\n\n'); }, 15000);
+    if (this.activeRun(me.userId, projectId)) {
+      res.writeHead(409, {'content-type': 'application/json'});
+      return res.end(JSON.stringify({error: 'The helper is still working on your last request in this project. ' +
+        'Wait for it to finish, or press Stop.'}));
+    }
+    const run = this.startRun(me, cookie, projectId, access, history, attached.images);
+    return this.attach(run, res, 0);
+  }
+
+  runKey(userId, projectId) {
+    return userId + '|' + projectId;
+  }
+
+  // The answer being worked on for this person and project, if there is one.
+  activeRun(userId, projectId) {
+    const run = this.runs.get(this.runKey(userId, projectId));
+    return run && !run.done ? run : null;
+  }
+
+  startRun(me, cookie, projectId, access, history, images) {
+    const key = this.runKey(me.userId, projectId);
+    const old = this.runs.get(key);
+    if (old) clearTimeout(old.keepTimer);
     const question = history[history.length - 1].content.trim();
-    const ctx = {me, cookie, projectId, access, emit, signal: controller.signal, images: attached.images};
+    const run = {key, userId: me.userId, projectId, by: me.email.split('@')[0], events: [], seq: 0, done: false,
+      watchers: new Map(), controller: new AbortController(), orphanTimer: null, keepTimer: null,
+      startedAt: Date.now(), stats: {steps: 0, tools: 0},
+      question: /^\s*\/override\b/i.test(question) ? '/override' : question.slice(0, 6000)};
+    this.runs.set(key, run);
+    this.work(run, {me, cookie, projectId, access, history, images});
+    return run;
+  }
+
+  // Does the work of one answer. It never throws: whatever happens, the answer ends with a done event.
+  async work(run, {me, cookie, projectId, access, history, images}) {
+    const emit = ev => this.publish(run, ev);
+    const question = run.question;
+    const ctx = {me, cookie, projectId, access, emit, signal: run.controller.signal, images, stats: run.stats};
+    let how = 'finished';
+    this.log(run.by + ' asked (project ' + projectId + (this.fullActive(me.userId, projectId) ? ', full-app mode' : '') +
+      (COMMAND.test(question) ? ', ' + COMMAND.exec(question)[1].toLowerCase() : '') + ')');
     try {
       const command = COMMAND.exec(question);
       if (command && command[1].toLowerCase() === 'override') {
-        emit({type: 'text', delta: this.override(me, projectId, question)});
+        emit({type: 'text', delta: this.override(me, projectId, history[history.length - 1].content.trim())});
       } else if (command) {
-        const goal = question.replace(COMMAND, '').trim();
+        const goal = history[history.length - 1].content.trim().replace(COMMAND, '').trim();
         if (!goal) {
           emit({type: 'text', delta: 'Tell me the goal after /goal, for example: /goal make a quiz app with a score screen.'});
         } else {
@@ -453,12 +551,88 @@ class Assistant {
       }
     } catch (e) {
       const message = serviceMessage(e);
-      if (message) emit({type: 'error', message});
+      if (message) {
+        how = 'failed (' + String(e && e.message || e).slice(0, 160) + ')';
+        emit({type: 'error', message});
+      } else {
+        how = 'stopped';
+      }
     } finally {
-      clearInterval(ping);
-      emit({type: 'done'});
-      res.end();
+      this.log(run.by + ' ' + how + ' after ' + Math.round((Date.now() - run.startedAt) / 1000) + ' s; ' +
+        run.stats.steps + ' model answers, ' + run.stats.tools + ' tool calls');
+      this.finishRun(run);
     }
+  }
+
+  // Records an event, and sends it to every browser that is watching.
+  publish(run, ev) {
+    const seq = ++run.seq;
+    const text = JSON.stringify(ev);
+    run.events.push({seq, text});
+    if (run.events.length > RUN_EVENTS_MAX + 500) run.events.splice(0, 500);
+    for (const res of run.watchers.keys()) this.send(res, 'id: ' + seq + '\ndata: ' + text + '\n\n');
+  }
+
+  send(res, chunk) {
+    if (!res.writableEnded && !res.destroyed) res.write(chunk);
+  }
+
+  // Connects a browser to a run: it gets the events after `after`, then the new ones as they happen.
+  // Resolves when the answer is over or the browser has gone.
+  attach(run, res, after) {
+    res.writeHead(200, {'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store',
+      'x-accel-buffering': 'no', connection: 'keep-alive'});
+    if (run.events.length && run.events[0].seq > after + 1) {
+      this.send(res, 'data: ' + JSON.stringify({type: 'status', text: 'Some of the output was missed while the connection was down.'}) + '\n\n');
+    }
+    for (const e of run.events) {
+      if (e.seq > after) this.send(res, 'id: ' + e.seq + '\ndata: ' + e.text + '\n\n');
+    }
+    if (run.done) {
+      res.end();
+      return Promise.resolve();
+    }
+    // A ping at once, and then every pingMs: bytes keep flowing, so a tunnel does not close the connection
+    // as idle, and the page can tell a dead connection from a quiet answer.
+    this.send(res, 'data: {"type":"ping"}\n\n');
+    return new Promise(resolve => {
+      const ping = setInterval(() => this.send(res, 'data: {"type":"ping"}\n\n'), this.pingMs);
+      if (ping.unref) ping.unref();
+      const watcher = {ping, resolve};
+      run.watchers.set(res, watcher);
+      clearTimeout(run.orphanTimer);
+      run.orphanTimer = null;
+      res.on('close', () => {
+        clearInterval(ping);
+        if (!run.watchers.delete(res)) return;
+        resolve();
+        if (!run.done && run.watchers.size === 0) {
+          this.log(run.by + ': nobody is watching the answer; it stops in ' + Math.round(this.orphanMs / 1000) + ' s unless a browser comes back');
+          run.orphanTimer = setTimeout(() => {
+            this.log(run.by + ': nobody came back, so the answer was stopped');
+            run.controller.abort();
+          }, this.orphanMs);
+          if (run.orphanTimer.unref) run.orphanTimer.unref();
+        }
+      });
+    });
+  }
+
+  finishRun(run) {
+    this.publish(run, {type: 'done'});
+    run.done = true;
+    clearTimeout(run.orphanTimer);
+    for (const [res, watcher] of run.watchers) {
+      clearInterval(watcher.ping);
+      if (!res.writableEnded) res.end();
+      watcher.resolve();
+    }
+    run.watchers.clear();
+    // The events stay for a while, so that a browser that was cut off can still fetch the end of the answer.
+    run.keepTimer = setTimeout(() => {
+      if (this.runs.get(run.key) === run) this.runs.delete(run.key);
+    }, this.keepMs);
+    if (run.keepTimer.unref) run.keepTimer.unref();
   }
 
   // The agent loop: the model answers, may call tools, and gets their results, until it stops. The
@@ -466,6 +640,7 @@ class Assistant {
   // message to the next, until it is proposed or full-app mode ends.
   async converse(ctx) {
     const {me, projectId, access, goal, emit} = ctx;
+    const stats = ctx.stats || {steps: 0, tools: 0};
     if (!this.configured()) {
       emit({type: 'text', delta: NOT_SET_UP});
       return;
@@ -522,8 +697,26 @@ class Assistant {
           return;
         }
         trimToolResults(messages);
-        const reply = await this.streamTurn(messages, registry.definitions(run), ctx.signal, emit);
+        const reply = await this.streamWithRetry(messages, registry.definitions(run), ctx.signal, emit);
+        stats.steps++;
+        if (reply.truncated) {
+          // The model ran out of room part way through. A half-written tool call is never run.
+          this.log('the model ran out of room (' + reply.tool_calls.length + ' tool call(s) cut off)');
+          for (const call of reply.tool_calls) {
+            emit({type: 'tool', id: call.id, name: call.function.name, state: 'error',
+              label: 'Writing ' + call.function.name.replace(/_/g, ' '), detail: 'too long, skipped'});
+          }
+          if (!reply.tool_calls.length) {
+            emit({type: 'status', text: 'The answer was cut off because it was too long.'});
+            return;
+          }
+          emit({type: 'status', text: 'The helper tried to write too much in one go, so that step was skipped. It will work in smaller pieces.'});
+          messages.push({role: 'assistant', content: reply.content || '(cut off)'});
+          messages.push({role: 'user', content: TOO_BIG_NOTE});
+          continue;
+        }
         if (!reply.tool_calls.length) return;
+        stats.tools += reply.tool_calls.length;
         messages.push({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls});
         const pictures = [];
         let stop = false;
@@ -582,6 +775,8 @@ class Assistant {
   // One answer from the model, streamed: text is passed on as it arrives; the tool calls are collected.
   // The service can stop sending without closing the connection, and then the answer would wait forever.
   // So it is cut off after idleMs of silence (or turnMs in all), and the person is told. Stop still works.
+  // The result says whether the model ran out of room (truncated); an answer that ends without a proper
+  // ending is an error that streamWithRetry tries again.
   async streamTurn(messages, list, signal, emit) {
     const guard = new AbortController();
     let cutOff = '';
@@ -600,7 +795,7 @@ class Assistant {
         method: 'POST',
         headers: {authorization: 'Bearer ' + KEY(), 'content-type': 'application/json',
           'x-title': 'App Inventor Team Edition'},
-        body: JSON.stringify({model: MODEL(), messages, tools: list, temperature: 0.2, max_tokens: 8000, stream: true}),
+        body: JSON.stringify({model: MODEL(), messages, tools: list, temperature: 0.2, max_tokens: MAX_TOKENS(), stream: true}),
         signal: guard.signal,
       });
       if (!r.ok) throw new Error('service answered ' + r.status);
@@ -616,26 +811,62 @@ class Assistant {
         cancel(why) { return reader.cancel(why); },
       });
       const acc = {content: '', tool_calls: []};
-      for await (const ev of tools.sseJson(body)) {
-        if (ev.error) throw new Error(ev.error.message || 'the service stopped early');
-        const delta = ev.choices && ev.choices[0] && ev.choices[0].delta;
+      const state = {sawDone: false};
+      const shown = [];
+      let finish = '';
+      for await (const ev of tools.sseJson(body, state)) {
+        if (ev.error) throw Object.assign(new Error(ev.error.message || 'the service stopped early'), {transient: true});
+        const choice = ev.choices && ev.choices[0];
+        if (choice && choice.finish_reason) finish = choice.finish_reason;
+        const delta = choice && choice.delta;
         if (!delta) continue;
         if (delta.content) {
           acc.content += delta.content;
           emit({type: 'text', delta: delta.content});
         }
         tools.addDelta(acc, delta);
+        showWriting(acc, shown, emit);
       }
+      if (finish === 'error') throw Object.assign(new Error('the service reported an error'), {transient: true});
+      if (!finish && !state.sawDone) throw Object.assign(new Error('the answer ended early'), {premature: true});
       acc.tool_calls = acc.tool_calls.filter(Boolean);
+      acc.truncated = finish === 'length';
       return acc;
     } catch (e) {
-      if (cutOff) throw Object.assign(new Error(cutOff), {stalled: true});
+      if (cutOff) throw Object.assign(new Error(cutOff), {stalled: true, idle: cutOff === STALLED});
       throw e;
     } finally {
       clearTimeout(idle);
       clearTimeout(cap);
       if (signal) signal.removeEventListener('abort', quit);
     }
+  }
+
+  // streamTurn, tried again (up to `retries` more times) when the service stalls, ends an answer early or
+  // fails for a moment. What the failed try showed is taken back first, so the answer is not shown twice.
+  async streamWithRetry(messages, list, signal, emit) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.streamTurn(messages, list, signal, emit);
+      } catch (e) {
+        if ((signal && signal.aborted) || !retryable(e) || attempt >= this.retries) throw e;
+        const why = e.stalled ? 'stopped responding' : e.premature ? 'cut its answer short' : 'had a problem';
+        this.log('the AI service ' + why + (e.stalled ? ' (no data for ' + this.idleMs + ' ms)' : ' (' + String(e.message || e).slice(0, 100) + ')') +
+          '; trying again, attempt ' + (attempt + 2) + ' of ' + (this.retries + 1));
+        emit({type: 'reset'});
+        emit({type: 'status', text: 'The AI service ' + why + '; trying again (' + (attempt + 2) + ' of ' + (this.retries + 1) + ').'});
+        await this.pause(this.retryWaitMs * (attempt + 1), signal);
+        if (signal && signal.aborted) throw Object.assign(new Error('stopped'), {name: 'AbortError'});
+      }
+    }
+  }
+
+  // A wait that Stop can cut short.
+  pause(ms, signal) {
+    return new Promise(resolve => {
+      const t = setTimeout(resolve, ms);
+      if (signal) signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, {once: true});
+    });
   }
 
   // /override shows the mode, /override off ends it, and /override <PIN> turns full-app mode on for an
