@@ -1,277 +1,147 @@
-# Welcome to MIT App Inventor
+# App Inventor Team Edition
 
-## Introduction
+**MIT App Inventor, with real-time teamwork and an AI helper.** Two or three people can build the same
+App Inventor project at the same time from their own computers. Everyone uses the normal App Inventor
+interface. The project is hosted on a Raspberry Pi on your local network, and can also be reached from the
+internet.
 
-Learn more about [MIT App Inventor](http://appinventor.mit.edu).
+This is a fork of [MIT App Inventor](http://appinventor.mit.edu). The original README, with the developer
+setup for the App Inventor sources, is kept in [README-MIT.md](README-MIT.md).
 
-This code is designed to be run in Google's App Engine. MIT runs a
-public instance that all are welcome to use to build App Inventor
-Applications. You do not need to compile or use this code if you wish
-to build MIT App Inventor applications.
+## What's different
 
-We provide this code for reference and for experienced people who wish
-to operate their own App Inventor instance and/or contribute to the project.
+- **Live shared editing.** Blocks and the designer update for everyone within a fraction of a second.
+- **Teammates' cursors**, with their names, plus **follow**, **block locks**, **recent changes** and a
+  per-project **chat**.
+- **Sign-in with a name and a team code.** No accounts and no passwords.
+- **Automatic backups** of each project every minute, with a restore from any earlier version.
+- **An AI helper** (Ctrl+I+M) that reads the open project, checks it, and proposes changes for you to apply.
+- **Nightly updates** at 3 AM that build the new version while the old one keeps running, and go back
+  automatically if the new one fails.
+- **Faster loading**: the hub keeps files in memory and compresses them on the way to the browser.
 
-This code is tested and known to work with Java 11.
+Everything is documented in detail in [collab/README.md](collab/README.md).
 
-## Contributors
+## Quick start (Raspberry Pi)
 
-The best way to go about integrating changes in App Inventor is to start a conversation in the [Open Source forum](https://community.appinventor.mit.edu/c/open-source-development/10) about whatever you intend to change or add.
+You need a **Raspberry Pi 4 or 5 with at least 4 GB of RAM**, running 64-bit Raspberry Pi OS and connected to
+your network.
 
-We use ***very brief and informal*** design documents with descriptions of the proposed changes and screenshots of how the functionality would look like and behave, in order to gather as much feedback from the community, as early as possible. We generally use shared Google docs for this (with permissions to add comments), but any format that is accessible from a web browser (and allows comments) would do.
-
-If you have skipped this step and have gone ahead and made your changes already, feel free to open a pull request, but don't be too surprised if we ask you to go back and document it in a design document. Remember that the main goal of doing this is ***to gather as much feedback, as early as possible***. We will also possibly ask you to put an instance with your changes on [appspot](http://appspot.com), and provide a modified Companion app (if that applies) so that reviewers can play with the changes before looking at the source.
-
-Check out our open source [site](http://appinventor.mit.edu/appinventor-sources/) to find a lot more information about the project and how to contribute to it.
-
-## Setup Instructions (Manual)
-
-This is a quick guide to get started with the sources. More detailed instructions can be found [here](https://docs.google.com/document/pub?id=1Xc9yt02x3BRoq5m1PJHBr81OOv69rEBy8LVG_84j9jc), a slide show can be seen [here](http://josmas.github.io/contributingToAppInventor2/#/), and all the [documentation](http://appinventor.mit.edu/appinventor-sources/#documentation) for the project is available in our [site](http://appinventor.mit.edu/appinventor-sources/).
-
-### Dependencies
-
-You will need a full Java JDK (version 11, OpenJDK preferred; JRE is not enough) and [ant](http://ant.apache.org/) (version 1.10) to compile the sources.
-
-You will also need a copy of the [Google Cloud SDK](https://cloud.google.com/appengine/docs/standard/java/download) to run the development servers. When setting up the gcloud cli you might be asked if you'd like to install Python 3.11, as the cli depends on it. In case of any issues with Python versions, check the value of the CLOUDSDK_PYTHON environment variable, which the cli can use to point to the right version.
-
-If you want to make changes to the sources, you will have to run an automated test suite, and for that you will also need
-a recent version of NodeJS (node 20+ works) and the Firefox browser installed on your machine. Have a look at the testing section for more information.
-
-Finally, if you want to make changes to the markdown docs you will need Ruby (versions 2.6 or 2.7).
-
-### Forking or cloning
-
-Consider ***forking*** the project if you want to make changes to the sources. If you simply want to run it locally, you can simply ***clone*** it.
-
-#### Forking
-
-If you decide to fork, follow the [instructions](https://help.github.com/articles/fork-a-repo) given by GitHub. After that you can clone your own copy of the sources with:
-
-    $ git clone https://github.com/YOUR_USER_NAME/appinventor-sources.git
-
-Make sure you change *YOUR_USER_NAME* to your user name.
-
-Configuring a remote pointing to this repository is also a good idea if you are forking:
-
-    $ cd appinventor-sources
-    $ git remote add upstream https://github.com/mit-cml/appinventor-sources.git
-
-Finally, you will also have to make sure that you are ignoring files that need ignoring:
-
-    $ cp sample-.gitignore .gitignore
-
-### Checkout dependencies
-
-App Inventor uses the [Picrin](https://picrin.readthedocs.io/en/latest/) Scheme implementation. It is unlikely that most contributors will need to make changes to this dependency, but it is necessary for local compilation, so you must initialize and track this library as a submodule. The first time after forking or cloning the repository, you can perform the following command:
-
-    $ git submodule update --init
-
-If you need to switch back to a branch that does not contain the dependency in the tree, you will need to run the command:
-
-    $ git submodule deinit --all
-
-to clear out the submodules ___before switching branches___. When switching back, you will need to repeat the initialization and update procedure above.
-
-[Blockly](https://github.com/google/blockly) is also a dependency, currently being used as a slightly modified version 10 that can be found at [mit-cml/blockly](https://github.com/mit-cml/blockly/tree/rc/10.5.0).
-
-### Troubleshooting common installation issues
-
-Run this command to run a self-diagnosis of your environment. This command tries to figure out common installation issues and offers you a solution to fix them yourself. Make sure this passes all the checks before you proceed further.
-
-#### Linux and macOS
-
-```bash
-./buildtools doctor
-```
-
-#### Windows
-
-```bash
-buildtools doctor
-```
-
-## Compiling
-
-Before compiling the code, an [auth key](https://docs.google.com/document/pub?id=1Xc9yt02x3BRoq5m1PJHBr81OOv69rEBy8LVG_84j9jc#h.yikyg2e1rfut) is needed. You can create one by running the following commands:
-
-    $ cd appinventor
-    $ ant MakeAuthKey
-
-Once the key is in place, type the following to compile (from the appinventor folder):
-
-    $ ant
-
-You will see a lot of stuff in the terminal and after a few minutes (it can take from 2 to 10 minutes, depending on your machine specs) you should see a message saying something like *Build Successful*.
-
-### Notes on compiling for iOS
-
-If you are compiling on a Mac and **are not** interested in building
-the companion for iOS, you must set the property `skip.ios` to `true`,
-for example:
-
-```bash
-ant -Dskip.ios=true
-```
-
-iOS builds will automatically be skipped on other operating systems.
-
-## Setup Instructions (iOS Support)
-
-We generally use Xcode for iOS development. Open the
-AppInventor.xcworkspace file to view the Xcode workspace. This
-workspace includes three projects:
-
-* SchemeKit: A Scheme implementation for iOS built on Picrin with
-  additions to support foreign function calls to Objective-C and
-  Swift. This also implements some basic types from App Inventor
-  including YailList and YailDictionary.
-* AIComponentKit: App Inventor component implementations, mostly
-  written in Swift.
-* AICompanionApp: The App Inventor companion written in Swift.
-
-In Xcode you can run the AICompanionApp on your device by selecting
-the AICompanionApp target's Debug scheme (top of window) and pressing the Run button.
-
-
-
-For more information about iOS support and running from the command line (vs within XCode), please see
-[README.ios.md](README.ios.md).
-
-
-
-Building MIT App Inventor Companion for iOS requires an Apple
-Macintosh computer running macOS 12 or later with Xcode 14 or later
-installed. While earlier versions may work we provide no support for
-building on versions below the ones stated. To install on a device,
-you **must** have a valid Apple Developer account license and have
-added the relevant mobile provisioning profiles from the Developer
-portal to your Xcode organizer (see Apple's website on instructions on
-how to do this).
-
-To build the MIT App Inventor companion, you will need to copy the `AICompanionApp.xcconfig.sample` a
-file called `AICompanionApp.xcconfig` in the components-ios directory
-that sets your development team. The easiest way to do this is to copy
-the AICompanionApp.xcconfig.sample file and edit it. Alternatively,
-create a file with the following line:
-
-
-
-```conf
-DEVELOPMENT_TEAM = #ID
-BUNDLE_IDENTIFIER = edu.mit.appinventor.aicompanion3
-```
-
-where ID is the development team ID shown in the *Apple Developer
-Portal.* This ID is unique to your developer account (individual or
-organization).
-
-
-## Running the Server(s)
-
-There are two servers in App Inventor, the main server that deals with project information, and the build server that creates apk files. More detailed information can be found in the [App Inventor Developer Overview](https://docs.google.com/document/d/1hIvAtbNx-eiIJcTA2LLPQOawctiGIpnnt0AvfgnKBok/pub) document.
-
-### Running the main server
-
-    $ your-google-cloud-SDK-folder/bin/java_dev_appserver.sh --port=8888 --address=0.0.0.0 appengine/build/war/
-
-Make sure you change *your-google-cloud-SDK-folder* to wherever in your hard drive you have placed the Google Cloud SDK.
-
-### Running the build server
-
-The build server can be run from the terminal by typing:
-
-    $ cd appinventor/buildserver
-    $ ant RunLocalBuildServer
-
-Note that you will only need to run the build server if you are going to build an app as an apk. You can do all the layout and programming without having the build server running, but you will need it to download the apk.
-
-### Accessing your local server
-
-You should now be up and running; you can test this by pointing your browser to:
-
-    http://localhost:8888
-
-Before entering or scanning the QR code in the Companion, check the box labeled "Use Legacy Connection".
-
-### Running tests
-
-The automated tests depend on NodeJS (version 20+) and Firefox, which will be used in headless mode. After that, you can run all tests by typing the following in a terminal window (note you can optionally skip iOS tests with -Dskip.ios=true):
-
-    $ ant tests
-
-### Building Release Code
-
-Release builds with optimizations turned on for the web components of the system can be done by passing `-Drelease=true` to `ant`, e.g.:
+Run this on the Pi:
 
 ```
-ant -Drelease=true noplay
+sudo -v && { cd ~/F1-T 2>/dev/null && git pull --ff-only || git clone -b claude/amazing-ritchie-68cj4h --depth 1 https://github.com/a355231/F1-T.git ~/F1-T; } && sudo ~/F1-T/collab/pi/setup.sh
 ```
 
-The release configuration sets the following additional options:
+The command downloads or updates this repository, installs everything, builds App Inventor on the Pi, starts
+it, and prints the **address** and the **team code**. The first build takes roughly 20 to 60 minutes. It runs
+under systemd, so it keeps going if your SSH connection drops. Run the same command again to watch it, or
+to update later. Your projects and team code are kept.
 
-- Blockly Editor is compiled with SIMPLE optimizations (instead of RAW)
-- App Engine YaClient module is compiled without `<collapse-all-properties/>` to create per-language/browser builds
-- App Engine YaClient module is compiled with optimization tuned to 9 and with 8 threads
+To see the address and the team code again, and check that everything is running:
 
-### Hot-reloading GWT code with 'Super Dev Mode'
-
-1. Run `ant devmode`
-2. [Run the main server](#running-the-main-server).
-3. Open http://localhost:9876 (*GWT CodeServer*) and drag the two bookmarklets (*Dev Mode On & Off*) to the bookmarks bar.
-4. Open http://localhost:8888 (*App Engine server*)
-5. To see changes "live":
-   1. Save your changes in file.
-   2. Click on the *"Dev Mode On"* bookmarklet.
-   3. A popup will be shown with a button to compile `ode` module.
-   4. Press that button to compile. (That button is actually a bookmarklet. So you can drag this button to the bookmarks bar as well. This will come handy for subsequent compilations)
-   5. After that, *GWT CodeServer* will compile the module incrementally.
-   6. Refresh the page and that's it! The changes are live.
-
-Logs can be found at http://localhost:9876/log/ode and SourceMaps at http://localhost:9876/sourcemaps/ode
-
-## Setup Instructions (Vagrant)
-
-Using Vagrant for App Inventor development is a method of last resort to get a development environment up and running. To begin, install [Vagrant](https://vagrantup.com) and open a terminal in the root directory of this repository. Run the following commands:
-
-```bash
-vagrant plugin install vagrant-vbguest  # optionally for virtualbox users, and only once
-vagrant up                              # initializes the VM
+```
+/opt/appinventor/show-info.sh
 ```
 
-It may take a few minutes for Vagrant to initialize as it will pull down a virtual machine image from the Internet and configure it with all of the App Inventor dependencies. Subsequent start-ups will be faster. Next, enter the virtual machine by running:
+Building on a PC is faster (about five minutes). See [collab/README.md](collab/README.md#faster-builds-build-on-a-pc).
 
-```bash
-vagrant ssh
+## Using it with your team
+
+1. Open the address on your network, for example `http://<pi-address>:8080`.
+2. Type your **name** and the **team code**, then select **Login**. The same name always opens the same
+   account.
+3. To work on a project together, open the **Team** panel (bottom-left) and choose **Share this project…**.
+   Your teammate finds it under **My Projects** after they sign in.
+
+Anyone who knows the team code can sign in as any name, so keep it private. To change it, use **Change team
+code…** in the Team panel, or run `sudo /opt/appinventor/set-team-code.sh` on the Pi.
+
+For a link you can reach from outside your network, run `/opt/appinventor/tunnel-url.sh` on the Pi. It prints
+a temporary `trycloudflare.com` address that changes when the tunnel restarts. For a fixed address, see
+the fixed-address section of [collab/README.md](collab/README.md).
+
+## The AI helper
+
+Press **Ctrl+I+M**, or choose **AI helper** in the Team panel. The helper works on the project that is open.
+It answers as it writes, and works on a draft copy: a change reaches the project only when someone presses
+**Apply**. The project is backed up first, and everyone reloads.
+
+It can read and check the project, add and change components and blocks in App Inventor's own format, look up
+components and documentation, draw pictures, and ask you a question when it needs a choice.
+
+| Command | What it does |
+|---|---|
+| `/goal <goal>` | Works toward a goal in steps, with a plan and a Stop button |
+| `/plan <idea>` | Plans a change without changing anything |
+| `/check [focus]` | Checks the project and says what is wrong |
+| `/explain [focus]` | Explains how the project works |
+| `/fix <problem>` | Makes the smallest change that fixes one problem |
+| `/effort` | Sets how hard the helper works: low, medium or high (the slider does the same) |
+| `/override <PIN>` | Turns on full-app mode for an hour, so the helper can build a small app |
+| `/override off` | Turns full-app mode off |
+| `/discard` | Throws away an unfinished full app |
+| `/new` (or `/clear`) | Starts a new conversation |
+| `/help` | Lists the commands |
+
+**Setting it up** (on the Pi, as the administrator):
+
+```
+sudo /opt/appinventor/set-ai.sh            # the OpenRouter key and the model name
+sudo /opt/appinventor/set-ai.sh --pin      # the PIN that unlocks full-app mode
+sudo /opt/appinventor/set-ai.sh --search   # optional: a Brave Search key for web search
+sudo /opt/appinventor/set-ai.sh --status   # what is set
 ```
 
-This should open up a terminal within the virtual machine in the directory `/vagrant/appinventor`. This directory is the same as the `appinventor` directory in this repository, shared between your host machine and the virtual machine. Any changes made on one side will be visible in the other. This allows you to edit files on your host machine with your preferred editor, while keeping the build environment relegated to the virtual machine.
+Keys and the PIN are stored in `/opt/appinventor/ai.env`, readable only by root. They are never in the source,
+and never reach a browser or the model. Questions are limited to 12 a minute per person and 300 a day for the
+team. The project's screen files, your questions, and any pictures you attach are sent to the model service
+when you ask.
 
-Before you can build App Inventor, you will need to also obtain the dependency as described [above](#checkout-dependencies) using `git submodule` command:
+## Keeping it up to date
 
-```bash
-git submodule update --init
+Every night at **3 AM** the Pi checks for a new version. If there is one, it builds it while the current version
+keeps running, and installs it only once the build succeeds. If the new version fails, the previous version is
+put back automatically, and everyone who opens the app sees a notice saying so.
+
+```
+sudo /opt/appinventor/update.sh --check     # is there a newer version?
+sudo /opt/appinventor/update.sh --now       # update now, even if people are online
+sudo /opt/appinventor/update.sh --rollback  # go back to the previous version by hand
+tail -n 60 /opt/appinventor/update.log      # what the last update did
 ```
 
-Now, you are ready to build App Inventor, you may now run:
+Projects, backups, the team code and the AI settings are never touched by an update.
 
-```bash
-ant
+## Development
+
+The Team Edition code lives in:
+
+- `collab/server/`: the hub (Node.js) that serves App Inventor, relays live edits, and runs the AI helper.
+- `collab/pi/`: the Raspberry Pi installer, the updater and the helper scripts.
+- `collab/pc/`: the build server for building Android apps on a PC.
+- `appinventor/`: the App Inventor sources, with the collaboration code in
+  `appinventor/appengine/src/com/google/appinventor/client/collab/` and
+  `appinventor/appengine/war/static/js/collab.js`.
+
+To run the hub's tests:
+
+```
+cd collab/server && npm install && npm test
 ```
 
-and to run App Inventor:
+For building the App Inventor sources themselves, see [README-MIT.md](README-MIT.md).
 
-```bash
-start_appinventor
-```
+## Limits
 
-Press Ctrl+C to quit the server. Enter exit at the prompt to leave the virtual machine. To reclaim resources when you are not actively developing, you can run `vagrant halt` to stop the virtual machine. To completely remove the virtual machine, run `vagrant destroy`. If you destroy the VM, you will need to start these instructions from the top.
+- If two people change the *same* block or property at the same instant, the last change wins, and the two
+  screens can briefly differ. Reopening the project brings everyone back in line.
+- Changes to project properties are saved, but teammates see them after reopening the project.
+- Building Android apps (.apk, .ipa) needs a build server on an x86 PC, because the Android build tools do not
+  run on the Pi.
+- The AI helper checks structure and names. It does not run the app or check that the blocks do what you
+  intended.
 
-Note 1: For macOS users, if you are using VirtualBox and get any error while initializing the VM it may be due to security restrictions in System Preferences, consider reading [this](https://medium.com/@Aenon/mac-virtualbox-kernel-driver-error-df39e7e10cd8) article.
+## License
 
-Note 2: If it seems like none of the dependencies are installed in the VM, run ```vagrant provision```.
-
-For better performance, consider using the manual instructions above.
-
-## Need Help?
-
-Join [our community](https://community.appinventor.mit.edu/).
+App Inventor is released under the Apache License, Version 2.0. See [LICENSE](LICENSE).
