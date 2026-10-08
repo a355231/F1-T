@@ -203,7 +203,10 @@ function parseXml(text) {
   const src = String(text || '');
   const root = {tag: '#document', attrs: {}, children: [], start: 0, end: src.length};
   const stack = [root];
-  const re = /<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!DOCTYPE[^>]*>|<\/([\w:.-]+)\s*>|<([\w:.-]+)((?:\s+[^>]*?)?)\s*(\/?)>/g;
+  // The attributes of a tag cannot hold < or > (XML does not allow them there), so each match stops at the
+  // next tag. The earlier pattern could take cubic time on a long run of spaces inside a tag, which froze
+  // the whole hub while it checked a project.
+  const re = /<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!DOCTYPE[^>]*>|<\/([\w:.-]+)\s*>|<([\w:.-]+)(?=[\s/>])([^<>]*?)(\/?)>/g;
   let m;
   let last = 0;
   while ((m = re.exec(src))) {

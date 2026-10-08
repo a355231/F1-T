@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const tools = require('./ai-tools');
 const registry = require('./ai-registry');
+const proj = require('./ai-project');
 
 const KEY = () => process.env.OPENROUTER_API_KEY || '';
 const MODEL = () => process.env.OPENROUTER_MODEL || '';
@@ -50,6 +51,11 @@ const MEDIA_MAX = 3;
 const PIN_WINDOW_MS = 15 * 60 * 1000;
 const PIN_MAX_WRONG = 5;
 const PIN_LOCK_MS = 15 * 60 * 1000;
+// A model that sends nothing for this long is cut off, and no single answer may run longer than TURN_MS.
+const IDLE_MS = 60 * 1000;
+const TURN_MS = 5 * 60 * 1000;
+const STALLED = 'The AI service stopped sending its answer, so it was cut off. Try asking again.';
+const TOO_LONG = 'That answer ran past the time limit and was cut off. Try asking for something smaller.';
 const COMMAND = /^\s*\/(override|goal)\b/i;
 const NOT_SET_UP = 'The AI helper is not set up yet. Whoever runs the Raspberry Pi needs to run: ' +
   'sudo /opt/appinventor/set-ai.sh';
@@ -91,12 +97,14 @@ anything else: not the server, not other projects, not the team's settings.
 How to work:
 - Plan first: say briefly what the app does and which screens it needs. Check what exists with check_project \
 and screen_outline. Look up each component with component_info before you add it.
-- Create each screen with scm_new_screen (at most 4 new screens in one proposal). Add its components with \
-scm_add_component, set their properties with scm_set_property, and write its blocks with bky_add_event_handler \
-and bky_add_blocks. Use blocks_examples for the block formats.
-- Then run check_project, fix every problem it reports, and call propose_draft with a plain summary of what \
-the app does. A proposal can change up to 12 files. Changes still in the draft at the end of your answer are \
-lost, so propose them. Nothing is written until the person presses Apply.
+- Build the app in the draft: scm_new_screen (at most 4 new screens), scm_add_component, scm_set_property, \
+bky_add_event_handler and bky_add_blocks, with blocks_examples for the block formats. The draft is kept from one \
+message to the next, so a big app can be built over several answers. At the end of each answer, say what is \
+still to build.
+- Nothing is shown to the person as ready to apply until the app is complete. When the whole app is built and \
+check_project reports no problems, call propose_draft with complete set to true and a plain summary of what the \
+app does. Only then does the person see the Apply button. A proposal that is not complete is refused, and the \
+refusal says what is wrong: fix it and try again.
 - Keep the app small: a few screens and a few components on each. Follow the style of the existing screens. \
 Do not remove or rename things unless asked, and say clearly in the summary what you replace.
 - Pictures: create_svg draws one, svg_to_png makes a PNG, and propose_draft's media list adds it as a .png file.
@@ -133,6 +141,7 @@ function talkHistory(data) {
 
 // The message the person sees for a failed call to the model service.
 function serviceMessage(e) {
+  if (e.stalled) return e.message;
   const m = /service answered (\d+)/.exec(String(e.message || ''));
   const code = m ? +m[1] : 0;
   if (code === 429) return 'The AI service is busy right now. Try again in a minute.';
@@ -199,7 +208,7 @@ function trimToolResults(messages) {
 }
 
 class Assistant {
-  constructor({ask, hub, fetchImpl, now, goalSteps, goalMs, searchImpl}) {
+  constructor({ask, hub, fetchImpl, now, goalSteps, goalMs, searchImpl, idleMs, turnMs}) {
     this.ask = ask;
     this.hub = hub;
     this.fetch = fetchImpl || ((...a) => fetch(...a));
@@ -207,6 +216,9 @@ class Assistant {
     this.goalSteps = goalSteps || GOAL_STEPS;
     this.goalMs = goalMs || GOAL_MS;
     this.searchImpl = searchImpl || tools.webSearch;
+    this.idleMs = idleMs || parseInt(process.env.AI_IDLE_MS || String(IDLE_MS), 10);
+    this.turnMs = turnMs || TURN_MS;
+    this.drafts = new Map();          // "user|project" -> {draft, at}: full-app drafts kept between messages
     this.proposals = new Map();
     this.artifacts = new Map();       // id -> {owner, kind, data|svg, mime, width, height, at, title}
     this.scratch = new Map();         // "user|project" -> {notes: Map, at}
@@ -450,7 +462,8 @@ class Assistant {
   }
 
   // The agent loop: the model answers, may call tools, and gets their results, until it stops. The
-  // tools work on a draft of the project made for this answer (see ai-registry.js).
+  // tools work on a draft of the project (see ai-registry.js). In full-app mode the draft is kept from one
+  // message to the next, until it is proposed or full-app mode ends.
   async converse(ctx) {
     const {me, projectId, access, goal, emit} = ctx;
     if (!this.configured()) {
@@ -462,12 +475,30 @@ class Assistant {
       return;
     }
     const full = this.fullActive(me.userId, projectId);
+    const key = me.userId + '|' + projectId;
     const vision = await this.vision();
     const search = !!SEARCH_KEY();
+    const notes = [];
+    let draft;
+    if (full) {
+      draft = this.fullDraft(me, projectId, ctx.cookie);
+      await draft.refresh();
+      if (draft.dropped.length) {
+        notes.push('These files changed in the project while you were working on them, so your changes to them were dropped: ' +
+          draft.dropped.join(', ') + '.');
+      }
+    } else {
+      if (this.drafts.delete(key)) notes.push('Full-app mode has ended, so the unfinished app draft was discarded.');
+      draft = new registry.Draft({projectId, cookie: ctx.cookie, ask: this.ask, full: false});
+    }
+    const dropped = draft.dropped.splice(0);
+    for (const n of notes) emit({type: 'status', text: n});
     const run = {me, cookie: ctx.cookie, projectId, access, full, vision, emit, goal: !!goal, assistant: this,
-      ask: this.ask, signal: ctx.signal, imagesShown: 0,
-      draft: new registry.Draft({projectId, cookie: ctx.cookie, ask: this.ask, full})};
+      ask: this.ask, signal: ctx.signal, imagesShown: 0, draft, state: {proposed: false}};
     const system = [full ? SYSTEM_FULL : SYSTEM, search ? SEARCH_NOTE : '', vision ? VISION_NOTE : '',
+      full && draft.changed.size ? 'The draft from earlier messages has ' + draft.changed.size + ' changed file(s): ' +
+        [...draft.changed.keys()].join(', ') + '. Continue from it.' : '',
+      dropped.length ? 'Changes to these files were dropped, because the project changed under them: ' + dropped.join(', ') + '.' : '',
       goal ? goalNote(goal) : '',
       'The open project is "' + access.projectName + '". The person talking to you is ' +
       me.email.split('@')[0] + '.'].filter(Boolean).join('\n\n');
@@ -484,66 +515,127 @@ class Assistant {
     }
     const limit = goal ? this.goalSteps : SMALL_STEPS;
     const deadline = this.now() + (goal ? this.goalMs : SMALL_MS);
-    for (let step = 0; step < limit; step++) {
-      if (this.now() > deadline) {
-        emit({type: 'status', text: 'Stopped: the time for this goal is up. Ask again to keep going.'});
-        return;
-      }
-      trimToolResults(messages);
-      const reply = await this.streamTurn(messages, registry.definitions(run), ctx.signal, emit);
-      if (!reply.tool_calls.length) return;
-      messages.push({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls});
-      const pictures = [];
-      let stop = false;
-      for (const call of reply.tool_calls) {
-        const out = await registry.run(call.function.name, call.function.arguments, Object.assign({}, run, {callId: call.id}));
-        let text = String(out.text);
-        if (out.images && out.images.length && vision) {
-          if (run.imagesShown + out.images.length <= IMAGES_PER_ANSWER) {
-            run.imagesShown += out.images.length;
-            pictures.push(...out.images);
-          } else {
-            text += ' (The picture is not shown: this answer has reached its limit of ' + IMAGES_PER_ANSWER + ' pictures.)';
-          }
+    try {
+      for (let step = 0; step < limit; step++) {
+        if (this.now() > deadline) {
+          emit({type: 'status', text: 'Stopped: the time for this goal is up. Ask again to keep going.'});
+          return;
         }
-        messages.push({role: 'tool', tool_call_id: call.id, content: text.slice(0, MAX_TOOL_RESULT)});
-        if (out.stop) stop = true;
+        trimToolResults(messages);
+        const reply = await this.streamTurn(messages, registry.definitions(run), ctx.signal, emit);
+        if (!reply.tool_calls.length) return;
+        messages.push({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls});
+        const pictures = [];
+        let stop = false;
+        for (const call of reply.tool_calls) {
+          const out = await registry.run(call.function.name, call.function.arguments, Object.assign({}, run, {callId: call.id}));
+          let text = String(out.text);
+          if (out.images && out.images.length && vision) {
+            if (run.imagesShown + out.images.length <= IMAGES_PER_ANSWER) {
+              run.imagesShown += out.images.length;
+              pictures.push(...out.images);
+            } else {
+              text += ' (The picture is not shown: this answer has reached its limit of ' + IMAGES_PER_ANSWER + ' pictures.)';
+            }
+          }
+          messages.push({role: 'tool', tool_call_id: call.id, content: text.slice(0, MAX_TOOL_RESULT)});
+          if (out.stop) stop = true;
+        }
+        // Pictures go in a message of their own, after every tool result of this step.
+        if (pictures.length) {
+          messages.push({role: 'user', content: [{type: 'text', text: 'Here ' + (pictures.length === 1 ? 'is the picture' : 'are the pictures') +
+            ' you asked to see: ' + pictures.map(p => p.name).join(', ') + '.'}].concat(pictures.map(imagePart))});
+        }
+        if (stop) return;
       }
-      // Pictures go in a message of their own, after every tool result of this step.
-      if (pictures.length) {
-        messages.push({role: 'user', content: [{type: 'text', text: 'Here ' + (pictures.length === 1 ? 'is the picture' : 'are the pictures') +
-          ' you asked to see: ' + pictures.map(p => p.name).join(', ') + '.'}].concat(pictures.map(imagePart))});
+      emit({type: 'status', text: goal
+        ? 'Stopped: the step limit for this goal was reached. Ask again to keep going.'
+        : 'That took too many steps. Try asking for something smaller.'});
+    } finally {
+      // In full-app mode the person is asked to Apply only once the app is complete; until then, say so.
+      if (full && draft.changed.size && !run.state.proposed) {
+        emit({type: 'status', text: 'Not ready to apply yet: ' + draft.changed.size + ' file(s) are in the draft. ' +
+          'The Apply button appears once the whole app is built and checks clean.'});
       }
-      if (stop) return;
     }
-    emit({type: 'status', text: goal
-      ? 'Stopped: the step limit for this goal was reached. Ask again to keep going.'
-      : 'That took too many steps. Try asking for something smaller.'});
+  }
+
+  // The draft of the app for this person and project in full-app mode. It is kept between messages, for an
+  // hour after the last one was used, so that a big app can be built over several answers.
+  fullDraft(me, projectId, cookie) {
+    const now = this.now();
+    const key = me.userId + '|' + projectId;
+    for (const [k, v] of this.drafts) {
+      if (now - v.at > FULL_TTL_MS) this.drafts.delete(k);
+    }
+    let entry = this.drafts.get(key);
+    if (!entry) {
+      entry = {draft: new registry.Draft({projectId, cookie, ask: this.ask, full: true}), at: now};
+      this.drafts.set(key, entry);
+    }
+    entry.at = now;
+    entry.draft.cookie = cookie;
+    entry.draft.full = true;
+    return entry.draft;
   }
 
   // One answer from the model, streamed: text is passed on as it arrives; the tool calls are collected.
+  // The service can stop sending without closing the connection, and then the answer would wait forever.
+  // So it is cut off after idleMs of silence (or turnMs in all), and the person is told. Stop still works.
   async streamTurn(messages, list, signal, emit) {
-    const r = await this.fetch(URL_, {
-      method: 'POST',
-      headers: {authorization: 'Bearer ' + KEY(), 'content-type': 'application/json',
-        'x-title': 'App Inventor Team Edition'},
-      body: JSON.stringify({model: MODEL(), messages, tools: list, temperature: 0.2, max_tokens: 8000, stream: true}),
-      signal,
-    });
-    if (!r.ok) throw new Error('service answered ' + r.status);
-    const acc = {content: '', tool_calls: []};
-    for await (const ev of tools.sseJson(r.body)) {
-      if (ev.error) throw new Error(ev.error.message || 'the service stopped early');
-      const delta = ev.choices && ev.choices[0] && ev.choices[0].delta;
-      if (!delta) continue;
-      if (delta.content) {
-        acc.content += delta.content;
-        emit({type: 'text', delta: delta.content});
-      }
-      tools.addDelta(acc, delta);
+    const guard = new AbortController();
+    let cutOff = '';
+    let idle = null;
+    const stopWith = why => { cutOff = why; guard.abort(); };
+    const waitForData = () => { clearTimeout(idle); idle = setTimeout(() => stopWith(STALLED), this.idleMs); };
+    const quit = () => guard.abort();
+    if (signal) {
+      if (signal.aborted) guard.abort();
+      else signal.addEventListener('abort', quit, {once: true});
     }
-    acc.tool_calls = acc.tool_calls.filter(Boolean);
-    return acc;
+    const cap = setTimeout(() => stopWith(TOO_LONG), this.turnMs);
+    try {
+      waitForData();
+      const r = await this.fetch(URL_, {
+        method: 'POST',
+        headers: {authorization: 'Bearer ' + KEY(), 'content-type': 'application/json',
+          'x-title': 'App Inventor Team Edition'},
+        body: JSON.stringify({model: MODEL(), messages, tools: list, temperature: 0.2, max_tokens: 8000, stream: true}),
+        signal: guard.signal,
+      });
+      if (!r.ok) throw new Error('service answered ' + r.status);
+      const reader = r.body.getReader();
+      const body = new ReadableStream({
+        async pull(controller) {
+          waitForData();
+          const {value, done} = await reader.read();
+          clearTimeout(idle);
+          if (done) controller.close();
+          else controller.enqueue(value);
+        },
+        cancel(why) { return reader.cancel(why); },
+      });
+      const acc = {content: '', tool_calls: []};
+      for await (const ev of tools.sseJson(body)) {
+        if (ev.error) throw new Error(ev.error.message || 'the service stopped early');
+        const delta = ev.choices && ev.choices[0] && ev.choices[0].delta;
+        if (!delta) continue;
+        if (delta.content) {
+          acc.content += delta.content;
+          emit({type: 'text', delta: delta.content});
+        }
+        tools.addDelta(acc, delta);
+      }
+      acc.tool_calls = acc.tool_calls.filter(Boolean);
+      return acc;
+    } catch (e) {
+      if (cutOff) throw Object.assign(new Error(cutOff), {stalled: true});
+      throw e;
+    } finally {
+      clearTimeout(idle);
+      clearTimeout(cap);
+      if (signal) signal.removeEventListener('abort', quit);
+    }
   }
 
   // /override shows the mode, /override off ends it, and /override <PIN> turns full-app mode on for an
@@ -559,8 +651,10 @@ class Assistant {
         : 'Full-app mode is off. The helper makes small fixes and additions. Type /override and the PIN to turn on full-app mode.';
     }
     if (arg.toLowerCase() === 'off') {
+      const discarded = this.drafts.delete(key);
       this.full.delete(key);
-      return 'Full-app mode is off. The helper is back to small fixes and additions.';
+      return 'Full-app mode is off. The helper is back to small fixes and additions.' +
+        (discarded ? ' The unfinished app draft was discarded.' : '');
     }
     if (!PIN()) {
       return 'Full-app mode is not set up on this server. Whoever runs the Raspberry Pi can set the PIN with: ' +
@@ -585,14 +679,29 @@ class Assistant {
       '. You can now ask for a complete small app. Type /override off to turn it off.';
   }
 
-  // Checks a change, keeps it until Apply, and returns what the person will see. Throws with a plain
-  // reason when the change breaks a rule; the model reads the reason and can try again.
-  async makeProposal(ctx, {summary, files, media}) {
+  // Checks a change, keeps it until Apply, and returns what the person will see. Throws with a plain reason
+  // when the change breaks a rule; the model reads the reason and can try again. In full-app mode the whole
+  // app must be complete, and must check cleanly, before the person is asked to press Apply.
+  async makeProposal(ctx, {summary, files, media, complete}) {
     await ctx.draft.load();
     const picked = files instanceof Map ? files : new Map(Object.entries(files || {}));
     const mediaIn = Array.isArray(media) ? media : [];
     if (!picked.size && !mediaIn.length) throw new Error('nothing has been changed yet');
     registry.checkChange(ctx.draft.base, picked, ctx.full);
+    if (ctx.full) {
+      if (complete !== true) {
+        throw new Error('not proposed: the app is not complete yet. Keep building what is missing; when the whole app is ' +
+          'built and check_project reports no problems, propose again with complete set to true');
+      }
+      // Only problems that the change brings are counted: the project may already have some of its own.
+      const before = new Set(proj.checkProject(Object.fromEntries(ctx.draft.base)).map(p => p.file + ': ' + p.message));
+      const after = proj.checkProject(Object.fromEntries(await ctx.draft.merged()))
+        .filter(p => !before.has(p.file + ': ' + p.message));
+      if (after.length) {
+        throw new Error('not proposed: ' + after.length + ' problem(s) remain: ' +
+          after.slice(0, 5).map(p => p.file + ': ' + p.message).join('; ') + '. Fix them, then propose again');
+      }
+    }
     if (mediaIn.length > MEDIA_MAX) throw new Error('at most ' + MEDIA_MAX + ' pictures at a time');
     const pictures = mediaIn.map(m => {
       const name = String(m && m.name || '');
@@ -612,6 +721,8 @@ class Assistant {
     for (const [k, v] of this.proposals) {
       if (this.now() - v.at > PROPOSAL_TTL_MS) this.proposals.delete(k);
     }
+    if (ctx.state) ctx.state.proposed = true;
+    if (ctx.full) this.drafts.delete(ctx.me.userId + '|' + ctx.projectId);   // delivered: later work starts from the project
     return {
       id,
       summary: text,

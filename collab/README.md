@@ -322,12 +322,22 @@ change, including up to 4 new screens (each a designer file and a blocks file). 
 project's existing screens, so for a new app start from an empty project. `/override` alone shows
 whether the mode is on, and `/override off` ends it early. Restarting the hub also ends it.
 
+The app can be built over as many messages as it takes: the helper keeps the unfinished app between them,
+for an hour after the last message. **Apply appears only once the whole app is built and `check_project`
+reports no problems** (problems the project already had do not count). Until then the helper says what is
+still to build, and a proposal that is not complete is refused. If someone else changes a file the helper is
+working on, the helper's change to that file is dropped, and the helper says so. `/override off` throws
+away the unfinished app.
+
 **Pictures and the model.** Looking at pictures needs a model that accepts image input. The helper asks
 OpenRouter's list of models whether the configured one does, and remembers the answer for six hours.
 To set it by hand, add `AI_VISION=1` (or `AI_VISION=0`) to `/opt/appinventor/ai.env`.
 
 **In the window:** Enter sends, Shift+Enter starts a new line, Esc or the square button stops, `/`
 lists the commands, Copy works on answers and code blocks, and Try again redoes the last question.
+If the model service stops sending an answer, the answer is cut off after a minute of silence and the
+window says so, so it never stays busy for good (`AI_IDLE_MS` in `ai.env` changes the minute). No
+single answer may run longer than five minutes.
 
 **Not included:** running the app or the emulator, seeing how a screen looks, arbitrary web pages (only
 the documentation sites above), changing anything outside the open project, the server's settings or

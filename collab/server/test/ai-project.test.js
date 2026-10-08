@@ -153,3 +153,11 @@ test('new numbers are unique numbers, and block ids are hex', () => {
   assert.ok([...ids].every(id => /^\d+$/.test(id)));
   assert.match(proj.blockId(), /^[0-9a-f]{20}$/);
 });
+
+test('a malformed blocks file cannot hold up the server: long runs of spaces or openings parse in moments', () => {
+  for (const bad of ['<a' + ' '.repeat(50000) + 'x', '<a'.repeat(20000), '<' + 'x '.repeat(20000)]) {
+    const t = Date.now();
+    assert.throws(() => proj.parseXml(bad));
+    assert.ok(Date.now() - t < 500, 'took ' + (Date.now() - t) + ' ms');
+  }
+});

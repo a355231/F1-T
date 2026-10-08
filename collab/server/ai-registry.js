@@ -58,13 +58,32 @@ class Draft {
     this.full = full;
     this.base = null;             // path -> text, as the project is now
     this.changed = new Map();     // path -> text the helper has written
+    this.origin = new Map();      // path -> the project's text (or null) when the helper first changed it
+    this.dropped = [];            // files changed by someone else meanwhile, so the helper's change was dropped
   }
 
   async load() {
     if (this.base) return;
+    await this.refresh();
+  }
+
+  // Reads the project as it is now. A draft kept from an earlier message is kept on top of it, except for a
+  // file that someone else has changed since the helper first changed it: that change is dropped, and the
+  // file is listed in dropped, so that the helper can tell the person.
+  async refresh() {
     const out = await this.ask('/ode/collab/bundle?projectId=' + this.projectId, this.cookie);
     if (!out || !out.ok) throw new Error('the project could not be read (it may be too big for the helper)');
-    this.base = new Map(Object.entries(out.files || {}));
+    const fresh = new Map(Object.entries(out.files || {}));
+    for (const path of [...this.changed.keys()]) {
+      const was = this.origin.has(path) ? this.origin.get(path) : null;
+      const now = fresh.has(path) ? fresh.get(path) : null;
+      if (now !== was) {
+        this.changed.delete(path);
+        this.origin.delete(path);
+        this.dropped.push(path);
+      }
+    }
+    this.base = fresh;
   }
 
   async merged() {
@@ -119,13 +138,19 @@ class Draft {
     const next = new Map(this.changed);
     next.set(path, String(text));
     checkChange(this.base, next, this.full);
+    if (!this.origin.has(path)) this.origin.set(path, this.base.has(path) ? this.base.get(path) : null);
     this.changed.set(path, String(text));
     return {bytes: Buffer.byteLength(String(text)), changed: this.changed.size};
   }
 
   discard(path) {
-    if (path) this.changed.delete(path);
-    else this.changed.clear();
+    if (path) {
+      this.changed.delete(path);
+      this.origin.delete(path);
+    } else {
+      this.changed.clear();
+      this.origin.clear();
+    }
   }
 }
 
@@ -310,7 +335,7 @@ const TOOLS = [
     }},
 
   // -- changing the project in the draft
-  {name: 'draft_status', mode: 'read', description: 'List the files changed so far in this conversation, and how many more can be changed.',
+  {name: 'draft_status', mode: 'read', description: 'List the files changed so far in the draft (in full-app mode the draft is kept between messages), and how many more can be changed.',
     label: () => 'Checking the changes', run: async (a, ctx) => {
       if (!ctx.draft.changed.size) return {text: 'Nothing has been changed yet.', detail: 'none'};
       const rows = [...ctx.draft.changed].map(([p, t]) => p + ' (' + Buffer.byteLength(t) + ' bytes)');
@@ -467,17 +492,18 @@ const TOOLS = [
     }},
 
   // -- proposals: the person presses Apply
-  {name: 'propose_draft', mode: 'propose', needs: 'draft', description: 'Turn every change made in this conversation into one proposal for the person to Apply. Give a plain summary; media lists pictures to add (picture_id from svg_to_png).',
-    properties: {summary: {type: 'string'}, media: {type: 'array', items: {type: 'object', properties: {name: {type: 'string'}, picture_id: {type: 'string'}}, required: ['name', 'picture_id']}}},
+  {name: 'propose_draft', mode: 'propose', needs: 'draft', description: 'Turn the changes in the draft into one proposal for the person to Apply. Give a plain summary; media lists pictures to add (picture_id from svg_to_png). In full-app mode a proposal is refused until the whole app is built and checks clean: then set complete to true.',
+    properties: {summary: {type: 'string'}, complete: {type: 'boolean', description: 'Full-app mode only: true when the whole app the person asked for is built and check_project reports no problems'},
+      media: {type: 'array', items: {type: 'object', properties: {name: {type: 'string'}, picture_id: {type: 'string'}}, required: ['name', 'picture_id']}}},
     required: ['summary'],
     label: a => 'Proposing: ' + String(a.summary || 'the changes').slice(0, 60), run: async (a, ctx) => {
       const files = new Map(ctx.draft.changed);
       if (!files.size && !listOf(a.media).length) throw new Error('nothing has been changed yet');
-      const p = await ctx.assistant.makeProposal(ctx, {summary: a.summary, files, media: a.media});
+      const p = await ctx.assistant.makeProposal(ctx, {summary: a.summary, files, media: a.media, complete: a.complete === true});
       ctx.emit({type: 'proposal', id: p.id, summary: p.summary, files: p.files, media: p.media});
       return {text: 'Proposal ready. Tell the person what it changes; they press Apply.', detail: 'waiting for Apply'};
     }},
-  {name: 'propose_change', mode: 'propose', description: 'Propose complete new text for files without using the draft (up to 3 files, or 12 in full-app mode). Prefer propose_draft after the draft tools.',
+  {name: 'propose_change', mode: 'propose', needs: 'small', description: 'Propose complete new text for files without using the draft (up to 3 files). Prefer propose_draft after the draft tools.',
     properties: {summary: {type: 'string'}, files: {type: 'object', additionalProperties: {type: 'string'}}, media: {type: 'array', items: {type: 'object', properties: {name: {type: 'string'}, picture_id: {type: 'string'}}, required: ['name', 'picture_id']}}},
     required: ['summary'],
     label: a => 'Proposing: ' + String(a.summary || 'a change').slice(0, 60), run: async (a, ctx) => {
@@ -590,6 +616,7 @@ function allowed(t, ctx) {
   if (t.needs === 'full') return !!ctx.full;
   if (t.needs === 'vision') return !!ctx.vision;
   if (t.needs === 'draft') return ctx.draft.changed.size > 0;
+  if (t.needs === 'small') return !ctx.full;
   return true;
 }
 

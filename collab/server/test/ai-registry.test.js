@@ -163,7 +163,7 @@ test('a new screen in full-app mode is two files in the same folder, proposed to
   assert.match((await run('scm_new_screen', {name: 'Quiz'}, c)).text, /Created Quiz/);
   assert.match((await run('scm_new_screen', {name: 'Quiz'}, c)).text, /already a screen named Quiz/);
   assert.match((await run('scm_new_screen', {name: '1bad'}, c)).text, /starting with a letter/);
-  await run('propose_draft', {summary: 'A quiz screen'}, c);
+  await run('propose_draft', {summary: 'A quiz screen', complete: true}, c);
   const proposal = c.events.find(e => e.type === 'proposal');
   assert.deepStrictEqual(proposal.files, [{path: 'src/a/Quiz.scm', isNew: true}, {path: 'src/a/Quiz.bky', isNew: true}]);
 });

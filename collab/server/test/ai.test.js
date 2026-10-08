@@ -45,6 +45,37 @@ const PROJECT_FILES = {
   'youngandroidproject/project.properties': 'main=a.Screen1\nname=Pong\n',
 };
 
+// A model that sends a few words and then goes quiet without ending the answer.
+const STALL = Symbol('stall');
+// A body whose pieces arrive every gap ms: count words, then the end (or never, when count is Infinity).
+function pacedBody(count, gap, signal) {
+  let timer = null;
+  let i = 0;
+  return new ReadableStream({
+    start(c) {
+      const enc = new TextEncoder();
+      const send = () => {
+        if (i < count) {
+          c.enqueue(enc.encode('data: ' + JSON.stringify({choices: [{delta: {content: 'w' + i + ' '}}]}) + '\n\n'));
+          i++;
+          timer = setTimeout(send, gap);
+        } else {
+          c.enqueue(enc.encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      };
+      if (signal) signal.addEventListener('abort', () => { clearTimeout(timer); c.error(Object.assign(new Error('aborted'), {name: 'AbortError'})); }, {once: true});
+      send();
+    },
+  });
+}
+function stalledBody(signal) {
+  return new ReadableStream({start(c) {
+    c.enqueue(new TextEncoder().encode('data: ' + JSON.stringify({choices: [{delta: {content: 'Let me look'}}]}) + '\n\n'));
+    if (signal) signal.addEventListener('abort', () => c.error(Object.assign(new Error('aborted'), {name: 'AbortError'})), {once: true});
+  }});
+}
+
 function fakeRes() {
   const r = {status: 0, headers: {}, text: '', body: null, writableEnded: false, listeners: {},
     writeHead(s, h) { this.status = s; Object.assign(this.headers, h || {}); },
@@ -71,7 +102,7 @@ function setup(script, options = {}) {
   delete process.env.BRAVE_API_KEY;
   if (options.vision !== undefined) process.env.AI_VISION = options.vision;
   else delete process.env.AI_VISION;
-  const {models, vision, ...rest} = options;
+  const {models, vision, files: projectFiles, ...rest} = options;
   const modelList = models || [{id: 'some/model', architecture: {input_modalities: ['text']}}];
   let now = 1000000000000;
   const asked = [];
@@ -83,7 +114,7 @@ function setup(script, options = {}) {
       return {userId: 'u-' + name, email: name + '@team.local'};
     }
     if (path.startsWith('/ode/collab/access')) return {ok: true, projectName: 'Pong'};
-    if (path.startsWith('/ode/collab/bundle')) return {ok: true, files: PROJECT_FILES};
+    if (path.startsWith('/ode/collab/bundle')) return {ok: true, files: projectFiles || PROJECT_FILES};
     if (path.startsWith('/ode/collab/files')) return {files: Object.keys(PROJECT_FILES).map(p => ({path: p, bytes: PROJECT_FILES[p].length}))};
     if (path.startsWith('/ode/collab/file?')) return {text: 'file text', bytes: 9};
     if (path.startsWith('/ode/collab/rawfile')) return {ok: true, path: 'assets/logo.png', mime: 'image/png', bytes: 40, data: PNG_B64};
@@ -98,6 +129,8 @@ function setup(script, options = {}) {
     }
     calls.push({url, headers: opts.headers, payload: JSON.parse(opts.body), signal: opts.signal});
     const next = script.shift();
+    if (next === STALL) return {ok: true, body: stalledBody(opts.signal)};
+    if (next && next.paced !== undefined) return {ok: true, body: pacedBody(next.paced, next.gap, opts.signal)};
     const turn = typeof next === 'function' ? next(JSON.parse(opts.body)) : (next || textTurn('(no more script)'));
     return {ok: true, body: sseBody(turn)};
   };
@@ -329,7 +362,7 @@ test('web search is offered only when a search key is set, and is used through t
 
 test('applying a full-app change sends the header that allows it; a small change does not', async () => {
   const t = setup([
-    toolTurn('propose_change', {summary: 'New screen', files: {'src/a/Screen2.scm': '#|', 'src/a/Screen2.bky': '<xml/>'}}), textTurn('Press Apply.'),
+    toolTurn('scm_new_screen', {name: 'Screen2'}, 'n1'), toolTurn('propose_draft', {summary: 'New screen', complete: true}, 'p1'), textTurn('Press Apply.'),
     toolTurn('propose_change', {summary: 'Small', files: {'src/a/Screen1.scm': 'y'}}), textTurn('Press Apply.'),
   ]);
   await say(t.ai, 'ann', '/override ' + PIN_VALUE);
@@ -342,7 +375,7 @@ test('applying a full-app change sends the header that allows it; a small change
 });
 
 test('a full-app change is refused if full-app mode was turned off before Apply', async () => {
-  const t = setup([toolTurn('propose_change', {summary: 'New screen', files: {'src/a/Screen2.scm': '#|', 'src/a/Screen2.bky': '<xml/>'}}), textTurn('Press Apply.')]);
+  const t = setup([toolTurn('scm_new_screen', {name: 'Screen2'}, 'n1'), toolTurn('propose_draft', {summary: 'New screen', complete: true}, 'p1'), textTurn('Press Apply.')]);
   await say(t.ai, 'ann', '/override ' + PIN_VALUE);
   const proposal = (await say(t.ai, 'ann', 'add a screen')).find(e => e.type === 'proposal');
   await say(t.ai, 'ann', '/override off');
@@ -421,7 +454,7 @@ test('new screens are offered only in full-app mode, and then need both their fi
 
   const f = setup([
     toolTurn('scm_new_screen', {name: 'Quiz', app_name: 'Quiz'}, 'n1'),
-    toolTurn('propose_draft', {summary: 'A quiz screen'}, 'n2'),
+    toolTurn('propose_draft', {summary: 'A quiz screen', complete: true}, 'n2'),
     textTurn('Press Apply.'),
   ]);
   await say(f.ai, 'ann', '/override ' + PIN_VALUE);
@@ -550,4 +583,119 @@ test('the draft refuses files outside the screens, and grows only so far in smal
   await assert.rejects(draft.write('src/a/Screen1.scm', 'x'.repeat(20000)), /grow too much/);
   await draft.write('src/a/Screen1.scm', SCM);
   assert.strictEqual(draft.changed.size, 1);
+});
+
+// ---- full-app mode: the app is proposed once it is complete, and kept between messages until then ----
+
+const BKY_WITH_GHOST = '<xml xmlns="https://developers.google.com/blockly/xml"><block type="component_set_get">' +
+  '<field name="COMPONENT_SELECTOR">Ghost</field></block><yacodeblocks ya-version="208" language-version="39"></yacodeblocks></xml>';
+
+test('in full-app mode, a proposal is refused until the app is complete, and the model is told why', async () => {
+  const t = setup([
+    toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
+    toolTurn('propose_draft', {summary: 'A quiz screen'}, 'n2'),
+    toolTurn('propose_draft', {summary: 'A quiz screen', complete: true}, 'n3'),
+    textTurn('Press Apply.'),
+  ]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  const evs = await say(t.ai, 'ann', 'build a quiz');
+  const refused = evs.filter(e => e.type === 'tool' && e.name === 'propose_draft' && e.state === 'error');
+  assert.strictEqual(refused.length, 1);
+  assert.match(refused[0].detail, /not complete yet/);
+  assert.strictEqual(evs.filter(e => e.type === 'proposal').length, 1, 'Apply appears once, when the app is complete');
+});
+
+test('in full-app mode, propose_change is not offered; in small mode it is', async () => {
+  const t = setup([textTurn('ok')]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  await say(t.ai, 'ann', 'hi');
+  assert.ok(!toolNames(t.calls[0]).includes('propose_change'));
+  const small = setup([textTurn('ok')]);
+  await say(small.ai, 'ann', 'hi');
+  assert.ok(toolNames(small.calls[0]).includes('propose_change'));
+});
+
+test('an app with a problem is not proposed; the problem is named so the model can fix it', async () => {
+  const t = setup([
+    toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
+    toolTurn('draft_write', {path: 'src/a/Quiz.bky', content: BKY_WITH_GHOST}, 'n2'),
+    toolTurn('propose_draft', {summary: 'A quiz', complete: true}, 'n3'),
+    textTurn('I will fix the block.'),
+  ]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  const evs = await say(t.ai, 'ann', 'build a quiz');
+  assert.strictEqual(evs.filter(e => e.type === 'proposal').length, 0);
+  const err = evs.find(e => e.type === 'tool' && e.name === 'propose_draft' && e.state === 'error');
+  assert.match(err.detail, /not proposed: 1 problem\(s\) remain/);
+  assert.match(err.detail, /a block uses Ghost/);
+});
+
+test('a problem the project already had does not stop a complete app from being proposed', async () => {
+  const files = Object.assign({}, PROJECT_FILES, {'youngandroidproject/project.properties': 'name=Pong\n'});  // no main screen
+  const t = setup([
+    toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
+    toolTurn('propose_draft', {summary: 'A quiz', complete: true}, 'n2'),
+    textTurn('Press Apply.'),
+  ], {files});
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  const evs = await say(t.ai, 'ann', 'add a quiz screen');
+  assert.ok(evs.some(e => e.type === 'proposal'));
+});
+
+test('a partly built app is kept between messages, shown as not ready, and finished in the next one', async () => {
+  const t = setup([
+    toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
+    textTurn('The quiz screen is started. Next I will add the questions.'),
+    toolTurn('draft_status', {}, 'd1'),
+    toolTurn('propose_draft', {summary: 'A quiz app', complete: true}, 'd2'),
+    textTurn('Press Apply.'),
+  ]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  const first = await say(t.ai, 'ann', 'start a quiz app');
+  assert.ok(!first.some(e => e.type === 'proposal'), 'nothing to apply yet');
+  assert.ok(first.some(e => e.type === 'status' && /Not ready to apply yet/.test(e.text)));
+  const second = await say(t.ai, 'ann', 'continue');
+  assert.match(systemOf(t.calls[2]), /draft from earlier messages has 2 changed file/);
+  const proposal = second.find(e => e.type === 'proposal');
+  assert.deepStrictEqual(proposal.files, [{path: 'src/a/Quiz.scm', isNew: true}, {path: 'src/a/Quiz.bky', isNew: true}]);
+  assert.ok(!second.some(e => e.type === 'status' && /Not ready/.test(e.text)), 'no longer waiting');
+});
+
+test('turning full-app mode off throws the unfinished app away; the next app starts from the project', async () => {
+  const t = setup([
+    toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
+    textTurn('Started.'),
+    toolTurn('draft_status', {}, 'd1'),
+    textTurn('Nothing yet.'),
+  ]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  await say(t.ai, 'ann', 'start a quiz app');
+  assert.match(texts(await say(t.ai, 'ann', '/override off')), /draft was discarded/);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  await say(t.ai, 'ann', 'what changed?');
+  assert.ok(!systemOf(t.calls[2]).includes('draft from earlier messages'));
+  assert.ok(t.calls[3].payload.messages.some(m => m.role === 'tool' && m.content === 'Nothing has been changed yet.'));
+});
+
+// ---- a model that stops responding is cut off, instead of leaving the person waiting ----
+
+test('a model that stops sending is cut off after the idle time, and the person is told', async () => {
+  const t = setup([STALL], {idleMs: 40});
+  const evs = await say(t.ai, 'ann', 'hi');
+  assert.match(texts(evs), /Let me look/, 'what was sent before the stop is kept');
+  assert.match(evs.find(e => e.type === 'error').message, /stopped sending its answer/);
+  assert.strictEqual(evs[evs.length - 1].type, 'done', 'the answer is over, so the page is not left busy');
+});
+
+test('an answer that keeps arriving is not cut off', async () => {
+  const t = setup([{paced: 10, gap: 15}], {idleMs: 60, turnMs: 2000});
+  const evs = await say(t.ai, 'ann', 'hi');
+  assert.ok(!evs.some(e => e.type === 'error'));
+  assert.match(texts(evs), /w9/);
+});
+
+test('an answer that runs past the time limit is cut off with a message', async () => {
+  const t = setup([{paced: Infinity, gap: 15}], {idleMs: 1000, turnMs: 120});
+  const evs = await say(t.ai, 'ann', 'hi');
+  assert.match(evs.find(e => e.type === 'error').message, /ran past the time limit/);
 });
