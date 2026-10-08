@@ -311,6 +311,13 @@ App Inventor tab that opened it as well, in case that tab's connection to the te
   and pictures you attach. Attach with the paperclip, paste, or drop them on the box: up to three, PNG,
   JPEG, GIF or WebP, 1.5 MB each. The paperclip only shows when the model can look at pictures.
 * **Ask you a question** when it needs a choice, such as a colour. You answer in your next message.
+* **Check what blocks mean.** `check_project` also checks each block against App Inventor's own reference: a
+  property, method or event the component does not have, a block that names the wrong component type, and a global
+  variable or procedure used but never defined. In full-app mode such a problem keeps the Apply button back until it
+  is fixed. Yes/no and colour values are stored the way App Inventor writes them (`True`, `&HFFFF0000`).
+* **Auto-compacter.** A long answer (full-app mode has no step limit) is kept within what the model can read: past
+  400,000 characters, the oldest steps are shortened (old tool results, old tool-call arguments, long old text and
+  old pictures). The person's words, the last steps and the draft itself are never shortened.
 * **Propose changes.** Nothing changes until someone presses Apply. Size is not a reason to refuse a change: a
   file may be up to 2 MB (a big screen is fine), and the files of one change may add up to 8 MB. The project is
   read a page at a time, so its total size alone does not stop the helper.

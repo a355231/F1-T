@@ -42,7 +42,8 @@ function components(file = COMPONENTS_FILE) {
       events: (c.events || []).map(e => ({name: e.name, description: String(e.description || '').slice(0, 140)})),
     });
   }
-  componentCache = map;
+  // An empty list (the file is missing, or being replaced by an update) is not kept: the next call tries again.
+  if (map.size) componentCache = map;
   return map;
 }
 
@@ -125,8 +126,21 @@ function setValue(info, node, prop, value) {
   if (!known.includes(prop) && !(info.name === 'Form' && /^[A-Z]/.test(prop))) {
     return {error: info.name + ' has no designer property "' + prop + '". Its properties are: ' + known.slice(0, 40).join(', ')};
   }
-  node[prop] = typeof value === 'string' ? value : String(value);
+  const p = info.properties.find(x => x.name === prop);
+  node[prop] = normalValue(p ? p.type : '', value);
   return {ok: true};
+}
+
+// The model writes values the way people do; App Inventor stores some of them its own way: True and False for
+// yes/no properties, and &HAARRGGBB for colours (a #RRGGBB colour is fully opaque).
+function normalValue(type, value) {
+  const s = typeof value === 'string' ? value : String(value);
+  if (type === 'boolean' && /^(true|false)$/i.test(s)) return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+  if (type === 'color') {
+    const m = /^#([0-9a-f]{6})([0-9a-f]{2})?$/i.exec(s);
+    if (m) return '&H' + (m[2] || 'FF').toUpperCase() + m[1].toUpperCase();
+  }
+  return s;
 }
 
 function setProperty(obj, component, prop, value) {
@@ -342,6 +356,65 @@ function renameInBlocks(text, oldName, newName) {
 
 // ---- checking a whole project ----
 
+// What the blocks of one screen mean, checked against App Inventor's own reference: a property, method or event the
+// component does not have, a block that names the wrong component type, and a global variable or procedure that is
+// used but never defined. App Inventor would load such blocks broken, or not at all.
+function blockProblems(text, obj) {
+  const ref = components();
+  if (!ref.size) return [];
+  const blocks = [];
+  const visit = node => {
+    for (const c of node.children) {
+      if (c.tag === 'block') blocks.push(c);
+      visit(c);
+    }
+  };
+  visit(parseXml(text));
+  const field = (b, name) => (b.children.find(c => c.tag === 'field' && c.attrs.name === name) || {text: ''}).text;
+  const mutation = b => (b.children.find(c => c.tag === 'mutation') || {attrs: {}}).attrs;
+  const globals = new Set(blocks.filter(b => b.attrs.type === 'global_declaration').map(b => field(b, 'NAME')));
+  const procedures = new Set(blocks.filter(b => /^procedures_def/.test(b.attrs.type)).map(b => field(b, 'NAME')));
+  const typeOf = name => {
+    const found = obj && name ? findNode(obj, name) : null;
+    return found ? (found.node.$Type || 'Form') : null;
+  };
+  const out = [];
+  for (const b of blocks) {
+    const type = b.attrs.type;
+    const m = mutation(b);
+    if (/^component_(event|set_get|method)$/.test(type) && m.is_generic !== 'true') {
+      const actual = typeOf(m.instance_name);
+      if (actual && m.component_type && m.component_type !== actual) {
+        out.push('a block says ' + m.instance_name + ' is a ' + m.component_type + ', but it is a ' + actual);
+      }
+      const kind = actual || m.component_type;
+      const info = ref.get(kind);
+      if (!info) continue;
+      if (type === 'component_event' && !info.events.some(e => e.name === m.event_name)) {
+        out.push(kind + ' has no event ' + m.event_name);
+      } else if (type === 'component_method' && !info.methods.some(x => x.name === m.method_name)) {
+        out.push(kind + ' has no method ' + m.method_name + ' (see component_info)');
+      } else if (type === 'component_set_get') {
+        const p = info.blockProperties.find(x => x.name === m.property_name);
+        if (!p || p.rw === 'invisible') out.push(kind + ' has no block property ' + m.property_name + ' (see component_info)');
+        else if (m.set_or_get === 'set' && p.rw === 'read-only') out.push(kind + '.' + m.property_name + ' can be read but not set');
+        else if (m.set_or_get === 'get' && p.rw === 'write-only') out.push(kind + '.' + m.property_name + ' can be set but not read');
+      }
+    }
+    if (/^lexical_variable_(get|set)$/.test(type)) {
+      const name = field(b, 'VAR');
+      if (name.startsWith('global ') && !globals.has(name.slice(7))) {
+        out.push('the global variable ' + name.slice(7) + ' is used but never declared');
+      }
+    }
+    if (/^procedures_call/.test(type)) {
+      const name = m.name || field(b, 'PROCNAME');
+      if (name && !procedures.has(name)) out.push('the procedure ' + name + ' is called but never defined');
+    }
+  }
+  return [...new Set(out)];
+}
+
 // Problems in a project: files that do not parse, names used in blocks that do not exist, duplicate
 // names, unknown component types, and screens with one file but not the other. files: {path: text}.
 function checkProject(files) {
@@ -384,6 +457,7 @@ function checkProject(files) {
       for (const m of String(text).matchAll(/<field name="COMPONENT_SELECTOR">([^<]*)<\/field>/g)) {
         if (obj && !names.includes(m[1])) add('error', path, 'a block uses ' + m[1] + ', which is not on this screen');
       }
+      for (const message of blockProblems(text, obj)) add('error', path, message);
     } catch (e) {
       add('error', path, 'the blocks file does not read: ' + e.message);
     }

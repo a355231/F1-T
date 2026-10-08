@@ -6,7 +6,7 @@ const {execFileSync} = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {Assistant, checkAttachments, trimToolResults, modelTakesImages} = require('../ai');
+const {Assistant, checkAttachments, trimToolResults, compactMessages, modelTakesImages} = require('../ai');
 const registry = require('../ai-registry');
 const proj = require('../ai-project');
 const {Hub} = require('../rooms');
@@ -1296,4 +1296,24 @@ test('the log says what happened, and never what was said or the key', async () 
   assert.match(log, /stopped responding/);
   assert.match(log, /ann finished after \d+ s; 2 model answers, 1 tool calls/);
   assert.doesNotMatch(log, /private question|secret answer|sk-test/);
+});
+
+test('the auto-compacter shortens the oldest steps of a long answer, and keeps the person\'s words and the last steps', () => {
+  const big = 'x'.repeat(30000);
+  const messages = [{role: 'system', content: 'rules'},
+    {role: 'user', content: [{type: 'text', text: 'build a quiz'}, {type: 'image_url', image_url: {url: 'data:' + big}}]}];
+  for (let i = 0; i < 40; i++) {
+    messages.push({role: 'assistant', content: 'step ' + i + ' ' + big, tool_calls: [{id: 'c' + i, type: 'function', function: {name: 'draft_write', arguments: JSON.stringify({content: big})}}]});
+    messages.push({role: 'tool', tool_call_id: 'c' + i, content: 'ok'});
+  }
+  compactMessages(messages);
+  const total = JSON.stringify(messages).length;
+  assert.ok(total < 500000, 'it fits again: ' + total);
+  assert.strictEqual(messages[0].content, 'rules');
+  assert.deepStrictEqual(messages[1].content[0], {type: 'text', text: 'build a quiz'}, 'the person\'s words stay');
+  assert.ok(!JSON.stringify(messages[1]).includes('data:'), 'the old picture is gone');
+  assert.match(messages[2].tool_calls[0].function.arguments, /shortened/);
+  JSON.parse(messages[2].tool_calls[0].function.arguments);   // still valid JSON
+  const last = messages[messages.length - 2];
+  assert.ok(last.tool_calls[0].function.arguments.length > 30000, 'the last steps are whole');
 });

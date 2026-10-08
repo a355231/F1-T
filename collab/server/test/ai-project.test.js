@@ -161,3 +161,46 @@ test('a malformed blocks file cannot hold up the server: long runs of spaces or 
     assert.ok(Date.now() - t < 500, 'took ' + (Date.now() - t) + ' ms');
   }
 });
+
+// ---- the meaning of blocks, and values written the way people write them ----
+
+const REF_SCM = proj.writeScm({authURL: [], YaVersion: '237', Source: 'Form', Properties: {
+  $Name: 'Screen1', $Type: 'Form', $Version: '27', AppName: 'Quiz', Title: 'Quiz', Uuid: '0', $Components: [
+    {$Name: 'Label1', $Type: 'Label', $Version: '5', Uuid: '1'},
+    {$Name: 'Button1', $Type: 'Button', $Version: '7', Uuid: '2'},
+    {$Name: 'Notifier1', $Type: 'Notifier', $Version: '6', Uuid: '3'},
+  ]}});
+const bky = blocks => '<xml xmlns="https://developers.google.com/blockly/xml">' + blocks.join('') +
+  '<yacodeblocks ya-version="237" language-version="39"></yacodeblocks></xml>';
+const problemsOf = text => proj.checkProject({'src/a/Screen1.scm': REF_SCM, 'src/a/Screen1.bky': text,
+  'youngandroidproject/project.properties': 'main=a.Screen1\n'}).map(p => p.message);
+
+test('every block example the helper copies passes the check', () => {
+  const {BLOCK_EXAMPLES} = require('../ai-registry');
+  assert.deepStrictEqual(problemsOf(bky(Object.values(BLOCK_EXAMPLES).map(e => e.xml))), []);
+});
+
+test('blocks that App Inventor would load broken are named: wrong property, method, event, type, variable, procedure', () => {
+  const found = problemsOf(bky([
+    '<block type="component_set_get"><mutation component_type="Label" set_or_get="set" property_name="Txt" is_generic="false" instance_name="Label1"></mutation><field name="COMPONENT_SELECTOR">Label1</field></block>',
+    '<block type="component_method"><mutation component_type="Notifier" method_name="Show" is_generic="false" instance_name="Notifier1"></mutation><field name="COMPONENT_SELECTOR">Notifier1</field></block>',
+    '<block type="component_event"><mutation component_type="Button" is_generic="false" instance_name="Button1" event_name="Clik"></mutation><field name="COMPONENT_SELECTOR">Button1</field></block>',
+    '<block type="component_set_get"><mutation component_type="Button" set_or_get="get" property_name="Text" is_generic="false" instance_name="Label1"></mutation><field name="COMPONENT_SELECTOR">Label1</field></block>',
+    '<block type="lexical_variable_get"><field name="VAR">global score</field></block>',
+    '<block type="procedures_callnoreturn"><mutation name="reset"></mutation><field name="PROCNAME">reset</field></block>',
+  ]));
+  for (const want of [/Label has no block property Txt/, /Notifier has no method Show/, /Button has no event Clik/,
+    /says Label1 is a Button, but it is a Label/, /global variable score is used but never declared/,
+    /procedure reset is called but never defined/]) {
+    assert.ok(found.some(m => want.test(m)), want + ' in ' + JSON.stringify(found));
+  }
+});
+
+test('yes/no and colour values are stored the way App Inventor writes them', () => {
+  const obj = proj.parseScm(REF_SCM);
+  const r = proj.addComponent(obj, {type: 'CheckBox', name: 'Agree', properties: {Checked: true, BackgroundColor: '#ff0000', Text: 'true'}});
+  assert.ok(r.ok, JSON.stringify(r));
+  assert.strictEqual(r.node.Checked, 'True');
+  assert.strictEqual(r.node.BackgroundColor, '&HFFFF0000');
+  assert.strictEqual(r.node.Text, 'true', 'a text property keeps what was written');
+});

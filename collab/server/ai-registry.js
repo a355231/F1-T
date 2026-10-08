@@ -188,6 +188,8 @@ const BLOCK_EXAMPLES = {
   for_each: {use: 'Do something for each item of a list (the list goes in LIST)', xml: '<block type="controls_forEach"><field name="VAR">item</field><value name="LIST"><block type="lists_create_with"><mutation items="1"></mutation><value name="ADD0"><block type="text"><field name="TEXT">a</field></block></value></block></value><statement name="DO"></statement></block>'},
   repeat: {use: 'Repeat a number of times', xml: '<block type="controls_repeat_ext"><value name="TIMES"><block type="math_number"><field name="NUM">3</field></block></value><statement name="DO"></statement></block>'},
   open_screen: {use: 'Open another screen', xml: '<block type="controls_openAnotherScreen"><value name="SCREEN"><block type="text"><field name="TEXT">Screen2</field></block></value></block>'},
+  event_value: {use: 'Read a value the event gives, by its name (in "when Web1.GotText", responseContent); no "global " in front', xml: '<block type="lexical_variable_get"><field name="VAR">responseContent</field></block>'},
+  close_screen: {use: 'Close this screen and go back', xml: '<block type="controls_closeScreen"></block>'},
 };
 
 function listOf(value) {

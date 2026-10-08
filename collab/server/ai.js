@@ -283,6 +283,34 @@ function trimToolResults(messages) {
   }
 }
 
+// The auto-compacter. Full-app mode has no step limit, so one answer's conversation can outgrow what the model can
+// read. Past HISTORY_MAX characters, the oldest steps are shortened first: tool results (above), then the arguments
+// of old tool calls, long old text and old pictures. The system prompt, the person's words and the last few steps
+// stay whole; the draft itself is never shortened (draft_status and read_file show it again).
+const HISTORY_MAX = 400000;
+const KEEP_LAST = 8;
+const SHORT_ARGS = '{"shortened":"this earlier call was made; its arguments were removed to save room"}';
+function compactMessages(messages) {
+  trimToolResults(messages);
+  const size = m => (typeof m.content === 'string' ? m.content.length : m.content ? JSON.stringify(m.content).length : 0) +
+    (m.tool_calls || []).reduce((n, c) => n + String(c.function.arguments || '').length, 0);
+  let total = messages.reduce((n, m) => n + size(m), 0);
+  for (let i = 1; i < messages.length - KEEP_LAST && total > HISTORY_MAX; i++) {
+    const m = messages[i];
+    const before = size(m);
+    if (m.role === 'assistant') {
+      for (const c of m.tool_calls || []) {
+        if (String(c.function.arguments || '').length > SHORT_ARGS.length) c.function.arguments = SHORT_ARGS;
+      }
+      if (typeof m.content === 'string' && m.content.length > 1200) m.content = m.content.slice(0, 600) + ' […]';
+    } else if (m.role === 'user' && Array.isArray(m.content)) {
+      m.content = m.content.filter(part => part.type === 'text')
+        .concat([{type: 'text', text: '(Pictures shown earlier, removed to save room.)'}]);
+    }
+    total -= before - size(m);
+  }
+}
+
 // Shows a long tool call while the model is still writing it. Writing a big file can take minutes with no
 // words in between, and the window would look stuck.
 function showWriting(acc, shown, emit) {
@@ -789,7 +817,7 @@ class Assistant {
           emit({type: 'status', text: 'Stopped: the time for this goal is up. Ask again to keep going.'});
           return;
         }
-        trimToolResults(messages);
+        compactMessages(messages);
         const reply = await this.streamWithRetry(messages, registry.definitions(run), ctx.signal, emit);
         stats.steps++;
         if (reply.truncated) {
@@ -1168,4 +1196,4 @@ class Assistant {
   }
 }
 
-module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, trimToolResults, modelTakesImages};
+module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, trimToolResults, compactMessages, modelTakesImages};
