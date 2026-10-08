@@ -6,7 +6,7 @@ const {execFileSync} = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {Assistant, checkAttachments, trimToolResults, compactMessages, modelTakesImages} = require('../ai');
+const {Assistant, checkAttachments, modelTakesImages} = require('../ai');
 const registry = require('../ai-registry');
 const proj = require('../ai-project');
 const {Hub} = require('../rooms');
@@ -810,14 +810,6 @@ test('modelTakesImages reads OpenRouter\'s two forms of the model list', () => {
   assert.strictEqual(modelTakesImages({}), false);
 });
 
-test('old tool results are shortened first when an answer runs long', () => {
-  const big = 'x'.repeat(150000);
-  const messages = [{role: 'user', content: 'hi'}, {role: 'tool', content: big}, {role: 'tool', content: big}, {role: 'tool', content: 'small'}];
-  trimToolResults(messages);
-  assert.match(messages[1].content, /shortened/);
-  assert.strictEqual(messages[3].content, 'small', 'the newest result is kept');
-});
-
 test('the draft refuses files outside the screens, and grows only so far in small mode', async () => {
   const draft = new registry.Draft({projectId: '5', cookie: 'AppInventor=ann', ask: async () => ({ok: true, files: PROJECT_FILES}), full: false});
   await assert.rejects(draft.write('youngandroidproject/project.properties', 'x'), /not a designer or blocks file/);
@@ -1298,22 +1290,46 @@ test('the log says what happened, and never what was said or the key', async () 
   assert.doesNotMatch(log, /private question|secret answer|sk-test/);
 });
 
-test('the auto-compacter shortens the oldest steps of a long answer, and keeps the person\'s words and the last steps', () => {
-  const big = 'x'.repeat(30000);
-  const messages = [{role: 'system', content: 'rules'},
-    {role: 'user', content: [{type: 'text', text: 'build a quiz'}, {type: 'image_url', image_url: {url: 'data:' + big}}]}];
-  for (let i = 0; i < 40; i++) {
-    messages.push({role: 'assistant', content: 'step ' + i + ' ' + big, tool_calls: [{id: 'c' + i, type: 'function', function: {name: 'draft_write', arguments: JSON.stringify({content: big})}}]});
-    messages.push({role: 'tool', tool_call_id: 'c' + i, content: 'ok'});
+// The conversation is made shorter when it passes the room the model has: here a small room, so that a short
+// conversation is enough. The first call is the model writing notes on the earlier steps; the answer then goes on
+// from the notes.
+test('a long conversation is summarised by the model when it passes the room, and the answer goes on from the notes', async () => {
+  process.env.AI_CONTEXT_TOKENS = '30000';
+  try {
+    const t = setup([textTurn('NOTES: the person wants a quiz app with a score screen.'), textTurn('Here is the next step.')]);
+    const history = [];
+    for (let i = 0; i < 20; i++) {
+      history.push({role: 'user', content: 'question ' + i + ' ' + 'q'.repeat(2500)});
+      if (i < 19) history.push({role: 'assistant', content: 'answer ' + i + ' ' + 'a'.repeat(2500)});
+    }
+    const res = fakeRes();
+    await t.ai.handle(fakeReq('/collab/ai/stream', 'POST', {projectId: '5', messages: history}, 'AppInventor=ann'), res);
+    const evs = events(res);
+    assert.strictEqual(t.calls.length, 2, 'the notes, then the answer');
+    assert.strictEqual(t.calls[0].payload.tools, undefined, 'the notes are written without tools');
+    assert.match(texts(evs), /Here is the next step\./);
+    assert.ok(evs.some(e => e.type === 'status' && /Making room/.test(e.text)), 'the person is told');
+    const sent = t.calls[1].payload.messages;
+    assert.match(JSON.stringify(sent), /NOTES: the person wants a quiz app/);
+    assert.ok(JSON.stringify(sent).length < JSON.stringify(t.calls[0].payload.messages).length, 'what is sent is shorter');
+    assert.strictEqual(sent[sent.length - 1].content, history[history.length - 1].content, 'the newest message is kept whole');
+  } finally {
+    delete process.env.AI_CONTEXT_TOKENS;
   }
-  compactMessages(messages);
-  const total = JSON.stringify(messages).length;
-  assert.ok(total < 500000, 'it fits again: ' + total);
-  assert.strictEqual(messages[0].content, 'rules');
-  assert.deepStrictEqual(messages[1].content[0], {type: 'text', text: 'build a quiz'}, 'the person\'s words stay');
-  assert.ok(!JSON.stringify(messages[1]).includes('data:'), 'the old picture is gone');
-  assert.match(messages[2].tool_calls[0].function.arguments, /shortened/);
-  JSON.parse(messages[2].tool_calls[0].function.arguments);   // still valid JSON
-  const last = messages[messages.length - 2];
-  assert.ok(last.tool_calls[0].function.arguments.length > 30000, 'the last steps are whole');
+});
+
+test('if the notes cannot be written, the answer still goes on, and says that earlier steps were removed', async () => {
+  process.env.AI_CONTEXT_TOKENS = '30000';
+  try {
+    const t = setup([{status: 500}, textTurn('Carrying on.')]);
+    const history = [];
+    for (let i = 0; i < 20; i++) history.push({role: i % 2 ? 'assistant' : 'user', content: 'message ' + i + ' ' + 'z'.repeat(2500)});
+    history.push({role: 'user', content: 'what now?'});
+    const res = fakeRes();
+    await t.ai.handle(fakeReq('/collab/ai/stream', 'POST', {projectId: '5', messages: history}, 'AppInventor=ann'), res);
+    assert.match(texts(events(res)), /Carrying on\./);
+    assert.match(JSON.stringify(t.calls[1].payload.messages), /were removed to make room/);
+  } finally {
+    delete process.env.AI_CONTEXT_TOKENS;
+  }
 });

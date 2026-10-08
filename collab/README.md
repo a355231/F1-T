@@ -315,9 +315,12 @@ App Inventor tab that opened it as well, in case that tab's connection to the te
   property, method or event the component does not have, a block that names the wrong component type, and a global
   variable or procedure used but never defined. In full-app mode such a problem keeps the Apply button back until it
   is fixed. Yes/no and colour values are stored the way App Inventor writes them (`True`, `&HFFFF0000`).
-* **Auto-compacter.** A long answer (full-app mode has no step limit) is kept within what the model can read: past
-  400,000 characters, the oldest steps are shortened (old tool results, old tool-call arguments, long old text and
-  old pictures). The person's words, the last steps and the draft itself are never shortened.
+* **Context compactor.** One answer's conversation is kept within the model's room: **1M tokens** for the Claude 5
+  models, **256K** for the rest, or less if OpenRouter reports less for the model in use. `AI_CONTEXT_TOKENS` in
+  `ai.env` sets the room by hand. Past 75% of the room for the prompt, the oldest tool results are shortened first
+  (the draft and the project still hold what they said). If that is not enough, the model writes notes on the oldest
+  steps, and the answer goes on from them; the person is told "Making room". If the notes cannot be written, the
+  older steps are removed and the helper says so. The newest quarter of the room is never touched.
 * **Propose changes.** Nothing changes until someone presses Apply. Size is not a reason to refuse a change: a
   file may be up to 2 MB (a big screen is fine), and the files of one change may add up to 8 MB. The project is
   read a page at a time, so its total size alone does not stop the helper.
