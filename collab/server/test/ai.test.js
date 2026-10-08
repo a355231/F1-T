@@ -3,6 +3,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const {execFileSync} = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const {Assistant, checkAttachments, trimToolResults, modelTakesImages} = require('../ai');
 const registry = require('../ai-registry');
 const proj = require('../ai-project');
@@ -103,6 +106,8 @@ function setup(script, options = {}) {
   process.env.OPENROUTER_MODEL = 'some/model';
   process.env.AI_OVERRIDE_PIN = PIN_VALUE;
   delete process.env.BRAVE_API_KEY;
+  // The PIN can be changed from the Team panel, into a file: each test gets a file of its own.
+  process.env.AI_PIN_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pin-')), 'overridepin');
   if (options.vision !== undefined) process.env.AI_VISION = options.vision;
   else delete process.env.AI_VISION;
   const {models, vision, files: projectFiles, ...rest} = options;
@@ -140,7 +145,7 @@ function setup(script, options = {}) {
     return {ok: true, body: sseBody(turn)};
   };
   const ai = new Assistant(Object.assign({ask, hub, fetchImpl, now: () => now, log: () => {}, retryWaitMs: 5}, rest));
-  return {ai, asked, calls, hub, advance: ms => { now += ms; }};
+  return {ai, asked, calls, hub, pinFile: process.env.AI_PIN_FILE, advance: ms => { now += ms; }};
 }
 
 async function say(ai, who, text, projectId = '5') {
@@ -343,6 +348,85 @@ test('/goal stops at its step limit and says so, instead of running on', async (
   const evs = await say(t.ai, 'ann', '/goal look around forever');
   assert.strictEqual(t.calls.length, 3);
   assert.match(evs.find(e => e.type === 'status').text, /step limit/);
+});
+
+// ---- the override PIN can be changed from the Team panel, the way the team code can ----
+
+async function changePin(ai, who, body) {
+  const res = fakeRes();
+  await ai.handle(fakeReq('/collab/ai/pin', 'POST', body, 'AppInventor=' + who), res);
+  return {status: res.status, body: JSON.parse(res.body)};
+}
+
+test('the override PIN can be changed from the Team panel: the new one works at once, the old one stops', async () => {
+  const t = setup([]);
+  const done = await changePin(t.ai, 'ann', {current: PIN_VALUE, new: 'Fresh2026'});
+  assert.strictEqual(done.status, 200);
+  assert.strictEqual(fs.readFileSync(t.pinFile, 'utf8'), 'Fresh2026\n');
+  assert.strictEqual(fs.statSync(t.pinFile).mode & 0o777, 0o600, 'only the hub\'s user can read it');
+  assert.match(texts(await say(t.ai, 'ann', '/override ' + PIN_VALUE)), /^Wrong PIN\.$/);
+  assert.match(texts(await say(t.ai, 'ann', '/override Fresh2026')), /Full-app mode is on/);
+  assert.doesNotMatch(JSON.stringify(t.calls), /Fresh2026|test-pin-42/, 'the PIN never reaches the model');
+});
+
+test('a wrong current PIN changes nothing, and counts toward the same lock as /override', async () => {
+  const t = setup([]);
+  for (let i = 0; i < 4; i++) {
+    assert.strictEqual((await changePin(t.ai, 'ann', {current: 'nope0000', new: 'Fresh2026'})).status, 403);
+  }
+  assert.strictEqual(fs.existsSync(t.pinFile), false, 'nothing was saved');
+  assert.strictEqual((await changePin(t.ai, 'bob', {current: 'nope0000', new: 'Fresh2026'})).status, 403);
+  const locked = await changePin(t.ai, 'fay', {current: PIN_VALUE, new: 'Fresh2026'});
+  assert.strictEqual(locked.status, 429);
+  assert.match(locked.body.error, /Too many wrong PINs/);
+  assert.match(texts(await say(t.ai, 'fay', '/override ' + PIN_VALUE)), /Too many wrong PINs/);
+});
+
+test('the new PIN must be 4 to 20 letters or digits, as set-ai.sh asks', async () => {
+  const t = setup([]);
+  for (const bad of ['abc', 'has space', 'with-dash', 'x'.repeat(21), '']) {
+    assert.strictEqual((await changePin(t.ai, 'ann', {current: PIN_VALUE, new: bad})).status, 400, JSON.stringify(bad));
+  }
+  assert.strictEqual(fs.existsSync(t.pinFile), false);
+});
+
+test('"also turn full-app mode off for everyone" ends it at once, for people already in it', async () => {
+  const t = setup([textTurn('ok')]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  await say(t.ai, 'bob', '/override ' + PIN_VALUE);
+  const r = await changePin(t.ai, 'ann', {current: PIN_VALUE, new: 'Fresh2026', endFull: true});
+  assert.deepStrictEqual(r.body, {ok: true, endedFull: true});
+  assert.match(texts(await say(t.ai, 'bob', '/override')), /Full-app mode is off/);
+  assert.match(texts(await say(t.ai, 'ann', '/override')), /Full-app mode is off/);
+});
+
+test('with no PIN set yet, the Team panel cannot set the first one: the Pi does that', async () => {
+  const t = setup([]);
+  delete process.env.AI_OVERRIDE_PIN;
+  try {
+    const r = await changePin(t.ai, 'ann', {current: '', new: 'Fresh2026'});
+    assert.strictEqual(r.status, 409);
+    assert.match(r.body.error, /set-ai\.sh --pin/);
+  } finally {
+    process.env.AI_OVERRIDE_PIN = PIN_VALUE;
+  }
+  assert.strictEqual(fs.existsSync(t.pinFile), false);
+});
+
+test('a PIN saved in the PIN file is used in place of the one in ai.env', async () => {
+  const t = setup([]);
+  fs.writeFileSync(t.pinFile, 'Elsewhere9\n');
+  assert.match(texts(await say(t.ai, 'ann', '/override ' + PIN_VALUE)), /^Wrong PIN\.$/);
+  assert.match(texts(await say(t.ai, 'ann', '/override Elsewhere9')), /Full-app mode is on/);
+});
+
+test('if the new PIN cannot be saved, nothing changes and the old PIN still works', async () => {
+  const t = setup([]);
+  process.env.AI_PIN_FILE = path.join(t.pinFile, 'nowhere', 'overridepin');   // its folder does not exist
+  const r = await changePin(t.ai, 'ann', {current: PIN_VALUE, new: 'Fresh2026'});
+  assert.strictEqual(r.status, 500);
+  assert.match(r.body.error, /nothing has changed/);
+  assert.match(texts(await say(t.ai, 'ann', '/override ' + PIN_VALUE)), /Full-app mode is on/);
 });
 
 test('/goal with nothing after it asks for the goal', async () => {

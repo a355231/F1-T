@@ -2,19 +2,23 @@
 # Sets up (or turns off) the AI helper that opens with Ctrl+I+M in App Inventor.
 #
 #   sudo /opt/appinventor/set-ai.sh            # asks for the OpenRouter key and the model
-#   sudo /opt/appinventor/set-ai.sh --pin      # asks for the PIN that turns on full-app mode
+#   sudo /opt/appinventor/set-ai.sh --pin      # asks for the PIN that turns on full-app mode (the Team panel
+#                                              # can change it too: Change override PIN)
 #   sudo /opt/appinventor/set-ai.sh --search   # asks for the Brave Search key (optional web search)
 #   sudo /opt/appinventor/set-ai.sh --status
 #   sudo /opt/appinventor/set-ai.sh --off      # turns the helper off, and forgets the PIN and search key
 #
-# The keys, the model and the PIN are stored only in /opt/appinventor/ai.env (readable by root only)
-# and read by the collaboration hub when it starts. They are never in the source code, never sent to
+# The keys, the model and the search key are stored only in /opt/appinventor/ai.env (readable by root only)
+# and read by the collaboration hub when it starts. The full-app PIN is kept in /opt/appinventor/overridepin
+# instead, which the hub reads again whenever it changes, so the Team panel can change it too. They are never in the source code, never sent to
 # a browser, and never printed. Get an OpenRouter key at https://openrouter.ai/keys; a model name looks
 # like "anthropic/claude-sonnet-4.5" (see https://openrouter.ai/models). Web search uses a Brave Search
 # API key (https://brave.com/search/api/, the free plan is enough for a team).
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
-FILE=/opt/appinventor/ai.env
+BASE="${AI_BASE:-/opt/appinventor}"
+FILE="$BASE/ai.env"
+PIN_FILE="$BASE/overridepin"
 
 # Writes one setting into ai.env, replacing an old value of the same name, and keeps the others.
 set_setting() {
@@ -26,9 +30,27 @@ set_setting() {
   chmod 600 "$FILE"
 }
 
+# Saves the full-app PIN to its own file, owned by the same user as the rest of App Inventor so that the hub can
+# replace it. The copy in ai.env is removed, so there is only one PIN.
+save_pin() {
+  local pin=$1 owner tmp
+  owner="$(stat -c %U "$BASE")"
+  tmp="$PIN_FILE.tmp"
+  umask 077
+  printf '%s\n' "$pin" > "$tmp"
+  chown "$owner:$owner" "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$PIN_FILE"
+  if [ -f "$FILE" ]; then
+    { grep -v '^AI_OVERRIDE_PIN=' "$FILE" || true; } > "$FILE.new"
+    mv -f "$FILE.new" "$FILE"
+    chmod 600 "$FILE"
+  fi
+}
+
 case "${1:-}" in
   --off)
-    rm -f "$FILE"
+    rm -f "$FILE" "$PIN_FILE"
     systemctl restart collab-hub
     echo "The AI helper is off. The full-app PIN and the search key were removed with it."
     exit 0 ;;
@@ -38,8 +60,9 @@ case "${1:-}" in
     else
       echo "AI helper: not set up"
     fi
-    if grep -q '^AI_OVERRIDE_PIN=.' "$FILE" 2>/dev/null; then
-      echo "Full-app PIN: set"
+    # The PIN file, when there is one, is the PIN; otherwise the one in ai.env is.
+    if [ -s "$PIN_FILE" ] || { [ ! -e "$PIN_FILE" ] && grep -q '^AI_OVERRIDE_PIN=.' "$FILE" 2>/dev/null; }; then
+      echo "Full-app PIN: set (the Team panel can change it: Change override PIN)"
     else
       echo "Full-app PIN: not set (run: sudo /opt/appinventor/set-ai.sh --pin)"
     fi
@@ -55,9 +78,8 @@ case "${1:-}" in
       echo "The PIN must be 4 to 20 letters or digits." >&2
       exit 1
     fi
-    set_setting AI_OVERRIDE_PIN "$pin"
-    systemctl restart collab-hub
-    echo "Full-app PIN saved. In the AI helper, type /override and the PIN."
+    save_pin "$pin"
+    echo "Full-app PIN saved. In the AI helper, type /override and the PIN. It takes effect at once."
     exit 0 ;;
   --search)
     read -r -s -p "Brave Search API key (typing is hidden): " search; echo

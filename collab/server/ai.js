@@ -21,7 +21,43 @@ const proj = require('./ai-project');
 
 const KEY = () => process.env.OPENROUTER_API_KEY || '';
 const MODEL = () => process.env.OPENROUTER_MODEL || '';
-const PIN = () => process.env.AI_OVERRIDE_PIN || '';
+// The full-app PIN is the one in ai.env, unless one has been saved to its own file (from the Team panel, or by
+// set-ai.sh --pin). The file is read again whenever it changes, so a new PIN works at once. The hub's user can
+// write it; ai.env is readable by root only.
+const PIN_ENV = () => process.env.AI_OVERRIDE_PIN || '';
+const PIN_FILE = () => process.env.AI_PIN_FILE || '/opt/appinventor/overridepin';
+const PIN_RULE = /^[A-Za-z0-9]{4,20}$/;   // the same rule as set-ai.sh --pin: it is typed in chat, so no spaces
+let pinCache = {stamp: '', value: ''};
+
+function PIN() {
+  let st;
+  try {
+    st = fs.statSync(PIN_FILE());
+  } catch (e) {
+    // No file: the PIN from ai.env. Any other problem with the file means no PIN, so full-app mode stays off.
+    return e.code === 'ENOENT' ? PIN_ENV() : '';
+  }
+  const stamp = st.ino + ':' + st.mtimeMs + ':' + st.size;
+  if (stamp !== pinCache.stamp) {
+    let value = '';
+    try {
+      value = fs.readFileSync(PIN_FILE(), 'utf8').trim();
+    } catch (e) {
+      value = '';
+    }
+    pinCache = {stamp, value};
+  }
+  return pinCache.value;
+}
+
+// Saves a new PIN. It is written to a new file and then renamed, so a half-written PIN is never read.
+function savePin(value) {
+  const file = PIN_FILE();
+  const temp = file + '.tmp';
+  fs.writeFileSync(temp, value + '\n', {mode: 0o600});
+  fs.chmodSync(temp, 0o600);
+  fs.renameSync(temp, file);
+}
 const SEARCH_KEY = () => process.env.BRAVE_API_KEY || '';
 const URL_ = process.env.OPENROUTER_URL || 'https://openrouter.ai/api/v1/chat/completions';
 const MODELS_URL = URL_.replace(/\/chat\/completions$/, '/models');
@@ -489,6 +525,7 @@ class Assistant {
     } catch (e) {
       return json(400, {error: 'bad request'});
     }
+    if (path_ === '/collab/ai/pin') return this.changePin(json, me, data);
     const projectId = String(data.projectId || '');
     if (!/^\d+$/.test(projectId)) return json(400, {error: 'no project'});
     const access = await this.ask('/ode/collab/access?projectId=' + projectId, cookie);
@@ -934,6 +971,47 @@ class Assistant {
       const t = setTimeout(resolve, ms);
       if (signal) signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, {once: true});
     });
+  }
+
+  // The full-app PIN, changed from the Team panel the way the team code is changed: the current PIN has to be typed
+  // first, wrong guesses count toward the same lock as /override, and the new PIN works at once. The Team panel can
+  // also turn full-app mode off for everyone, for when the old PIN has leaked.
+  changePin(json, me, data) {
+    const now = this.now();
+    this.pinWrong = this.pinWrong.filter(t => now - t < PIN_WINDOW_MS);
+    if (now < this.pinLockedUntil) {
+      return json(429, {error: 'Too many wrong PINs. Wait ' + Math.ceil((this.pinLockedUntil - now) / 60000) +
+        ' minutes, then try again.'});
+    }
+    if (!PIN()) {
+      return json(409, {error: 'There is no full-app PIN yet. Whoever runs the Raspberry Pi sets the first one with: ' +
+        'sudo /opt/appinventor/set-ai.sh --pin'});
+    }
+    if (!this.pinMatches(String(data.current || ''))) {
+      this.pinWrong.push(now);
+      if (this.pinWrong.length >= PIN_MAX_WRONG) {
+        this.pinLockedUntil = now + PIN_LOCK_MS;
+        this.pinWrong = [];
+      }
+      this.log(me.email.split('@')[0] + ' gave the wrong current PIN');
+      return json(403, {error: 'The current PIN is wrong.'});
+    }
+    const fresh = String(data.new || '');
+    if (!PIN_RULE.test(fresh)) {
+      return json(400, {error: 'The new PIN needs 4 to 20 letters or digits.'});
+    }
+    try {
+      savePin(fresh);
+    } catch (e) {
+      this.log('could not save the full-app PIN (' + (e.code || 'error') + ')');
+      return json(500, {error: 'The new PIN could not be saved, so nothing has changed.'});
+    }
+    this.pinWrong = [];
+    const endFull = data.endFull === true;
+    if (endFull) this.full.clear();
+    this.log(me.email.split('@')[0] + ' changed the full-app PIN' +
+      (endFull ? ' and turned full-app mode off for everyone' : ''));
+    return json(200, {ok: true, endedFull: endFull});
   }
 
   // /discard throws away the unfinished app. Nothing in the project has changed: that happens only on Apply.

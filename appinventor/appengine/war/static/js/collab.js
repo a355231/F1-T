@@ -661,16 +661,22 @@
 
   // ---- changing the team code while everyone is working ----
 
-  function randomCode() {
+  // n letters and digits, each equally likely.
+  function randomChars(n) {
     var letters = 'abcdefghijklmnopqrstuvwxyz0123456789';
     var out = '';
     var bytes = new Uint8Array(1);
-    while (out.length < 12) {
+    while (out.length < n) {
       crypto.getRandomValues(bytes);
       if (bytes[0] < 252) {   // 252 = 7 * 36, so every letter is equally likely
         out += letters.charAt(bytes[0] % 36);
       }
     }
+    return out;
+  }
+
+  function randomCode() {
+    var out = randomChars(12);
     return out.slice(0, 4) + '-' + out.slice(4, 8) + '-' + out.slice(8, 12);
   }
 
@@ -686,9 +692,11 @@
     }, 5 * 60 * 1000);
   }
 
-  function changeCodeDialog() {
+  // A dialog over the page: a card that closes with Cancel, Escape or Done, and a maker for its fields. Returns
+  // null if one is already open.
+  function openDialog() {
     if (document.getElementById('aicollab-dialog')) {
-      return;
+      return null;
     }
     var backdrop = el('div');
     backdrop.id = 'aicollab-dialog';
@@ -717,6 +725,17 @@
       card.appendChild(row);
       return input;
     }
+    return {backdrop: backdrop, card: card, close: close, field: field};
+  }
+
+  function changeCodeDialog() {
+    var dialog = openDialog();
+    if (!dialog) {
+      return;
+    }
+    var card = dialog.card;
+    var close = dialog.close;
+    var field = dialog.field;
 
     card.appendChild(el('h3', '', 'Change team code'));
     card.appendChild(el('p', '', 'Anyone who signs in from now on needs the new code. ' +
@@ -809,7 +828,101 @@
         }
       };
     });
-    document.body.appendChild(backdrop);
+    document.body.appendChild(dialog.backdrop);
+    current.focus();
+  }
+
+  // ---- changing the override PIN: the PIN that turns on full-app mode in the AI helper ----
+
+  function changePinDialog() {
+    var dialog = openDialog();
+    if (!dialog) {
+      return;
+    }
+    var card = dialog.card;
+    var close = dialog.close;
+    var field = dialog.field;
+    card.appendChild(el('h3', '', 'Change the override PIN'));
+    card.appendChild(el('p', '', 'The PIN turns on full-app mode in the AI helper: people type /override and ' +
+      'the PIN. Type the current PIN, then the new one (4 to 20 letters or digits).'));
+    var current = field('Current override PIN', 'password');
+    var fresh = field('New override PIN (4 to 20 letters or digits)', 'text');
+    var make = el('a', 'aic-link', 'Make one up');
+    make.onclick = function() {
+      fresh.value = randomChars(12);
+    };
+    card.appendChild(make);
+    var endRow = el('label', 'aic-check');
+    var endFull = el('input');
+    endFull.type = 'checkbox';
+    endRow.appendChild(endFull);
+    endRow.appendChild(el('span', '', ' Also turn full-app mode off for everyone right now (use this if ' +
+      'the old PIN leaked)'));
+    card.appendChild(endRow);
+    var message = el('div', 'aic-error');
+    card.appendChild(message);
+    var buttons = el('div', 'aic-buttons');
+    var cancel = el('button', '', 'Cancel');
+    var go = el('button', 'aic-primary', 'Change PIN');
+    buttons.appendChild(cancel);
+    buttons.appendChild(go);
+    card.appendChild(buttons);
+    cancel.onclick = close;
+
+    function done(newPin, endedFull) {
+      card.textContent = '';
+      card.appendChild(el('h3', '', 'Override PIN changed'));
+      card.appendChild(el('p', '', 'The new PIN is:'));
+      card.appendChild(el('div', 'aic-newcode', newPin));
+      card.appendChild(el('p', '', 'Tell the people who need it. They type /override and the PIN in the AI ' +
+        'helper. ' + (endedFull ? 'Full-app mode was turned off for everyone; they can turn it on again with the ' +
+        'new PIN.' : 'Anyone already in full-app mode keeps it until their hour is up.')));
+      var row = el('div', 'aic-buttons');
+      var copy = el('button', '', 'Copy');
+      copy.onclick = function() {
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(newPin).then(function() { copy.textContent = 'Copied'; });
+        }
+      };
+      var ok = el('button', 'aic-primary', 'Done');
+      ok.onclick = close;
+      row.appendChild(copy);
+      row.appendChild(ok);
+      card.appendChild(row);
+    }
+
+    function submit() {
+      message.textContent = '';
+      var newPin = fresh.value;
+      go.disabled = true;
+      fetch('/collab/ai/pin', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({current: current.value, new: newPin, endFull: endFull.checked})
+      }).then(function(r) {
+        return r.json().catch(function() { return {error: 'Unexpected answer.'}; });
+      }).then(function(result) {
+        go.disabled = false;
+        if (result.ok) {
+          done(newPin, !!result.endedFull);
+        } else {
+          message.textContent = result.error || 'The PIN could not be changed.';
+        }
+      }, function() {
+        go.disabled = false;
+        message.textContent = 'Could not reach the App Inventor server.';
+      });
+    }
+    go.onclick = submit;
+    [current, fresh].forEach(function(input) {
+      input.onkeydown = function(e) {
+        if (e.key === 'Enter') {
+          submit();
+        }
+      };
+    });
+    document.body.appendChild(dialog.backdrop);
     current.focus();
   }
 
@@ -1032,6 +1145,13 @@
       changeCodeDialog();
     };
     actions.appendChild(codeLink);
+    actions.appendChild(el('br'));
+    var pinLink = el('a', '', 'Change override PIN…');
+    pinLink.onclick = function(ev) {
+      ev.stopPropagation();
+      changePinDialog();
+    };
+    actions.appendChild(pinLink);
     body.appendChild(actions);
     panel.appendChild(body);
   }

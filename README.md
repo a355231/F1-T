@@ -88,13 +88,13 @@ components and documentation, draw pictures, and ask you a question when it need
 
 ```
 sudo /opt/appinventor/set-ai.sh            # the OpenRouter key and the model name
-sudo /opt/appinventor/set-ai.sh --pin      # the PIN that unlocks full-app mode
+sudo /opt/appinventor/set-ai.sh --pin      # the PIN that unlocks full-app mode (also Change override PIN in the Team panel)
 sudo /opt/appinventor/set-ai.sh --search   # optional: a Brave Search key for web search
 sudo /opt/appinventor/set-ai.sh --status   # what is set
 ```
 
-Keys and the PIN are stored in `/opt/appinventor/ai.env`, readable only by root. They are never in the source,
-and never reach a browser or the model. Questions are limited to 12 a minute per person and 300 a day for the
+The keys are stored in `/opt/appinventor/ai.env` (readable only by root), and the PIN in `/opt/appinventor/overridepin`
+(readable only by the user App Inventor runs as). Neither is in the source, and neither reaches a browser or the model. Questions are limited to 12 a minute per person and 300 a day for the
 team. The project's screen files, your questions, and any pictures you attach are sent to the model service
 when you ask.
 

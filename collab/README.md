@@ -3,7 +3,7 @@
 This repository is MIT App Inventor 2 with one addition: two or three people can work on the same
 project at the same time from their own computers. Everyone uses the normal App Inventor
 interface, with the same menus as MIT's site. The additions are a small **Team** panel in the
-bottom-left corner (with **Share this project…** and **Change team code…** links), and a coloured
+bottom-left corner (with **Share this project…**, **Change team code…** and **Change override PIN…** links), and a coloured
 mouse cursor with a name for each teammate who is working in the same project.
 
 ## What is shared live
@@ -374,15 +374,19 @@ names, not whether the blocks do what you intended; App Inventor still reports b
 
 Set it up on the Pi:
 * `sudo /opt/appinventor/set-ai.sh` asks for the OpenRouter key and the model name.
-* `sudo /opt/appinventor/set-ai.sh --pin` asks for the full-app PIN (typing is hidden).
+* `sudo /opt/appinventor/set-ai.sh --pin` asks for the full-app PIN (typing is hidden). Anyone in the Team
+  panel can change it too: **Change override PIN…** asks for the current PIN, then the new one (or makes one
+  up), and the new PIN works at once. Wrong guesses share the lock that `/override` has. **Also turn full-app
+  mode off for everyone** ends it for people already in it, for when the old PIN has leaked.
 * `sudo /opt/appinventor/set-ai.sh --search` asks for a Brave Search key (free plan is enough). This is
   optional. Get one at https://brave.com/search/api/.
 * `--status` shows what is set. `--off` turns the helper off and removes the key, PIN and search key.
 * Pictures made here need `librsvg2-bin`; the Pi build installs it. If it is missing:
   `sudo apt install librsvg2-bin`.
 
-Keys, the model and the PIN are stored in `/opt/appinventor/ai.env`, readable only by root, and are
-**not in the source**. They never reach a browser or the model. Questions are limited to 12 a minute
+Keys and the model are stored in `/opt/appinventor/ai.env`, readable only by root. The PIN is stored in
+`/opt/appinventor/overridepin`, readable only by the user App Inventor runs as, which is how the Team panel
+can change it without a restart (an older PIN in `ai.env` is used only until one is saved). Both are **not in the source**. They never reach a browser or the model. Questions are limited to 12 a minute
 per person and 300 a day for the team (a goal counts as five). Anyone with the team code can use the
 helper; the PIN is what unlocks full-app mode.
 
