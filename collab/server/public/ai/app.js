@@ -297,7 +297,7 @@
     var actions = el('div', 'actions');
     var btn = el('button', 'apply', 'Apply');
     btn.type = 'button';
-    var note = el('span', 'note', 'Backed up first · everyone reloads');
+    var note = el('span', 'note', 'Backed up first · App Inventor reloads by itself');
     btn.onclick = function () {
       btn.disabled = true;
       btn.innerHTML = '<span class="spin"></span>Applying…';
@@ -308,7 +308,11 @@
           if (x.ok && x.data.ok) {
             card.classList.add('applied');
             btn.replaceWith(el('span', 'done-tag', '✓ Applied'));
-            note.textContent = 'Everyone is reloading their page';
+            note.textContent = 'The App Inventor tab reloads by itself to show it';
+            // The App Inventor window that opened this one reloads too, in case the team server's message did not come.
+            if (window.opener && !window.opener.closed) {
+              window.opener.postMessage({t: 'aicollab-applied', projectId: projectId}, location.origin);
+            }
           } else {
             btn.disabled = false;
             btn.textContent = 'Apply';

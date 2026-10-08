@@ -471,14 +471,24 @@ public final class Collab {
     return form == null || !form.isLoadComplete() ? "" : form.getRawFileContent();
   }
 
-  /** Writes this client's unsaved edits to the server now (used before a teammate reloads). */
-  private static void saveNow() {
+  /**
+   * Saves the open editors that have changes, then calls done (a JavaScript function, or null) once that has
+   * finished. collab.js uses it to make sure nothing unsaved is left before an AI change goes in.
+   */
+  private static void saveNow(final com.google.gwt.core.client.JavaScriptObject done) {
     Ode.getInstance().getEditorManager().saveDirtyEditors(new com.google.gwt.user.client.Command() {
       @Override
       public void execute() {
+        if (done != null) {
+          callBack(done);
+        }
       }
     });
   }
+
+  private static native void callBack(com.google.gwt.core.client.JavaScriptObject done) /*-{
+    done();
+  }-*/;
 
   /**
    * Called by collab.js when the hub says who the main client of the project is.
@@ -553,7 +563,7 @@ public final class Collab {
     $wnd.AICollab_projectIdByName = $entry(@com.google.appinventor.client.collab.Collab::projectIdByName(Ljava/lang/String;));
     $wnd.AICollab_pushCompanion = $entry(@com.google.appinventor.client.collab.Collab::pushCompanion(Ljava/lang/String;Ljava/lang/String;));
     $wnd.AICollab_goTo = $entry(@com.google.appinventor.client.collab.Collab::goTo(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;));
-    $wnd.AICollab_saveNow = $entry(@com.google.appinventor.client.collab.Collab::saveNow());
+    $wnd.AICollab_saveNow = $entry(@com.google.appinventor.client.collab.Collab::saveNow(Lcom/google/gwt/core/client/JavaScriptObject;));
     $wnd.AICollab_getContext = $entry(@com.google.appinventor.client.collab.Collab::getContext());
     if ($wnd.AICollab && $wnd.AICollab.bridgeReady) {
       $wnd.AICollab.bridgeReady();

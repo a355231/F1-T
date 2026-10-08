@@ -48,6 +48,33 @@ const PROJECT_FILES = {
   'youngandroidproject/project.properties': 'main=a.Screen1\nname=Pong\n',
 };
 
+// The project's files as the server gives them to the helper: designer, blocks and properties files, sorted, a
+// page of up to 3 MB at a time, with "next" naming the last file of a page (see /bundle in CollabServlet).
+const BUNDLE_PAGE = 3 * 1024 * 1024;
+function bundlePage(files, after) {
+  const names = Object.keys(files).filter(f => /\.(scm|bky)$|project\.properties$/.test(f)).sort();
+  const out = {};
+  let total = 0;
+  let last = null;
+  for (const name of names) {
+    if (after !== null && name <= after) continue;
+    const size = Buffer.byteLength(files[name]);
+    if (total > 0 && total + size > BUNDLE_PAGE) return {ok: true, files: out, next: last};
+    total += size;
+    out[name] = files[name];
+    last = name;
+  }
+  return {ok: true, files: out, next: null};
+}
+
+// A blocks file of about kb kilobytes: valid, made of text blocks of a kilobyte each.
+function bigBlocks(kb) {
+  const block = '<block type="text"><field name="TEXT">' + 'a'.repeat(1000) + '</field></block>';
+  let xml = '<xml xmlns="https://developers.google.com/blockly/xml">';
+  while (xml.length < kb * 1024) xml += block;
+  return xml + '</xml>';
+}
+
 // A model that sends a few words and then goes quiet without ending the answer.
 const STALL = Symbol('stall');
 // A body whose pieces arrive every gap ms: count words, then the end (or never, when count is Infinity).
@@ -110,7 +137,8 @@ function setup(script, options = {}) {
   process.env.AI_PIN_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pin-')), 'overridepin');
   if (options.vision !== undefined) process.env.AI_VISION = options.vision;
   else delete process.env.AI_VISION;
-  const {models, vision, files: projectFiles, ...rest} = options;
+  const {models, vision, files: projectFiles, bundleFailures: failures = 0, ...rest} = options;
+  let bundleFailures = failures;
   const modelList = models || [{id: 'some/model', architecture: {input_modalities: ['text']}}];
   let now = 1000000000000;
   const asked = [];
@@ -122,7 +150,13 @@ function setup(script, options = {}) {
       return {userId: 'u-' + name, email: name + '@team.local'};
     }
     if (path.startsWith('/ode/collab/access')) return {ok: true, projectName: 'Pong'};
-    if (path.startsWith('/ode/collab/bundle')) return {ok: true, files: projectFiles || PROJECT_FILES};
+    if (path.startsWith('/ode/collab/bundle')) {
+      if (bundleFailures > 0) {
+        bundleFailures--;
+        return null;
+      }
+      return bundlePage(projectFiles || PROJECT_FILES, new URL(path, 'http://x').searchParams.get('after'));
+    }
     if (path.startsWith('/ode/collab/files')) return {files: Object.keys(PROJECT_FILES).map(p => ({path: p, bytes: PROJECT_FILES[p].length}))};
     if (path.startsWith('/ode/collab/file?')) return {text: 'file text', bytes: 9};
     if (path.startsWith('/ode/collab/rawfile')) return {ok: true, path: 'assets/logo.png', mime: 'image/png', bytes: 40, data: PNG_B64};
@@ -145,7 +179,8 @@ function setup(script, options = {}) {
     return {ok: true, body: sseBody(turn)};
   };
   const ai = new Assistant(Object.assign({ask, hub, fetchImpl, now: () => now, log: () => {}, retryWaitMs: 5}, rest));
-  return {ai, asked, calls, hub, pinFile: process.env.AI_PIN_FILE, advance: ms => { now += ms; }};
+  return {ai, asked, calls, hub, pinFile: process.env.AI_PIN_FILE, advance: ms => { now += ms; },
+    failBundles: n => { bundleFailures = n; }};
 }
 
 async function say(ai, who, text, projectId = '5') {
@@ -427,6 +462,124 @@ test('if the new PIN cannot be saved, nothing changes and the old PIN still work
   assert.strictEqual(r.status, 500);
   assert.match(r.body.error, /nothing has changed/);
   assert.match(texts(await say(t.ai, 'ann', '/override ' + PIN_VALUE)), /Full-app mode is on/);
+});
+
+// ---- sizes: a normal project, with big screens, can be read and changed ----
+
+const BIG_SCREEN_EDIT = {path: 'src/a/Screen1.bky', old: '</xml>', new: '<block type="text"><field name="TEXT">hi</field></block></xml>'};
+
+test('a project bigger than one bundle page is read in full, and a big screen can still be changed', async () => {
+  const files = Object.assign({}, PROJECT_FILES, {'src/a/Screen1.bky': bigBlocks(1600), 'src/a/Screen2.scm': SCM,
+    'src/a/Screen2.bky': bigBlocks(1600)});
+  const t = setup([
+    toolTurn('draft_replace', BIG_SCREEN_EDIT, 'r1'),
+    toolTurn('propose_draft', {summary: 'A block on the main screen'}, 'p1'),
+    textTurn('Press Apply.'),
+  ], {files});
+  const evs = await say(t.ai, 'ann', 'add a block to the main screen');
+  assert.ok(!toolErr(evs), 'the change is not refused for its size');
+  const proposal = evs.find(e => e.type === 'proposal');
+  assert.deepStrictEqual(proposal.files, [{path: 'src/a/Screen1.bky', isNew: false}]);
+  assert.strictEqual(t.asked.filter(a => a.path.startsWith('/ode/collab/bundle')).length, 2, 'read in two pages');
+});
+
+test('in full-app mode, one change may touch several big screens, as long as all of it is under 8 MB', async () => {
+  const files = Object.assign({}, PROJECT_FILES, {'src/a/Screen1.bky': bigBlocks(1500), 'src/a/Screen2.scm': SCM,
+    'src/a/Screen2.bky': bigBlocks(1500)});
+  const t = setup([
+    toolTurn('draft_replace', BIG_SCREEN_EDIT, 'r1'),
+    toolTurn('draft_replace', Object.assign({}, BIG_SCREEN_EDIT, {path: 'src/a/Screen2.bky'}), 'r2'),
+    toolTurn('propose_draft', {summary: 'A block on each screen', complete: true}, 'p1'),
+    textTurn('Press Apply.'),
+  ], {files});
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  const evs = await say(t.ai, 'ann', 'add a block to both screens');
+  assert.ok(!toolErr(evs), 'neither change is refused: ' + JSON.stringify(toolErr(evs)));
+  assert.strictEqual(evs.filter(e => e.type === 'proposal').length, 1);
+});
+
+test('a file over 2 MB cannot be changed by the helper, and the reason says so in plain words', async () => {
+  const t = setup([
+    toolTurn('draft_replace', {path: 'src/a/Screen1.bky', old: '</xml>', new: 'x'.repeat(2.1 * 1024 * 1024) + '</xml>'}, 'r1'),
+    textTurn('I will split the change.'),
+  ]);
+  const evs = await say(t.ai, 'ann', 'add a very long text');
+  assert.match(toolErr(evs).detail, /over 2 MB, more than the helper can change/);
+  assert.doesNotMatch(JSON.stringify(evs), /too big/);
+});
+
+test('a read that fails is tried once more, and the change goes on', async () => {
+  const t = setup([
+    toolTurn('draft_replace', BIG_SCREEN_EDIT, 'r1'),
+    toolTurn('propose_draft', {summary: 'A block'}, 'p1'),
+    textTurn('Press Apply.'),
+  ], {bundleFailures: 1});
+  const evs = await say(t.ai, 'ann', 'add a block');
+  assert.ok(evs.some(e => e.type === 'proposal'), 'the proposal is made after the second try');
+  assert.strictEqual(t.asked.filter(a => a.path.startsWith('/ode/collab/bundle')).length, 2);
+});
+
+test('in full-app mode, a read that fails at the start of a message carries on from the copy kept from before', async () => {
+  const t = setup([
+    toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
+    textTurn('Started the quiz screen.'),
+    textTurn('Next, the score.'),
+    textTurn('Still going.'),
+    textTurn('That is all for now.'),
+    textTurn('The score is next.'),
+  ]);
+  await say(t.ai, 'ann', '/override ' + PIN_VALUE);
+  await say(t.ai, 'ann', 'start a quiz app');
+  t.failBundles(2);
+  const evs = await say(t.ai, 'ann', 'what is next?');
+  assert.ok(!evs.some(e => e.type === 'error'), 'the answer is not lost');
+  assert.match(texts(evs), /The score is next\./);
+  assert.ok(evs.some(e => e.type === 'status' && /copy from before/.test(e.text)));
+});
+
+test('the same tool calls over and over are a loop; a single short answer is not', async () => {
+  const t = setup(Array.from({length: 12}, (_, i) => toolTurn('list_files', {}, 'L' + i)));
+  const evs = await say(t.ai, 'ann', 'look around');
+  assert.strictEqual(t.calls.length, 8);
+  assert.match(evs.find(e => e.type === 'status').text, /repeating the same step/);
+});
+
+// ---- an AI change goes in only once every open tab has saved what it had ----
+
+test('an AI change waits until every open tab has saved, then goes in, and the open tabs reload', async () => {
+  const t = setup([
+    toolTurn('draft_replace', BIG_SCREEN_EDIT, 'r1'),
+    toolTurn('propose_draft', {summary: 'A block'}, 'p1'),
+    textTurn('Press Apply.'),
+  ]);
+  const sent = [];
+  t.hub.send = (id, msg) => sent.push({id, msg});
+  const ann = t.hub.addClient({userId: 'u-ann', email: 'ann@team.local'});
+  t.hub.join(ann.id, '5', {projectName: 'Pong', ownerEmail: 'ann@team.local'});
+  const proposal = (await say(t.ai, 'ann', 'add a block')).find(e => e.type === 'proposal');
+  const applying = apply(t.ai, 'ann', proposal.id);
+  await until(() => sent.some(s => s.msg.t === 'freeze' && s.msg.flush));   // the tabs are asked to save
+  const freeze = sent.find(s => s.msg.t === 'freeze' && s.msg.flush).msg;
+  assert.strictEqual(t.asked.filter(a => a.path.startsWith('/ode/collab/writefiles')).length, 0, 'nothing is written yet');
+  t.hub.ackFlush(ann.id, freeze.applyId);
+  assert.strictEqual((await applying).status, 200);
+  assert.strictEqual(t.asked.filter(a => a.path.startsWith('/ode/collab/writefiles')).length, 1);
+  assert.ok(sent.some(s => s.msg.t === 'reload' && s.id === ann.id), 'the open tab reloads to show the change');
+});
+
+test('a tab that does not answer does not hold an AI change for long', async () => {
+  const t = setup([
+    toolTurn('draft_replace', BIG_SCREEN_EDIT, 'r1'),
+    toolTurn('propose_draft', {summary: 'A block'}, 'p1'),
+    textTurn('Press Apply.'),
+  ], {flushMs: 30});
+  t.hub.send = () => {};
+  const ann = t.hub.addClient({userId: 'u-ann', email: 'ann@team.local'});
+  t.hub.join(ann.id, '5', {projectName: 'Pong', ownerEmail: 'ann@team.local'});
+  const proposal = (await say(t.ai, 'ann', 'add a block')).find(e => e.type === 'proposal');
+  const started = Date.now();
+  assert.strictEqual((await apply(t.ai, 'ann', proposal.id)).status, 200);
+  assert.ok(Date.now() - started < 2000, 'it went in after the wait, not after a minute');
 });
 
 test('/goal with nothing after it asks for the goal', async () => {

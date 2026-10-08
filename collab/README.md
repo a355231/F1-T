@@ -289,7 +289,9 @@ and prints your `https://….ts.net` address. Both links work at the same time.
 Press **Ctrl+I+M** (hold Ctrl and I, then M), or click **AI helper** in the Team panel, to open it in
 its own window. It works on the project that is open, and its answers stream in as they are written,
 like a chat app. The helper works on a draft copy of the project. A change reaches the project only when
-someone presses **Apply**; then the project is backed up first and everyone reloads.
+someone presses **Apply**. Then the project is backed up, every open App Inventor tab saves what it has, the
+change goes in, and the tabs reload by themselves: nobody needs to reload by hand. The helper's window tells the
+App Inventor tab that opened it as well, in case that tab's connection to the team server missed the message.
 
 **What it can do**
 
@@ -309,7 +311,9 @@ someone presses **Apply**; then the project is backed up first and everyone relo
   and pictures you attach. Attach with the paperclip, paste, or drop them on the box: up to three, PNG,
   JPEG, GIF or WebP, 1.5 MB each. The paperclip only shows when the model can look at pictures.
 * **Ask you a question** when it needs a choice, such as a colour. You answer in your next message.
-* **Propose changes.** Nothing changes until someone presses Apply.
+* **Propose changes.** Nothing changes until someone presses Apply. Size is not a reason to refuse a change: a
+  file may be up to 2 MB (a big screen is fine), and the files of one change may add up to 8 MB. The project is
+  read a page at a time, so its total size alone does not stop the helper.
 * **`/goal`** works toward a goal in several steps. It shows a plan that ticks off as it goes, a timer
   and a Stop button. It stops after 40 steps or 20 minutes, unless full-app mode is on. Closing the window
   stops the goal.

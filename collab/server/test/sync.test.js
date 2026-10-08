@@ -86,6 +86,19 @@ test('backups are due only for projects with changes since the last backup', () 
   assert.deepStrictEqual(hub.backupsDue(), []);
 });
 
+test('an AI change waits until every open tab has saved, or for a few seconds, whichever is first', async () => {
+  const {hub, pair} = setup();
+  const {a, b} = pair();
+  const answered = hub.awaitFlush('5', 'f1', 5000);
+  hub.ackFlush(a.id, 'f1');
+  hub.ackFlush(b.id, 'f1');
+  await answered;
+  const started = Date.now();
+  await hub.awaitFlush('5', 'f2', 40);   // nobody answers
+  assert.ok(Date.now() - started >= 30);
+  await hub.awaitFlush('404', 'f3', 5000);   // nobody has that project open: nothing to wait for
+});
+
 test('restoring starts the session over and tells everyone to reload', () => {
   const {hub, all, pair} = setup();
   const {a, b} = pair();

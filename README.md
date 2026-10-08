@@ -65,7 +65,8 @@ the fixed-address section of [collab/README.md](collab/README.md).
 
 Press **Ctrl+I+M**, or choose **AI helper** in the Team panel. The helper works on the project that is open.
 It answers as it writes, and works on a draft copy: a change reaches the project only when someone presses
-**Apply**. The project is backed up first, and everyone reloads.
+**Apply**. The project is backed up first, every open App Inventor tab saves what it has, and the tabs reload by
+themselves to show the change.
 
 It can read and check the project, add and change components and blocks in App Inventor's own format, look up
 components and documentation, draw pictures, and ask you a question when it needs a choice.

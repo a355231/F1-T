@@ -328,6 +328,10 @@ function onConnection(ws, me, cookie) {
       case 'cursor':
         hub.cursor(client.id, msg);
         break;
+      case 'flushed':
+        // This tab has saved what it had, ready for an AI change (see Assistant.apply in ai.js).
+        hub.ackFlush(client.id, String(msg.applyId || ''));
+        break;
       case 'codechanged': {
         // Do not take the browser's word for it: ask App Inventor whether this person really just
         // changed the code, and whether everyone was signed out.

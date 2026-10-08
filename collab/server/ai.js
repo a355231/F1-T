@@ -89,6 +89,7 @@ const PIN_MAX_WRONG = 5;
 const PIN_LOCK_MS = 15 * 60 * 1000;
 // A model that sends nothing for this long is cut off, and no single answer may run longer than TURN_MS.
 const IDLE_MS = 60 * 1000;
+const FLUSH_MS = 6 * 1000;          // an AI change waits this long for every open tab to save what it has
 const TURN_MS = 10 * 60 * 1000;     // one model answer can run for minutes on a slow model; a longer one is cut off
 const STALLED = 'The AI service stopped sending its answer, so it was cut off. Try asking again.';
 const TOO_LONG = 'That answer ran past the time limit and was cut off. Try asking for something smaller.';
@@ -307,11 +308,12 @@ function retryable(e) {
 }
 
 class Assistant {
-  constructor({ask, hub, fetchImpl, now, goalSteps, goalMs, searchImpl, idleMs, turnMs, retries, retryWaitMs, pingMs, orphanMs, keepMs, log}) {
+  constructor({ask, hub, fetchImpl, now, goalSteps, goalMs, searchImpl, idleMs, turnMs, retries, retryWaitMs, pingMs, orphanMs, keepMs, flushMs, log}) {
     this.ask = ask;
     this.hub = hub;
     this.fetch = fetchImpl || ((...a) => fetch(...a));
     this.now = now || Date.now;
+    this.flushMs = flushMs || FLUSH_MS;
     this.goalSteps = goalSteps || GOAL_STEPS;
     this.goalMs = goalMs || GOAL_MS;
     this.searchImpl = searchImpl || tools.webSearch;
@@ -732,7 +734,16 @@ class Assistant {
     let draft;
     if (full) {
       draft = this.fullDraft(me, projectId, ctx.cookie);
-      await draft.refresh();
+      try {
+        await draft.refresh();
+      } catch (e) {
+        if (!draft.base) {
+          emit({type: 'error', message: 'The project could not be read just now. Try again in a moment.'});
+          return;
+        }
+        // The unfinished app can carry on from the copy kept from the last message.
+        notes.push('The project could not be read just now, so this answer uses the copy from before.');
+      }
       if (draft.dropped.length) {
         notes.push('These files changed in the project while you were working on them, so your changes to them were dropped: ' +
           draft.dropped.join(', ') + '.');
@@ -1126,7 +1137,11 @@ class Assistant {
         'Type /override and the PIN, then ask again.'});
     }
     const who = me.email.split('@')[0] + ' (AI helper)';
-    this.hub.broadcastToProject(projectId, {t: 'freeze', by: who});
+    // Every open tab saves what it has first, then stops saving until it reloads. The change then goes in with
+    // nothing unsaved to be written over it, and nothing an editor had just changed is lost in the reload.
+    const applyId = crypto.randomBytes(6).toString('hex');
+    this.hub.broadcastToProject(projectId, {t: 'freeze', by: who, flush: true, applyId});
+    await this.hub.awaitFlush(projectId, applyId, this.flushMs);
     let failure = '';
     if (Object.keys(p.files).length) {
       // Only the hub can ask for full-app changes: App Inventor trusts this header from the hub alone.
@@ -1147,7 +1162,8 @@ class Assistant {
       this.hub.broadcastToProject(projectId, {t: 'reload', by: 'nobody'});   // unfreeze by reloading
       return json(400, {error: failure});
     }
-    this.hub.restored(projectId, who);
+    const told = this.hub.restored(projectId, who);
+    this.log(me.email.split('@')[0] + ' applied an AI change to project ' + projectId + '; ' + told + ' open tab(s) told to reload');
     return json(200, {ok: true});
   }
 }

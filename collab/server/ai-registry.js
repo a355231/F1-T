@@ -8,8 +8,10 @@
 const proj = require('./ai-project');
 const tools = require('./ai-tools');
 
-const MAX_DRAFT_FILE = 400 * 1024;
-const MAX_FULL_BYTES = 1536 * 1024;
+// Size limits are for safety, not tidiness: a normal project's screens can be a few hundred KB each, and a
+// change to one of them (adding a handler to the main screen, say) must not be refused for its size.
+const MAX_DRAFT_FILE = 2 * 1024 * 1024;     // one file
+const MAX_CHANGE_BYTES = 8 * 1024 * 1024;   // all the files of one change, together
 const SMALL_FILES = 3;
 const FULL_FILES = 12;
 const FULL_SCREENS = 4;
@@ -32,7 +34,7 @@ function checkChange(base, files, full) {
       throw new Error(p + ' is not a designer or blocks file (.scm or .bky) under src/');
     }
     const bytes = Buffer.byteLength(text);
-    if (bytes > MAX_DRAFT_FILE) throw new Error(p + ' is too big (over 400 KB)');
+    if (bytes > MAX_DRAFT_FILE) throw new Error(p + ' is over 2 MB, more than the helper can change');
     total += bytes;
     if (base.has(p)) {
       if (!full && bytes > Buffer.byteLength(base.get(p)) * 1.5 + 4096) {
@@ -44,7 +46,7 @@ function checkChange(base, files, full) {
       if (p.endsWith('.scm')) screens++;
     }
   }
-  if (full && total > MAX_FULL_BYTES) throw new Error('that change is too big at once; build a smaller first version');
+  if (total > MAX_CHANGE_BYTES) throw new Error('the files of this change add up to over 8 MB, the most one change can hold');
   if (screens > FULL_SCREENS) throw new Error('at most ' + FULL_SCREENS + ' new screens at a time');
 }
 
@@ -67,13 +69,22 @@ class Draft {
     await this.refresh();
   }
 
-  // Reads the project as it is now. A draft kept from an earlier message is kept on top of it, except for a
-  // file that someone else has changed since the helper first changed it: that change is dropped, and the
-  // file is listed in dropped, so that the helper can tell the person.
+  // Reads the project as it is now, a page at a time (a big project does not fit in one reply). A read that fails
+  // is tried once more. A draft kept from an earlier message is kept on top of the project, except for a file that
+  // someone else has changed since the helper first changed it: that change is dropped, and the file is listed in
+  // dropped, so that the helper can tell the person.
   async refresh() {
-    const out = await this.ask('/ode/collab/bundle?projectId=' + this.projectId, this.cookie);
-    if (!out || !out.ok) throw new Error('the project could not be read (it may be too big for the helper)');
-    const fresh = new Map(Object.entries(out.files || {}));
+    const fresh = new Map();
+    let after = '';
+    for (;;) {
+      const query = '/ode/collab/bundle?projectId=' + this.projectId + (after ? '&after=' + encodeURIComponent(after) : '');
+      let out = await this.ask(query, this.cookie);
+      if (!out || !out.ok) out = await this.ask(query, this.cookie);
+      if (!out || !out.ok) throw new Error('the project could not be read just now (App Inventor did not answer); try again in a moment');
+      for (const [path, text] of Object.entries(out.files || {})) fresh.set(path, text);
+      if (typeof out.next !== 'string' || !out.next || out.next <= after) break;
+      after = out.next;
+    }
     for (const path of [...this.changed.keys()]) {
       const was = this.origin.has(path) ? this.origin.get(path) : null;
       const now = fresh.has(path) ? fresh.get(path) : null;

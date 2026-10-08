@@ -95,6 +95,52 @@
 
   // ---- messages from the hub ----
 
+  // Before the AI helper's change goes in: save what is open, then stop saving until the page reloads. Without the
+  // save, an edit made a moment before would be lost in the reload. The hub waits for the answer, or a few seconds.
+  function saveThenFreeze(applyId) {
+    var answered = false;
+    function answer() {
+      if (answered) {
+        return;
+      }
+      answered = true;
+      window.AICollab_frozen = true;
+      C.send({t: 'flushed', applyId: applyId});
+    }
+    setTimeout(answer, 5000);
+    if (window.AICollab_saveNow) {
+      window.AICollab_saveNow(answer);
+    } else {
+      answer();
+    }
+  }
+
+  // Reloads this page to show a change that is in. Once only. Nothing is saved on the way out: the saves were made
+  // before the change went in, and saving now would write the old copy over it.
+  var reloading = false;
+  function reloadSoon(text) {
+    window.AICollab_frozen = true;
+    banner('restore', text);
+    if (reloading) {
+      return;
+    }
+    reloading = true;
+    setTimeout(function() { window.location.reload(); }, 1200);
+  }
+
+  // The AI helper, opened from this page, says when its change is in: reload, in case the team server's message did
+  // not come.
+  window.addEventListener('message', function(e) {
+    if (e.origin !== window.location.origin || !e.data || e.data.t !== 'aicollab-applied') {
+      return;
+    }
+    var ctx = context();   // the project this page has open, joined to the team server or not
+    if (!ctx || String(e.data.projectId) !== String(ctx.projectId)) {
+      return;
+    }
+    reloadSoon('Loading the change the AI helper made…');
+  });
+
   C.onExtra = function(msg) {
     switch (msg.t) {
       case 'joined':
@@ -148,14 +194,20 @@
         onResync(msg);
         break;
       case 'freeze':
-        window.AICollab_frozen = true;
-        banner('restore', (msg.by || 'A teammate') + ' is going back to an earlier version of ' +
-            'this project. Saving is paused; the page reloads in a moment.');
+        if (msg.flush) {
+          saveThenFreeze(msg.applyId);
+          banner('restore', 'The AI helper is applying a change. Saving is paused for a moment; this page ' +
+              'reloads when the change is in.');
+        } else {
+          window.AICollab_frozen = true;
+          banner('restore', (msg.by || 'A teammate') + ' is going back to an earlier version of ' +
+              'this project. Saving is paused; the page reloads in a moment.');
+        }
         break;
       case 'reload':
-        window.AICollab_frozen = true;
-        banner('restore', 'Loading the restored version…');
-        setTimeout(function() { window.location.reload(); }, 1200);
+        reloadSoon(msg.by === 'nobody' ? 'The AI helper\'s change could not be added. Reloading the saved project…' :
+            /AI helper/.test(msg.by || '') ? 'Loading the change the AI helper made…' :
+            'Loading the restored version…');
         break;
       default:
         return;

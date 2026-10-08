@@ -183,3 +183,11 @@ test('a project search with a pattern that could take very long is refused; simp
   assert.match((await run('search_project', {query: '(', regex: true}, c)).text, /not a valid pattern/);
   assert.match((await run('search_project', {query: 'Label\\d+', regex: true}, c)).text, /Screen1\.scm/);
 });
+
+test('the files of one change may add up to 8 MB, and not more', () => {
+  const keys = [1, 2, 3, 4, 5].map(i => 'src/a/S' + i + '.bky');
+  const base = new Map(keys.map(k => [k, 'x']));
+  const change = n => new Map(keys.slice(0, n).map(k => [k, 'x'.repeat(1900 * 1024)]));
+  assert.doesNotThrow(() => registry.checkChange(base, change(4), true));
+  assert.throws(() => registry.checkChange(base, change(5), true), /over 8 MB/);
+});

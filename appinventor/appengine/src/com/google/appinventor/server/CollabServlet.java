@@ -11,6 +11,7 @@ import com.google.appinventor.shared.rpc.user.User;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.logging.Level;
@@ -221,28 +222,41 @@ public class CollabServlet extends OdeServlet {
           return;
         }
         case "/bundle": {
-          // Every designer, blocks and properties file of the project in one reply (for the AI helper).
+          // Every designer, blocks and properties file of the project, for the AI helper. A big project does not
+          // fit in one reply, so the files come a page at a time: a page holds up to MAX_BUNDLE_BYTES, and "next"
+          // is the name to pass as "after" to get the next page (null when there are no more).
           long projectId = projectId(req);
           storageIo.assertUserHasProject(userId, projectId);
+          List<String> names = new ArrayList<>();
+          for (String f : storageIo.getProjectSourceFiles(userId, projectId)) {
+            if (f.endsWith(".scm") || f.endsWith(".bky") || f.endsWith("project.properties")) {
+              names.add(f);
+            }
+          }
+          Collections.sort(names);
+          String after = req.getParameter("after");
           JSONObject out = new JSONObject();
           int total = 0;
-          for (String f : storageIo.getProjectSourceFiles(userId, projectId)) {
-            if (!(f.endsWith(".scm") || f.endsWith(".bky") || f.endsWith("project.properties"))) {
+          String last = null;
+          String next = null;
+          for (String f : names) {
+            if (after != null && f.compareTo(after) <= 0) {
               continue;
             }
             byte[] content = storageIo.downloadRawFile(userId, projectId, f);
             if (content == null) {
               continue;
             }
-            total += content.length;
-            if (total > MAX_BUNDLE_BYTES) {
-              send(resp, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
-                  error("the project is too big to read at once"));
-              return;
+            if (total > 0 && total + content.length > MAX_BUNDLE_BYTES) {
+              next = last;   // this file begins the next page
+              break;
             }
-            out.put(f, new String(content, java.nio.charset.StandardCharsets.UTF_8));
+            total += content.length;
+            out.put(f, new String(content, StandardCharsets.UTF_8));
+            last = f;
           }
-          send(resp, 200, new JSONObject().put("ok", true).put("files", out));
+          send(resp, 200, new JSONObject().put("ok", true).put("files", out)
+              .put("next", next == null ? JSONObject.NULL : next));
           return;
         }
         case "/rawfile": {
@@ -355,14 +369,16 @@ public class CollabServlet extends OdeServlet {
   }
 
   private static final int MAX_WRITE_FILES = 3;
-  private static final int MAX_WRITE_BYTES = 400 * 1024;
+  // Big screens are normal in a team's project; a change to one (a new handler on the main screen) must go through.
+  private static final int MAX_WRITE_BYTES = 2 * 1024 * 1024;
   // Full-app mode (see collab/server/ai.js): the hub sends this header only for a change that a
   // person asked the AI helper to make after entering the PIN. The hub removes it from anything a
   // browser sends, so nobody else can ask for it.
   private static final String AI_MODE_HEADER = "x-collab-ai-mode";
   private static final int FULL_MAX_FILES = 12;
   private static final int FULL_MAX_NEW_SCREENS = 4;
-  private static final int FULL_MAX_BYTES = 1536 * 1024;
+  private static final int MAX_CHANGE_BYTES = 8 * 1024 * 1024;  // all the files of one change, together
+  private static final int MAX_BODY_BYTES = 12 * 1024 * 1024;  // the JSON of one change, escaping included
   private static final Pattern NEW_SCREEN_FILE =
       Pattern.compile("[A-Za-z][A-Za-z0-9_]*\\.(scm|bky)");
 
@@ -383,7 +399,7 @@ public class CollabServlet extends OdeServlet {
     java.io.Reader reader = req.getReader();
     while ((n = reader.read(buf)) > 0) {
       body.append(buf, 0, n);
-      if (body.length() > 2 * 1024 * 1024) {
+      if (body.length() > MAX_BODY_BYTES) {
         send(resp, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, error("too large"));
         return;
       }
@@ -437,7 +453,7 @@ public class CollabServlet extends OdeServlet {
       }
       int size = files.getString(path).getBytes(StandardCharsets.UTF_8).length;
       if (size > MAX_WRITE_BYTES) {
-        return path + " is too big for one change";
+        return path + " is over 2 MB, more than one change can hold";
       }
       totalBytes += size;
       if (existing.contains(path)) {
@@ -463,8 +479,8 @@ public class CollabServlet extends OdeServlet {
         }
       }
     }
-    if (full && totalBytes > FULL_MAX_BYTES) {
-      return "that change is too big at once";
+    if (totalBytes > MAX_CHANGE_BYTES) {
+      return "the files of this change add up to over 8 MB, the most one change can hold";
     }
     if (newScreens > FULL_MAX_NEW_SCREENS) {
       return "at most " + FULL_MAX_NEW_SCREENS + " new screens at a time";

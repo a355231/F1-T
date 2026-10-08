@@ -37,6 +37,7 @@ class Hub {
     this.clients = new Map();
     this.rooms = new Map();
     this.nextClient = 1;
+    this.flushWaits = new Map();   // applyId -> {waiting: Set of client ids, finish}
   }
 
   addClient({userId, email}) {
@@ -457,15 +458,41 @@ class Hub {
     if (room) room.backedSeq = seq;
   }
 
-  // A backup was restored: start the project's session over and send everyone's page to reload.
+  // A backup was restored: start the project's session over and send everyone's page to reload. Returns how many
+  // open tabs were told.
   restored(projectId, byName) {
     const room = this.rooms.get(String(projectId));
-    if (!room) return;
+    if (!room) return 0;
     room.log = [];
     room.seq = 0;
     room.backedSeq = 0;
     room.epoch = this.now().toString(36) + Math.random().toString(36).slice(2, 8);
     for (const m of room.members) this.send(m, {t: 'reload', by: byName});
+    return room.members.size;
+  }
+
+  // Before an AI change goes in, every open tab saves what it has and says so (ackFlush). Resolves when all of
+  // them have, or after ms, whichever comes first. A tab that is not open cannot hold anything unsaved.
+  awaitFlush(projectId, applyId, ms) {
+    const room = this.rooms.get(String(projectId));
+    const waiting = new Set(room ? room.members : []);
+    if (!waiting.size) return Promise.resolve();
+    return new Promise(resolve => {
+      const finish = () => {
+        clearTimeout(timer);
+        this.flushWaits.delete(applyId);
+        resolve();
+      };
+      const timer = setTimeout(finish, ms);
+      this.flushWaits.set(applyId, {waiting, finish});
+    });
+  }
+
+  ackFlush(clientId, applyId) {
+    const wait = this.flushWaits.get(applyId);
+    if (!wait) return;
+    wait.waiting.delete(clientId);
+    if (!wait.waiting.size) wait.finish();
   }
 
   // Tell everyone in a project something that makes their page start over (a restored backup).
