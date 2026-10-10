@@ -107,6 +107,54 @@ the install and the update from `collab/pi/mitstatus.sh`. Its model list is read
 always shows the models the hub is running with. `set-ai.sh --model smart|balanced|fast <name>` (or `--reset`) is what
 it uses for the models, and `collab/pi/test/mitstatus-test.sh` tests it, in a folder of its own.
 
+### Permanent address
+
+The Cloudflare quick link changes every time its tunnel restarts. For a link that never changes, set up one of these.
+MITSTATUS shows the permanent address when it finds one. When it finds none, it says to try Cloudflare and shows the
+temporary link.
+
+**Tailscale Funnel (no domain needed).** `stable-link.sh` sets it up. The address looks like
+`https://<pi-name>.<tailnet>.ts.net`.
+
+1. Install Tailscale and sign in: `curl -fsSL https://tailscale.com/install.sh | sh`, then `sudo tailscale up`. It
+   prints a sign-in link.
+2. Turn it on: `sudo /opt/appinventor/stable-link.sh`. The first time, open the link it prints and approve Funnel. That
+   adds Funnel to the tailnet's policy file, which only Owner, Admin or Network admin accounts can edit. Then run the
+   command again.
+3. It prints the address, and MITSTATUS shows it from then on. To turn it off: `sudo /opt/appinventor/stable-link.sh --off`.
+
+The address keeps working after a reboot. If the script says the hub does not have its second port yet, update the Pi
+first (the nightly update, or the install command).
+
+**Cloudflare named tunnel (your own domain).** Use a subdomain such as `app.yourdomain.com`, on a domain whose DNS is
+on Cloudflare. Run these as your normal user, not with `sudo`, unless a step says otherwise.
+
+1. `cloudflared tunnel login` opens a browser. Pick the domain.
+2. `cloudflared tunnel create team-edu` makes the tunnel and a credentials file in `~/.cloudflared/`, and prints the
+   tunnel's ID.
+3. `cloudflared tunnel route dns team-edu app.yourdomain.com` creates the DNS record.
+4. Write `~/.cloudflared/config.yml`:
+
+   ```yaml
+   tunnel: <ID from step 2>
+   credentials-file: /home/<your-user>/.cloudflared/<ID>.json
+   ingress:
+     - hostname: app.yourdomain.com
+       service: http://127.0.0.1:8080
+     - service: http_status:404
+   ```
+
+5. Install it as a service. `sudo` changes `$HOME`, so give the config path in full:
+   `sudo cloudflared --config /home/<your-user>/.cloudflared/config.yml service install`, then
+   `sudo systemctl start cloudflared`.
+6. Stop the quick tunnel so only one tunnel runs: `sudo systemctl disable --now cloudflared-quick`.
+
+MITSTATUS reads the hostname from that config (in your home folder, or in `/etc/cloudflared`). It shows it as the
+permanent link while the `cloudflared` service is running, and says so when it is not.
+
+Official guides: [Cloudflare: run a tunnel as a service on Linux](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/tunnel-guide/local/as-a-service/linux/),
+[Tailscale Funnel](https://tailscale.com/docs/reference/tailscale-cli/funnel).
+
 ### Faster builds: build on a PC
 
 Building on a PC (Windows with WSL, macOS, or Linux, with Java 11 JDK and ant 1.10) takes about

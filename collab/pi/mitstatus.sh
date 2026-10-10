@@ -30,13 +30,49 @@ presets() {
     }' "$HUB/ai.js" 2>/dev/null
 }
 
+# The Cloudflare named tunnel's address: the first hostname in its config file (the App Inventor user's, or the one
+# cloudflared keeps in /etc/cloudflared), or nothing. MIT_CF_CONFIG names another file, for tests.
+cloudflare_hostname() {
+  local cfg="${MIT_CF_CONFIG:-}" owner
+  if [ -z "$cfg" ]; then
+    owner="$(stat -c %U "$BASE" 2>/dev/null || true)"
+    for cfg in "/home/$owner/.cloudflared/config.yml" /etc/cloudflared/config.yml; do
+      [ -r "$cfg" ] && break
+    done
+  fi
+  [ -r "$cfg" ] || return 0
+  grep -E -m 1 '^[[:space:]]*-?[[:space:]]*hostname:' "$cfg" 2>/dev/null |
+    sed -E "s/.*hostname:[[:space:]]*//; s/[[:space:]\"']//g"
+}
+
+# The project's folder, as the installer wrote it down; used in the hint that points at the README.
+repo_dir() {
+  cat "$BASE/repo" 2>/dev/null || echo "~/F1-T"
+}
+
+# The links. A permanent address is a Tailscale Funnel link (stable-link.sh writes it to $BASE/stable-link when it turns
+# Funnel on) or a configured Cloudflare named tunnel. When there is one, it is shown in place of the temporary Cloudflare
+# quick link. When there is none, the status says to try Cloudflare, and shows the temporary link.
 link_lines() {
-  local url stable ip
-  url="$("$BASE/tunnel-url.sh" 2>/dev/null || true)"
-  stable="$("$BASE/stable-link.sh" --url 2>/dev/null || true)"
+  local stable cf url ip
+  stable="$(cat "$BASE/stable-link" 2>/dev/null || true)"
+  cf="$(cloudflare_hostname)"
   ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  echo "  Link (anywhere):    ${url:-not ready yet: wait a minute, then choose 2 (New link)}"
-  [ -n "$stable" ] && echo "  Stable link:        $stable"
+  if [ -n "$cf" ] || [ -n "$stable" ]; then
+    if [ -n "$cf" ]; then
+      if systemctl is-active --quiet cloudflared 2>/dev/null; then
+        echo "  Permanent link:     https://$cf  (Cloudflare)"
+      else
+        echo "  Permanent link:     https://$cf  (Cloudflare, but its tunnel is not running: systemctl status cloudflared)"
+      fi
+    fi
+    [ -n "$stable" ] && echo "  Permanent link:     $stable  (Tailscale)"
+  else
+    url="$("$BASE/tunnel-url.sh" 2>/dev/null || true)"
+    echo "  Permanent link:     none yet. Try Cloudflare for one (it needs a domain on Cloudflare):"
+    echo "                      see \"Permanent address\" in $(repo_dir)/collab/README.md"
+    echo "  Temporary link:     ${url:-not ready yet: wait a minute, then choose 2 (New link)}"
+  fi
   echo "  Link (home Wi-Fi):  http://${ip:-<pi-address>}:8080"
 }
 

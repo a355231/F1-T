@@ -12,8 +12,11 @@ ok() { echo "ok   $1"; }
 bad() { echo "FAIL $1"; fails=$((fails + 1)); }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 
-# Fake services: systemctl logs its calls, and a restart of the quick tunnel moves its address on.
-printf '%s\n' '#!/usr/bin/env bash' "echo \"systemctl \$*\" >> '$T/systemctl.log'" \
+# Fake services: systemctl logs its calls, a restart of the quick tunnel moves its address on, and the Cloudflare tunnel
+# counts as running while $T/cf-active exists.
+printf '%s\n' '#!/usr/bin/env bash' \
+  "if [ \"\$1\" = is-active ]; then [ -e '$T/cf-active' ]; exit \$?; fi" \
+  "echo \"systemctl \$*\" >> '$T/systemctl.log'" \
   "if [ \"\$*\" = 'restart cloudflared-quick' ]; then echo \$(( \$(cat '$T/gen' 2>/dev/null || echo 1) + 1 )) > '$T/gen'; fi" \
   'exit 0' > "$T/bin/systemctl"
 printf '%s\n' '#!/usr/bin/env bash' "echo 200" > "$T/bin/curl"
@@ -27,7 +30,7 @@ printf 'Qx7mR2pL\n' > "$T/base/overridepin"
 printf 'OPENROUTER_API_KEY=sk-test-123\nAI_MODEL_FAST=mistralai/example-model\n' > "$T/base/ai.env"
 chmod 600 "$T/base/ai.env"
 
-export PATH="$T/bin:$PATH" MIT_BASE="$T/base" MIT_HUB="$REPO/collab/server" AI_BASE="$T/base"
+export PATH="$T/bin:$PATH" MIT_BASE="$T/base" MIT_HUB="$REPO/collab/server" AI_BASE="$T/base" MIT_CF_CONFIG="$T/none.yml"
 MS="$HERE/mitstatus.sh"
 
 # 1. The status: the link, the codes and the models (the hub's table, with the ai.env override applied)
@@ -94,8 +97,36 @@ bash "$T/base/set-ai.sh" --model smart --reset > /dev/null 2>&1
 check "--reset removes the preset's override" "! grep -q '^AI_MODEL_SMART=' '$T/base/ai.env'"
 check "--reset keeps the key" "grep -q '^OPENROUTER_API_KEY=sk-test-123$' '$T/base/ai.env'"
 
+# 11. The permanent link: a Cloudflare tunnel (running or stopped), a Tailscale link, both, or neither
+printf 'tunnel: 1234\ncredentials-file: /x/1234.json\ningress:\n  - hostname: app.example.test\n    service: http://127.0.0.1:8080\n  - service: http_status:404\n' > "$T/cf.yml"
+rm -f "$T/cf-active" "$T/base/stable-link"
+out11="$(MIT_CF_CONFIG="$T/none.yml" bash "$MS" --show 2>&1)"
+check "without a permanent link the status says to try Cloudflare" "printf '%s' \"\$out11\" | grep -q 'none yet. Try Cloudflare' && printf '%s' \"\$out11\" | grep -q 'Temporary link:'"
+touch "$T/cf-active"
+out12="$(MIT_CF_CONFIG="$T/cf.yml" bash "$MS" --show 2>&1)"
+check "a running Cloudflare tunnel is shown as the permanent link" "printf '%s' \"\$out12\" | grep -q 'Permanent link:     https://app.example.test  (Cloudflare)' && ! printf '%s' \"\$out12\" | grep -q 'Try Cloudflare'"
+check "the temporary link is not shown once there is a permanent one" "! printf '%s' \"\$out12\" | grep -q 'Temporary link'"
+rm -f "$T/cf-active"
+out13="$(MIT_CF_CONFIG="$T/cf.yml" bash "$MS" --show 2>&1)"
+check "a configured but stopped Cloudflare tunnel says so" "printf '%s' \"\$out13\" | grep -q 'tunnel is not running'"
+echo https://pi-test.example.ts.net > "$T/base/stable-link"
+out14="$(MIT_CF_CONFIG="$T/none.yml" bash "$MS" --show 2>&1)"
+check "a Tailscale link is shown as the permanent link" "printf '%s' \"\$out14\" | grep -q 'Permanent link:     https://pi-test.example.ts.net  (Tailscale)'"
+out15="$(MIT_CF_CONFIG="$T/cf.yml" bash "$MS" --show 2>&1)"
+check "both permanent links are shown" "printf '%s' \"\$out15\" | grep -q '(Cloudflare' && printf '%s' \"\$out15\" | grep -q '(Tailscale)'"
+rm -f "$T/base/stable-link"
+
+# 12. stable-link.sh records the link when Funnel is on, and removes it when Funnel is off (with a stand-in tailscale)
+printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in "funnel status") echo "https://pi-test.example.ts.net" ;; esac' 'exit 0' > "$T/bin/tailscale"
+chmod +x "$T/bin/tailscale"
+printf 'EXTERNAL_PORT=8081\n' > "$T/hub.service"
+STABLE_LINK_FILE="$T/base/stable-link" HUB_UNIT="$T/hub.service" bash "$HERE/stable-link.sh" > "$T/sl-on.out" 2>&1
+check "turning Funnel on records the link" "grep -qx 'https://pi-test.example.ts.net' '$T/base/stable-link'"
+STABLE_LINK_FILE="$T/base/stable-link" HUB_UNIT="$T/hub.service" bash "$HERE/stable-link.sh" --off > /dev/null 2>&1
+check "turning Funnel off removes the record" "[ ! -e '$T/base/stable-link' ]"
+
 # 10. The changed scripts parse
-for f in "$HERE/mitstatus.sh" "$HERE/set-ai.sh" "$HERE/build-on-pi.sh" "$HERE/install.sh"; do
+for f in "$HERE/mitstatus.sh" "$HERE/set-ai.sh" "$HERE/stable-link.sh" "$HERE/build-on-pi.sh" "$HERE/install.sh"; do
   check "syntax: $(basename "$f")" "bash -n '$f'"
 done
 

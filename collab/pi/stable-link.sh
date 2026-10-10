@@ -10,6 +10,11 @@
 # internet, so the Pi-only pages stay closed.
 set -uo pipefail
 
+# The link is written to STATE when Funnel is turned on, and removed when it is turned off. MITSTATUS reads it, so it
+# knows there is a permanent address without parsing Tailscale's status text.
+STATE="${STABLE_LINK_FILE:-/opt/appinventor/stable-link}"
+HUB_UNIT="${HUB_UNIT:-/etc/systemd/system/collab-hub.service}"
+
 url() {
   command -v tailscale >/dev/null 2>&1 || return 1
   tailscale funnel status 2>/dev/null | grep -oE 'https://[A-Za-z0-9.-]+\.ts\.net' | head -n 1
@@ -20,6 +25,7 @@ case "${1:-}" in
   --off)
     [ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
     tailscale funnel --https=443 off 2>/dev/null || tailscale funnel reset
+    rm -f "$STATE"
     echo "The stable link is off."
     exit 0 ;;
 esac
@@ -36,7 +42,7 @@ if ! tailscale status >/dev/null 2>&1; then
   echo "Tailscale is installed but not signed in. Run: sudo tailscale up"
   exit 1
 fi
-if ! grep -q 'EXTERNAL_PORT' /etc/systemd/system/collab-hub.service 2>/dev/null; then
+if ! grep -q 'EXTERNAL_PORT' "$HUB_UNIT" 2>/dev/null; then
   echo "The hub does not have its second port yet; run the one-line install again to update." >&2
   exit 1
 fi
@@ -49,6 +55,7 @@ sleep 1
 link="$(url)"
 echo
 if [ -n "$link" ]; then
+  printf '%s\n' "$link" > "$STATE"
   echo "  Stable link: $link"
   echo "  Everyone signs in with their name and the team code, as always."
 else

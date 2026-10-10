@@ -49,6 +49,8 @@ offers: change the AI models, get a new address, restart App Inventor, change th
 code, or exit. It is installed with the rest, so after an update it is there too. (The first time, or after an update
 from before it, you can also install just the command with `sudo install -m 755 ~/F1-T/collab/pi/mitstatus.sh /usr/local/bin/MITSTATUS`.)
 
+For a link that never changes, see **Permanent address** in [collab/README.md](collab/README.md#permanent-address).
+
 Building on a PC is faster (about five minutes). See [collab/README.md](collab/README.md#faster-builds-build-on-a-pc).
 
 ## Using it with your team
