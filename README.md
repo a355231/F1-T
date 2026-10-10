@@ -88,7 +88,7 @@ components and documentation, draw pictures, and ask you a question when it need
 **Setting it up** (on the Pi, as the administrator):
 
 ```
-sudo /opt/appinventor/set-ai.sh            # the OpenRouter key and the model name
+sudo /opt/appinventor/set-ai.sh            # the OpenRouter key
 sudo /opt/appinventor/set-ai.sh --pin      # the PIN that unlocks full-app mode (also Change override PIN in the Team panel)
 sudo /opt/appinventor/set-ai.sh --search   # optional: a Brave Search key for web search
 sudo /opt/appinventor/set-ai.sh --status   # what is set

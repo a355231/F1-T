@@ -322,11 +322,13 @@ App Inventor tab that opened it as well, in case that tab's connection to the te
   service still failing after retries, too many answers cut off, or a smart one that reaches its limits below) is
   reported to the helper, and the answer goes on. Stop ends it at once, and a step repeated eight times in a row stops it.
   * **default** (Ling 3.1 Flash) is for most pieces. It has no limit on steps, on time, or on how often it is used.
-  * **smart** (Claude Haiku 5.5) is for a hard piece. Its whole run has at most 12 model answers and 4 minutes, counted
-    from when it starts running. When it reaches either, it stops, and the helper is told to ask again with a smaller
-    piece. It can be used once every 45 minutes, for the whole team: a smart request inside that time is refused at
-    once, and the helper is told to use default or do the piece itself. The timer starts when a smart subagent starts
-    running, not when it is queued.
+  * **smart** (Claude Haiku 5.5) is for a hard piece. Its whole run has at most 12 model answers, and 4 minutes for the
+    whole run, counted from when it starts running. The time is checked before each model answer and before each tool
+    call. An answer still running at the deadline is cut off. A tool call that started before the deadline runs to its
+    end; one that would start at or after it is not run. When the run reaches a limit, it stops, and the helper is told
+    to ask again with a smaller piece. The default subagent has no time cap. The smart subagent can be used once every
+    45 minutes, for the whole team: a smart request inside that time is refused at once, and the helper is told to use
+    default or do the piece itself. The timer starts when a smart subagent starts running, not when it is queued.
 * **Run modes.** How many subagents may run at once in one answer: **Normal** (one), **Parallel** (two) or
   **Ultracode** (three). The rest wait in the order they were asked for, and their cards show them as queued. Their
   time does not count against the answer's own time limit.
@@ -392,6 +394,20 @@ window, the answer carries on, and the window reconnects by itself (or picks it 
 without losing or repeating anything. **Stop** stops it. If nobody has the window open for three minutes, the
 answer is stopped. While the helper is quiet for a long time (the model is thinking, or writing something
 big), the window says "Still working…", and a long tool call shows how much has been written.
+
+**The events.** The window reads an answer as a stream of events, one JSON object each, told apart by `type`:
+
+* `text` and `reasoning`: pieces of the answer, and of the model's thinking, as they are written.
+* `step`: the start of one model call of the helper. It is sent once, before that call's first text, and it has no other
+  field. A retry of a call sends none, and neither does a subagent's call.
+* `tool`: a tool step, `running` and then `done` or `error`. `subagent`: a subagent's card, `queued`, `running`,
+  `resting`, `done` or `failed`. The steps of a subagent carry its `sub` id, and its words are not sent.
+* `status`: a note. `reset`: a try that failed is taken back, so it is not shown twice. `cooldown`: how long until the
+  smart subagent can be used.
+* `question`: a question for the person (`ask_user`). `plan`: the steps the helper planned (`update_plan`).
+  `proposal`: a change ready for Apply. `artifact`: a picture the helper drew or showed.
+* `error`: a problem the person is told about. `done`: the last event of every answer. `ping`: keeps a quiet connection
+  open, and the window skips it.
 
 If the model service stops sending an answer for a minute, the helper tries again, up to three tries in all;
 it does the same when the service ends an answer early, or is busy or unreachable for a moment. The window

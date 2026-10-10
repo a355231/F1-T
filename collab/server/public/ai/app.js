@@ -168,8 +168,11 @@
     list.appendChild(row);
     keepBottom();
 
+    // mark: where the answer stood before the model call being written (see api.step). Until the first step, it is the
+    // start of the answer.
     var api = {row: row, turn: turn, thinking: thinking, cur: null, raw: '', full: '', chips: Object.create(null),
-      subs: Object.create(null), think: null, thinkText: null, planEl: null, scheduled: false, texts: []};
+      subs: Object.create(null), think: null, thinkText: null, reasonText: '', planEl: null, scheduled: false,
+      texts: [], mark: {full: 0, reason: 0, blocks: 0, chips: []}};
 
     function closeText() {
       if (api.cur) {
@@ -211,25 +214,40 @@
         api.think.appendChild(api.thinkText);
         turn.insertBefore(api.think, turn.firstChild);
       }
+      api.reasonText += delta;
       api.thinkText.appendChild(document.createTextNode(delta));
       keepBottom();
     };
-    // The service was tried again: the words written in this answer are taken back, also those in blocks a step or a
-    // card has closed since, so the retry is not shown twice. Its reasoning is taken back too.
+    // Before each model call of the companion (the server's step event): where the answer stands. The words so far are
+    // closed into their block first, so the words of the call that follows go into blocks of their own.
+    api.step = function () {
+      closeText();
+      api.mark = {full: api.full.length, reason: api.reasonText.length, blocks: api.texts.length,
+        chips: Object.keys(api.chips)};
+    };
+    // The service was tried again. What the failed try showed is taken back, and only that: the words written since the
+    // step (also those in blocks a step or a card has closed since, so the retry is not shown twice), its reasoning, and
+    // its steps still running. What earlier model calls of this answer wrote stays. The mark is not dropped: it still
+    // stands where the answer now ends, so a try that fails again takes back only what that try wrote.
     api.resetText = function () {
-      api.texts.forEach(function (t) { t.remove(); });
-      api.texts = [];
+      var m = api.mark;
+      api.texts.splice(m.blocks).forEach(function (t) { t.remove(); });
       api.cur = null;
       api.raw = '';
-      api.full = '';
+      api.full = api.full.slice(0, m.full);
+      api.reasonText = api.reasonText.slice(0, m.reason);
       if (api.think) {
-        api.think.remove();
-        api.think = null;
-        api.thinkText = null;
+        if (api.reasonText) {
+          api.thinkText.textContent = api.reasonText;
+        } else {
+          api.think.remove();
+          api.think = null;
+          api.thinkText = null;
+        }
       }
-      Object.keys(api.chips).forEach(function (id) {   // a step still marked as running belongs to the failed try
+      Object.keys(api.chips).forEach(function (id) {   // a step still running that the failed try began
         var c = api.chips[id];
-        if (c.classList.contains('running')) {
+        if (c.parentNode === turn && c.classList.contains('running') && m.chips.indexOf(id) < 0) {
           c.remove();
           delete api.chips[id];
         }
@@ -524,6 +542,7 @@
       case 'status': if (ev.sub) subStatus(api, ev); else notice(api, ev.text, false); break;
       case 'question': question(api, ev.text); break;
       case 'cooldown': smartTimer(ev.smartReadyInSeconds); break;
+      case 'step': if (!ev.sub) api.step(); break;
       case 'reset': if (ev.sub) subReset(api, ev); else api.resetText(); break;
       case 'error': notice(api, ev.message, true); break;
       default: break;

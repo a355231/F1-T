@@ -120,7 +120,7 @@ const SUB_TIERS = {
 };
 const SUB_REASONING = 'high';
 // A smart subagent's whole run is kept to this many model answers, and to this long, counted from when it starts
-// running. A default subagent has neither limit.
+// running. The time is checked before each model answer and before each tool call. A default subagent has neither limit.
 const SUB_STEPS = 12;
 const SUB_MS = 4 * 60 * 1000;
 const SUB_UNFINISHED = 'The subagent did not finish within ' + SUB_STEPS + ' answers or ' + Math.round(SUB_MS / 60000) +
@@ -128,6 +128,9 @@ const SUB_UNFINISHED = 'The subagent did not finish within ' + SUB_STEPS + ' ans
 // Why a model call is cut off, or not made, when a smart subagent's run reaches its deadline. Nobody is shown it: the run
 // ends with SUB_UNFINISHED.
 const TIME_UP = 'The subagent ran out of its time.';
+// The answer to a tool call that a smart subagent's run does not run, because the deadline has come. Nobody is shown it:
+// the run ends with SUB_UNFINISHED.
+const TIME_CALL = 'The time for this subagent is up, so this call was not run.';
 const SMART_COOLDOWN_MS = 45 * 60 * 1000;   // the smart subagent is usable once in this time, for the whole hub
 const SUMMARY_TOKENS = 2500;        // the notes on earlier steps, when an answer has to make room
 const SUMMARY_MS = 3 * 60 * 1000;
@@ -1059,6 +1062,8 @@ class Assistant {
           notice: text => emit({type: 'status', text}),
         });
         if (compacted) this.log('the conversation of an answer was made shorter: ' + compacted.how + ' (' + compacted.steps + ' step(s))');
+        // The step event marks where this model call starts, before any of its text. Its retries send no step of their own.
+        emit({type: 'step'});
         const reply = await this.streamWithRetry({model, messages, list: tools, signal: ctx.signal, emit, level});
         stats.steps++;
         if (reply.truncated) {
@@ -1168,12 +1173,14 @@ class Assistant {
   // reasoning, and the project tools except the ones that talk to the person or propose changes, so it cannot start
   // another subagent. It works on the same draft, and its report comes back to the helper as the result of the tool. The
   // person sees its steps and its reasoning, but not its words. If it cannot finish, the helper is told why, and carries
-  // on without it. The default tier has no limit on steps or time. The smart tier has at most SUB_STEPS model answers and
-  // SUB_MS for its whole run, counted from when it starts running: no model call it makes (an answer, a retry of one, or
-  // the notes on earlier steps) goes on past that time, and none is started after it. When it reaches either limit, it
-  // stops and the helper is told to ask again with a smaller piece (SUB_UNFINISHED). A tool step that began before the
-  // deadline is finished, and then the run stops before its next answer. The smart tier is usable once in 45 minutes, for
-  // the whole hub: its timer starts when it starts running, not when it is queued. Stop ends it at once.
+  // on without it. The default tier has no time cap and no limit on steps. The smart tier has at most SUB_STEPS model
+  // answers, and SUB_MS (4 minutes) for its whole run, counted from when it starts running. The time is checked before
+  // each model answer and before each tool call. An answer still running at the deadline is cut off (streamTurn), and no
+  // model call of the run (an answer, a retry of one, or the notes on earlier steps) goes on past the deadline or starts
+  // after it. A tool call that started before the deadline runs to its end; one that would start at or after it is not
+  // run, and is answered with TIME_CALL. When the run reaches a limit, it stops and the helper is told to ask again with a
+  // smaller piece (SUB_UNFINISHED). The smart tier is usable once in 45 minutes, for the whole hub: its timer starts when it
+  // starts running, not when it is queued. Stop ends it at once.
   async runSubagent(task, ctx, mode) {
     const tier = mode === 'smart' ? 'smart' : 'default';
     const info = SUB_TIERS[tier];
@@ -1227,8 +1234,8 @@ class Assistant {
       let lastStep = '';
       for (;;) {
         if (ctx.signal && ctx.signal.aborted) throw stoppedError();
-        // The limits are checked before each model answer. An answer under way is cut off at the deadline (streamTurn), so
-        // no model call of the run goes on past it. The tool calls of the answer before have already run.
+        // The limits are checked before each model answer, and the time is checked before each tool call too (below). An
+        // answer under way is cut off at the deadline (streamTurn), so no model call of the run goes on past it.
         if (steps >= maxSteps || this.now() >= deadline) return stopAtLimit(steps >= maxSteps ? 'answers' : 'time');
         steps++;
         const list = registry.definitions(sub);
@@ -1238,8 +1245,9 @@ class Assistant {
           notice: text => emitSub({type: 'status', text}),
         });
         if (compacted) this.log('a subagent\'s conversation was made shorter: ' + compacted.how + ' (' + compacted.steps + ' step(s))');
-        // A default subagent has no time limit on one answer or on its run. A smart one keeps the limit of the companion's
-        // answers, and the deadline of its run, which its answers and their retries cannot pass.
+        // A default subagent has no time limit on one answer or on its run. A smart one keeps the ten-minute limit of one
+        // answer that the helper's answers have, and the deadline of its run: its answers and their retries cannot pass it,
+        // and no tool call is started after it.
         const reply = await this.streamWithRetry({model: info.model, messages, list, signal: ctx.signal, emit: emitSub,
           level: SUB_REASONING, rest, turnLimit: tier === 'smart', deadline});
         stats.steps++;
@@ -1272,9 +1280,17 @@ class Assistant {
         stats.tools += reply.tool_calls.length;
         messages.push(withReasoning({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls}, reply));
         const pictures = [];
+        let outOfTime = false;   // a call came at or after the deadline: it was not run, and the run ends below
         for (const call of reply.tool_calls) {
           // Stop ends the subagent at once: the calls of this step that have not started do not run.
           if (ctx.signal && ctx.signal.aborted) throw stoppedError();
+          // The deadline is checked before each tool call. A call that would start at or after it is not run, and is answered
+          // with TIME_CALL. A call that started before it runs to its end, however long that takes.
+          if (this.now() >= deadline) {
+            outOfTime = true;
+            messages.push({role: 'tool', tool_call_id: call.id, content: TIME_CALL});
+            continue;
+          }
           const out = await registry.run(call.function.name, call.function.arguments, Object.assign({}, sub, {callId: call.id}));
           let text = String(out.text);
           if (EDITS.has(call.function.name) && !/^Error/.test(text)) ctx.state.edited = true;
@@ -1286,6 +1302,7 @@ class Assistant {
           messages.push({role: 'tool', tool_call_id: call.id, content: text.slice(0, MAX_TOOL_RESULT)});
         }
         if (pictures.length) messages.push(pictureMessage(pictures));
+        if (outOfTime) return stopAtLimit('time');
       }
     } catch (e) {
       if (ctx.signal && ctx.signal.aborted) {

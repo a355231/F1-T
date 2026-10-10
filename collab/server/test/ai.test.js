@@ -244,6 +244,22 @@ test('the model reads the project through a tool, shows the tool as it works, th
   assert.doesNotMatch(JSON.stringify(t.calls[0].payload.messages), /sk-test/, 'the key is never shown to the model');
 });
 
+test('each model call of the helper starts with a step event, sent before its text: an answer with one tool step has two', async () => {
+  const t = setup([toolTurn('read_file', {path: 'src/a/Screen1.bky'}, 'call_9', 'Let me look. '), textTurn('All fine.')]);
+  const evs = await say(t.ai, 'ann', 'what is in here?');
+  assert.deepStrictEqual(evs.filter(e => e.type === 'step'), [{type: 'step'}, {type: 'step'}], 'one per model call, with no other field');
+  assert.deepStrictEqual(evs.map(e => e.type), ['step', 'text', 'tool', 'tool', 'step', 'text', 'done'],
+    'each step comes before the text of the call it starts');
+});
+
+test('a retried model call starts no new step: one step, before the first try, which stalled', async () => {
+  const t = setup([STALL, textTurn('All good.')], {idleMs: 40});
+  const evs = await say(t.ai, 'ann', 'hi');
+  assert.strictEqual(t.calls.length, 2, 'the call was made twice');
+  assert.deepStrictEqual(evs.filter(e => e.type === 'step'), [{type: 'step'}], 'one step for the call, not one for each try');
+  assert.strictEqual(evs[0].type, 'step');
+});
+
 test('a proposal is applied only by the person who got it, once', async () => {
   const t = setup([toolTurn('propose_change', {summary: 'Rename a label', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')]);
   const evs = await say(t.ai, 'ann', 'fix it');
@@ -1749,6 +1765,88 @@ test('a retry that would start before the deadline runs as usual', async () => {
   assert.deepStrictEqual(statesOf(evs, 'h1'), ['running', 'resting', 'running', 'done']);
   assert.strictEqual(cardOf(evs, 'h1').at(-1).steps, 1);
   assert.strictEqual(texts(evs), 'Checked.');
+});
+
+test('a subagent\'s model calls are not steps: the helper makes two calls, so two steps, however many its subagent makes', async () => {
+  const t = setup([
+    toolTurn('subagent', {task: 'Read the blocks file, then report.'}, 'h1'),
+    toolTurn('read_file', {path: 'src/a/Screen1.bky'}, 'r1'),
+    textTurn('Report: the blocks file is empty.'),
+    textTurn('The blocks file is empty.'),
+  ]);
+  const evs = await say(t.ai, 'ann', 'what is in the blocks?');
+  assert.strictEqual(t.calls.length, 4);
+  assert.deepStrictEqual(evs.map(e => e.type).filter(x => x === 'step' || x === 'subagent'), ['step', 'subagent', 'subagent', 'step'],
+    'a step before the helper\'s first call and before its last; none for the subagent\'s answers');
+});
+
+// Each listing of the project's files takes 100 seconds on the clock. Returns what a test checks: the start of each listing,
+// in seconds from when this is called, and the subagent's conversation (the array it is sent with), which is read after the run.
+function slowListings(t) {
+  const seen = {starts: [], messages: null};
+  const began = t.ai.now();
+  const ask = t.ai.ask;
+  t.ai.ask = async (path, ...rest) => {
+    if (path.startsWith('/ode/collab/files')) {
+      seen.starts.push((t.ai.now() - began) / 1000);
+      t.advance(100 * 1000);
+    }
+    return ask(path, ...rest);
+  };
+  const streamWithRetry = t.ai.streamWithRetry;
+  t.ai.streamWithRetry = args => {
+    if (isSub({messages: args.messages})) seen.messages = args.messages;
+    return streamWithRetry.call(t.ai, args);
+  };
+  return seen;
+}
+// A subagent's first answer lists the files four times. Once those results are in, this returns null, and the caller gives
+// the report instead.
+const fourListings = p => (toolMessages(p).length ? null : callsTurn([1, 2, 3, 4].map(k => ({id: 'L' + k, name: 'list_files'}))));
+
+test('a smart subagent checks its time before each tool call: a call that would start at the deadline is not run, and the run ends with the stop text', async () => {
+  // Each listing takes 100 seconds on the clock, and the deadline is four minutes after the run starts. The first three
+  // listings start at 0, 100 and 200 seconds and run to their end. The fourth would start at 300 seconds, so it is not run.
+  const t = setup(null, {respond: async p => {
+    if (isSub(p)) return fourListings(p) || textTurn('Report: not reached.');
+    if (toolMessages(p).length) return textTurn('It ran out of time, so I will do the piece myself.');
+    return toolTurn('subagent', {task: 'List the files four times.', mode: 'smart'}, 'h1');
+  }});
+  const seen = slowListings(t);
+  const evs = await say(t.ai, 'ann', 'list the files four times');
+  assert.deepStrictEqual(seen.starts, [0, 100, 200], 'the first three listings start at 0, 100 and 200 seconds');
+  assert.deepStrictEqual(evs.filter(e => e.type === 'tool' && e.name === 'list_files' && e.state === 'done').map(e => e.id),
+    ['L1', 'L2', 'L3'], 'the first three run to their end');
+  assert.ok(!evs.some(e => e.id === 'L4'), 'the fourth is not run, so it has no tool step');
+  const results = toolMessages({messages: seen.messages});
+  assert.deepStrictEqual(results.map(m => m.tool_call_id), ['L1', 'L2', 'L3', 'L4'], 'every call is answered');
+  assert.strictEqual(results[3].content, 'The time for this subagent is up, so this call was not run.');
+  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 1, 'no further answer: the run ends');
+  const card = cardOf(evs, 'h1').at(-1);
+  assert.deepStrictEqual([card.state, card.detail, card.steps], ['failed', 'stopped', 1]);
+  assert.strictEqual(toolMessages(t.calls.at(-1).payload).find(m => m.tool_call_id === 'h1').content, UNFINISHED,
+    'the helper is told the run ended');
+  assert.match(texts(evs), /I will do the piece myself/);
+  assert.ok(!evs.some(e => e.type === 'error'), 'no error is shown');
+});
+
+test('the same four listings in a default subagent all run: a default subagent has no time cap', async () => {
+  const t = setup(null, {respond: async p => {
+    if (isSub(p)) return fourListings(p) || textTurn('Report: four listings.');
+    if (toolMessages(p).length) return textTurn('All four are listed.');
+    return toolTurn('subagent', {task: 'List the files four times.'}, 'h1');
+  }});
+  const seen = slowListings(t);
+  const evs = await say(t.ai, 'ann', 'list the files four times');
+  assert.deepStrictEqual(seen.starts, [0, 100, 200, 300], 'all four listings start, the last at 300 seconds');
+  assert.deepStrictEqual(evs.filter(e => e.type === 'tool' && e.name === 'list_files' && e.state === 'done').map(e => e.id),
+    ['L1', 'L2', 'L3', 'L4'], 'all four run to their end');
+  assert.ok(!toolMessages({messages: seen.messages}).some(m => /time for this subagent/.test(m.content)), 'nothing is refused');
+  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 2, 'a listing answer, then the report');
+  const card = cardOf(evs, 'h1').at(-1);
+  assert.deepStrictEqual([card.state, card.steps], ['done', 2]);
+  assert.strictEqual(texts(evs), 'All four are listed.');
+  assert.ok(!evs.some(e => e.type === 'status' || e.type === 'error'), 'nothing stops it');
 });
 
 test('a default run is not stopped by time: its answers go on past four minutes, and one begun after that is not cut off', async () => {
