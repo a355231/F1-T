@@ -453,15 +453,16 @@ class Slots {
 }
 
 // Shows a long tool call while the model is still writing it. Writing a big file can take minutes with no
-// words in between, and the window would look stuck.
-function showWriting(acc, shown, emit) {
+// words in between, and the window would look stuck. The chip's id is the tag of the model call plus the provider's id
+// for the call (see converse), so it is the same chip that the running and done steps of the call use.
+function showWriting(acc, shown, emit, tag) {
   const now = Date.now();
   acc.tool_calls.forEach((slot, i) => {
     if (!slot || !slot.id || !slot.function.name) return;
     const size = slot.function.arguments.length;
     if (size < WRITING_BYTES || (shown[i] && now - shown[i] < 1200)) return;
     shown[i] = now;
-    emit({type: 'tool', id: slot.id, name: slot.function.name, state: 'running',
+    emit({type: 'tool', id: tag + slot.id, name: slot.function.name, state: 'running',
       label: 'Writing ' + slot.function.name.replace(/_/g, ' '), detail: (size / 1024).toFixed(1) + ' KB so far'});
   });
 }
@@ -1063,15 +1064,19 @@ class Assistant {
         });
         if (compacted) this.log('the conversation of an answer was made shorter: ' + compacted.how + ' (' + compacted.steps + ' step(s))');
         // The step event marks where this model call starts, before any of its text. Its retries send no step of their own.
+        // The tool events of this call carry its tag: "s" and the number of model calls before it. A provider can reuse a
+        // call id in a later call of the same answer, so the tag keeps the ids of tool events unique in the answer. The
+        // tool_call_id sent back to the model stays the provider's own id.
+        const tag = 's' + stats.steps + ':';
         emit({type: 'step'});
-        const reply = await this.streamWithRetry({model, messages, list: tools, signal: ctx.signal, emit, level});
+        const reply = await this.streamWithRetry({model, messages, list: tools, signal: ctx.signal, emit, level, tag});
         stats.steps++;
         if (reply.truncated) {
           // The model ran out of room part way through. A half-written tool call is never run. The model is told,
           // and carries on in smaller pieces; only if that keeps happening is the helper paused.
           this.log('the model ran out of room (' + reply.tool_calls.length + ' tool call(s) cut off)');
           for (const call of reply.tool_calls) {
-            emit({type: 'tool', id: call.id, name: call.function.name, state: 'error',
+            emit({type: 'tool', id: tag + call.id, name: call.function.name, state: 'error',
               label: 'Writing ' + call.function.name.replace(/_/g, ' '), detail: 'too long, skipped'});
           }
           if (++cutOff > CUT_OFF_MAX) {
@@ -1108,7 +1113,7 @@ class Assistant {
         stats.tools += reply.tool_calls.length;
         messages.push(withReasoning({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls}, reply));
         const began = this.now();
-        const outs = await this.runCalls(reply.tool_calls, run);
+        const outs = await this.runCalls(reply.tool_calls, run, tag);
         // A subagent has no time limit of its own, and the time it takes does not use up this answer's time.
         if (reply.tool_calls.some(c => c.function.name === 'subagent')) deadline += this.now() - began;
         const pictures = [];
@@ -1142,9 +1147,10 @@ class Assistant {
 
   // Runs one model answer's tool calls, as the answer asked. The subagent calls start together, and the slots of the run
   // mode queue the ones beyond its cap. The other calls run one after another, in their order, while those work. The
-  // results come back in the order of the calls, which is the order the model needs them in.
-  async runCalls(calls, run) {
-    const toolCtx = call => Object.assign({}, run, {callId: call.id});
+  // results come back in the order of the calls, which is the order the model needs them in. Each call's steps use the
+  // tag of the model call that asked for it, plus the call's id (see converse).
+  async runCalls(calls, run, tag) {
+    const toolCtx = call => Object.assign({}, run, {callId: tag + call.id});
     const started = calls.map(call => (call.function.name === 'subagent'
       ? registry.run(call.function.name, call.function.arguments, toolCtx(call)) : null));
     const outs = [];
@@ -1184,6 +1190,7 @@ class Assistant {
   async runSubagent(task, ctx, mode) {
     const tier = mode === 'smart' ? 'smart' : 'default';
     const info = SUB_TIERS[tier];
+    // The subagent's id is the call's id in the helper's answer, already tagged (see converse), so it is unique in the answer.
     const id = ctx.callId;
     const stats = ctx.stats || {steps: 0, tools: 0, pictures: 0};
     const card = {type: 'subagent', id, tier, model: info.model, name: info.name, reasoning: SUB_REASONING,
@@ -1245,16 +1252,20 @@ class Assistant {
           notice: text => emitSub({type: 'status', text}),
         });
         if (compacted) this.log('a subagent\'s conversation was made shorter: ' + compacted.how + ' (' + compacted.steps + ' step(s))');
+        // The step event starts this model call of the subagent, before its text; its retries send none. The tool events of
+        // this call carry its tag: the subagent's id, then the number of this model call, so that they are unique in the answer.
+        const tag = id + ':' + steps + ':';
+        emitSub({type: 'step'});
         // A default subagent has no time limit on one answer or on its run. A smart one keeps the ten-minute limit of one
         // answer that the helper's answers have, and the deadline of its run: its answers and their retries cannot pass it,
         // and no tool call is started after it.
         const reply = await this.streamWithRetry({model: info.model, messages, list, signal: ctx.signal, emit: emitSub,
-          level: SUB_REASONING, rest, turnLimit: tier === 'smart', deadline});
+          level: SUB_REASONING, rest, turnLimit: tier === 'smart', deadline, tag});
         stats.steps++;
         if (reply.truncated) {
           // As for the helper: a half-written tool call is never run, and the subagent carries on in smaller pieces.
           for (const call of reply.tool_calls) {
-            emitSub({type: 'tool', id: call.id, name: call.function.name, state: 'error',
+            emitSub({type: 'tool', id: tag + call.id, name: call.function.name, state: 'error',
               label: 'Writing ' + call.function.name.replace(/_/g, ' '), detail: 'too long, skipped'});
           }
           if (++cutOff > CUT_OFF_MAX) return end('failed', {text: SUB_PAUSED, detail: 'ran out of room'}, {detail: 'ran out of room'});
@@ -1291,7 +1302,7 @@ class Assistant {
             messages.push({role: 'tool', tool_call_id: call.id, content: TIME_CALL});
             continue;
           }
-          const out = await registry.run(call.function.name, call.function.arguments, Object.assign({}, sub, {callId: call.id}));
+          const out = await registry.run(call.function.name, call.function.arguments, Object.assign({}, sub, {callId: tag + call.id}));
           let text = String(out.text);
           if (EDITS.has(call.function.name) && !/^Error/.test(text)) ctx.state.edited = true;
           if (out.images && out.images.length && sub.vision) {
@@ -1344,7 +1355,8 @@ class Assistant {
   // would start at or after it is not made. Both throw timeUpError, which is not tried again.
   // The result says whether the model ran out of room (truncated); an answer that ends without a proper
   // ending is an error that streamWithRetry tries again. A refused request carries the service's answer as detail.
-  async streamTurn({model, messages, list, signal, emit, level, turnLimit = true, deadline = Infinity}) {
+  // tag starts the id of each tool event the answer shows while it is written (see converse).
+  async streamTurn({model, messages, list, signal, emit, level, turnLimit = true, deadline = Infinity, tag}) {
     if (this.now() >= deadline) throw timeUpError();
     const guard = new AbortController();
     let cutOff = '';
@@ -1399,7 +1411,7 @@ class Assistant {
         if (thought) emit({type: 'reasoning', delta: thought});
         tools.addDelta(acc, delta);
         if (Array.isArray(delta.reasoning_details)) tools.addReasoning(acc, delta.reasoning_details);
-        showWriting(acc, shown, emit);
+        showWriting(acc, shown, emit, tag);
       }
       if (finish === 'error') throw Object.assign(new Error('the service reported an error'), {transient: true});
       if (!finish && !state.sawDone) throw Object.assign(new Error('the answer ended early'), {premature: true});
@@ -1423,12 +1435,12 @@ class Assistant {
   // request the service refuses is sent once more with high. rest(true) and rest(false) tell a subagent when it
   // waits before a try again. A try that would start at or after the deadline of a smart subagent's run is not made,
   // and nothing is shown or waited for in its place: the run ends (see streamTurn).
-  async streamWithRetry({model, messages, list, signal, emit, level, rest, turnLimit = true, deadline = Infinity}) {
+  async streamWithRetry({model, messages, list, signal, emit, level, rest, turnLimit = true, deadline = Infinity, tag}) {
     let tries = 0;      // the tries that failed and were tried again
     let lvl = level;
     for (;;) {
       try {
-        return await this.streamTurn({model, messages, list, signal, emit, level: lvl, turnLimit, deadline});
+        return await this.streamTurn({model, messages, list, signal, emit, level: lvl, turnLimit, deadline, tag});
       } catch (e) {
         if (signal && signal.aborted) throw e;
         if (lvl === 'max' && e.status === 400 && /effort|reasoning/i.test(String(e.detail || ''))) {

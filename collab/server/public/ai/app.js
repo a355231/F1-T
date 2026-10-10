@@ -456,7 +456,7 @@
     [head, meta, task, info, chips, lines, reason.box, report.box].forEach(function (n) { card.appendChild(n); });
     api.block(card);
     api.subs[id] = {card: card, state: state, tier: tier, model: model, eff: eff, task: task, info: info,
-      chips: chips, lines: lines, reason: reason, report: report, ended: false};
+      chips: chips, lines: lines, reason: reason, report: report, ended: false, reasonText: '', mark: null};
     return api.subs[id];
   }
 
@@ -487,6 +487,7 @@
   function subReason(api, ev) {
     var s = subCard(api, ev.sub);
     s.reason.box.hidden = false;
+    s.reasonText += String(ev.delta);
     s.reason.body.appendChild(document.createTextNode(String(ev.delta)));
     keepBottom();
   }
@@ -496,17 +497,34 @@
     keepBottom();
   }
 
-  // A subagent's try was tried again: its reasoning and the steps still running from the failed try are taken back,
-  // so the retry starts clean. Its other steps, its status lines and every other card are left as they are.
+  // The ids of the steps of a card that are running now.
+  function runningIn(api, s) {
+    return Object.keys(api.chips).filter(function (id) {
+      return api.chips[id].parentNode === s.chips && api.chips[id].classList.contains('running');
+    });
+  }
+
+  // Before each model call of a subagent (its step event): the card's reasoning so far and its running steps are
+  // recorded, so that a try of this call that fails takes back only what it wrote.
+  function subStep(api, ev) {
+    var s = subCard(api, ev.sub);
+    s.mark = {reason: s.reasonText.length, chips: runningIn(api, s)};
+  }
+
+  // A subagent's try was tried again: the reasoning it wrote and the steps still running from it are taken back,
+  // so the retry starts clean. The record taken at its step event says where the call began. What its earlier model
+  // calls wrote stays, and so do its finished steps, its status lines and every other card. The record is kept: a
+  // retry sends no step of its own, so a try that fails again takes back only what that retry wrote.
   function subReset(api, ev) {
     var s = api.subs[ev.sub];
     if (!s) return;
-    s.reason.body.textContent = '';
-    s.reason.box.hidden = true;
-    Object.keys(api.chips).forEach(function (id) {
-      var c = api.chips[id];
-      if (c.parentNode === s.chips && c.classList.contains('running')) {
-        c.remove();
+    var m = s.mark || {reason: 0, chips: []};   // no step was recorded: the call began with nothing
+    s.reasonText = s.reasonText.slice(0, m.reason);
+    s.reason.body.textContent = s.reasonText;
+    s.reason.box.hidden = !s.reasonText;
+    runningIn(api, s).forEach(function (id) {
+      if (m.chips.indexOf(id) < 0) {
+        api.chips[id].remove();
         delete api.chips[id];
       }
     });
@@ -542,7 +560,7 @@
       case 'status': if (ev.sub) subStatus(api, ev); else notice(api, ev.text, false); break;
       case 'question': question(api, ev.text); break;
       case 'cooldown': smartTimer(ev.smartReadyInSeconds); break;
-      case 'step': if (!ev.sub) api.step(); break;
+      case 'step': if (ev.sub) subStep(api, ev); else api.step(); break;
       case 'reset': if (ev.sub) subReset(api, ev); else api.resetText(); break;
       case 'error': notice(api, ev.message, true); break;
       default: break;

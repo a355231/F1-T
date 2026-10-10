@@ -399,9 +399,13 @@ big), the window says "Still working…", and a long tool call shows how much ha
 
 * `text` and `reasoning`: pieces of the answer, and of the model's thinking, as they are written.
 * `step`: the start of one model call of the helper. It is sent once, before that call's first text, and it has no other
-  field. A retry of a call sends none, and neither does a subagent's call.
-* `tool`: a tool step, `running` and then `done` or `error`. `subagent`: a subagent's card, `queued`, `running`,
-  `resting`, `done` or `failed`. The steps of a subagent carry its `sub` id, and its words are not sent.
+  field. A retry of a call sends none.
+* `step` with a `sub` id: the start of one model call of a subagent, sent before each of its calls (not before a
+  retry). Its only other field is `sub`, the id of the subagent's card.
+* `tool`: a tool step, `running` and then `done` or `error`. Its `id` is unique in the answer: `s`, the number of
+  model calls before the call that asked for it, `:`, then the provider's call id. A subagent's step is the
+  subagent's id, `:`, its model call's number, `:`, then the provider's call id. `subagent`: a subagent's card,
+  `queued`, `running`, `resting`, `done` or `failed`. Its `id` is the `sub` of its steps, and its words are not sent.
 * `status`: a note. `reset`: a try that failed is taken back, so it is not shown twice. `cooldown`: how long until the
   smart subagent can be used.
 * `question`: a question for the person (`ask_user`). `plan`: the steps the helper planned (`update_plan`).

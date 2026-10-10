@@ -421,3 +421,116 @@ test('(e) a second failed try takes back only what it wrote: its words and the s
   ]);
   assert.strictEqual(copyLastAnswer(page), 'Earlier words. Retried words.');
 });
+
+test('(f) a subagent retried in its second model call keeps its first call: reasoning and finished step', async () => {
+  const page = openPage();
+  const answer = startAnswer(page, 'First question');
+  await answer.push({type: 'step'});
+  await answer.push(subagent('s1', 'running', 'Check Screen2'));
+  await answer.push({type: 'step', sub: 's1'});
+  await answer.push({type: 'reasoning', delta: 'Plan A. ', sub: 's1'});
+  await answer.push({type: 'tool', id: 's1:1:call_1', name: 'read_file', state: 'done', label: 'Read Screen2',
+    sub: 's1'});
+  await answer.push({type: 'step', sub: 's1'});
+  await answer.push({type: 'reasoning', delta: 'Plan B. ', sub: 's1'});
+  await answer.push({type: 'tool', id: 's1:2:call_1', name: 'read_file', state: 'running', label: 'Read Screen3',
+    sub: 's1'});
+  await answer.push({type: 'reset', sub: 's1'});
+  assert.strictEqual(cardReasoning(subCard(page, 'Check Screen2')), 'Plan A. ');
+  assert.deepStrictEqual(cardSteps(subCard(page, 'Check Screen2')), ['Read Screen2 (done)']);
+  await answer.push({type: 'status', text: STATUS_2, sub: 's1'});
+  await answer.push({type: 'reasoning', delta: 'Plan B again. ', sub: 's1'});
+  await answer.push(subagent('s1', 'done', 'Check Screen2', 'Screen2 is fine.'));
+  await answer.end();
+  const card = subCard(page, 'Check Screen2');
+  assert.strictEqual(cardReasoning(card), 'Plan A. Plan B again. ');
+  assert.deepStrictEqual(cardSteps(card), ['Read Screen2 (done)']);
+  assert.deepStrictEqual(cardLines(card), [STATUS_2]);
+  assert.strictEqual(cardReport(card), 'Screen2 is fine.');
+});
+
+test('(g) a reset with a sub leaves the companion reasoning and steps alone, a running one included', async () => {
+  const page = openPage();
+  const answer = startAnswer(page, 'First question');
+  await answer.push({type: 'step'});
+  await answer.push({type: 'reasoning', delta: 'Companion plan. '});
+  await answer.push({type: 'text', delta: 'Companion words. '});
+  await answer.push({type: 'tool', id: 's2:call_1', name: 'check_project', state: 'done', label: 'Check project'});
+  await answer.push({type: 'tool', id: 's2:call_2', name: 'read_file', state: 'running', label: 'Read Screen1'});
+  await answer.push(subagent('s1', 'running', 'Check Screen2'));
+  await answer.push({type: 'step', sub: 's1'});
+  await answer.push({type: 'reasoning', delta: 'Sub plan. ', sub: 's1'});
+  await answer.push({type: 'tool', id: 's1:1:call_1', name: 'read_file', state: 'running', label: 'Read Screen2',
+    sub: 's1'});
+  await answer.push({type: 'reset', sub: 's1'});
+  assert.deepStrictEqual(screen(page), [
+    'reasoning: Companion plan. ',
+    'words: Companion words. ',
+    'step Check project (done)',
+    'step Read Screen1 (running)',
+    'subagent: Check Screen2',
+  ]);
+  assert.strictEqual(cardReasoning(subCard(page, 'Check Screen2')), null);
+  await answer.push({type: 'tool', id: 's2:call_2', name: 'read_file', state: 'done', label: 'Read Screen1'});
+  await answer.push(subagent('s1', 'done', 'Check Screen2', 'Screen2 is fine.'));
+  await answer.push({type: 'text', delta: 'Done.'});
+  await answer.end();
+  assert.deepStrictEqual(screen(page), [
+    'reasoning: Companion plan. ',
+    'words: Companion words. ',
+    'step Check project (done)',
+    'step Read Screen1 (done)',
+    'subagent: Check Screen2',
+    'words: Done.',
+  ]);
+});
+
+test('(h) a second failed try of a subagent takes back only its own reasoning and steps', async () => {
+  const page = openPage();
+  const answer = startAnswer(page, 'First question');
+  await answer.push({type: 'step'});
+  await answer.push(subagent('s1', 'running', 'Check Screen2'));
+  await answer.push({type: 'step', sub: 's1'});
+  await answer.push({type: 'reasoning', delta: 'Plan A. ', sub: 's1'});
+  await answer.push({type: 'tool', id: 's1:1:call_1', name: 'read_file', state: 'done', label: 'Read Screen2',
+    sub: 's1'});
+  await answer.push({type: 'step', sub: 's1'});
+  await answer.push({type: 'reasoning', delta: 'Plan B. ', sub: 's1'});
+  await answer.push({type: 'reset', sub: 's1'});
+  await answer.push({type: 'status', text: STATUS_2, sub: 's1'});
+  await answer.push({type: 'reasoning', delta: 'Retry one. ', sub: 's1'});
+  await answer.push({type: 'tool', id: 's1:2:call_1', name: 'read_file', state: 'running', label: 'Read Screen3',
+    sub: 's1'});
+  await answer.push({type: 'reset', sub: 's1'});
+  assert.strictEqual(cardReasoning(subCard(page, 'Check Screen2')), 'Plan A. ');
+  assert.deepStrictEqual(cardSteps(subCard(page, 'Check Screen2')), ['Read Screen2 (done)']);
+  await answer.push({type: 'status', text: STATUS_3, sub: 's1'});
+  await answer.push({type: 'reasoning', delta: 'Retry two. ', sub: 's1'});
+  await answer.push(subagent('s1', 'done', 'Check Screen2', 'Screen2 is fine.'));
+  await answer.end();
+  const card = subCard(page, 'Check Screen2');
+  assert.strictEqual(cardReasoning(card), 'Plan A. Retry two. ');
+  assert.deepStrictEqual(cardSteps(card), ['Read Screen2 (done)']);
+  assert.deepStrictEqual(cardLines(card), [STATUS_2, STATUS_3]);
+  assert.strictEqual(cardReport(card), 'Screen2 is fine.');
+});
+
+test('(i) a step running when a subagent model call begins is not taken back by a reset of that call', async () => {
+  const page = openPage();
+  const answer = startAnswer(page, 'First question');
+  await answer.push({type: 'step'});
+  await answer.push(subagent('s1', 'running', 'Check Screen2'));
+  await answer.push({type: 'step', sub: 's1'});
+  await answer.push({type: 'tool', id: 's1:1:call_1', name: 'read_file', state: 'running', label: 'Read Screen2',
+    sub: 's1'});
+  await answer.push({type: 'step', sub: 's1'});
+  await answer.push({type: 'tool', id: 's1:2:call_1', name: 'read_file', state: 'running', label: 'Read Screen3',
+    sub: 's1'});
+  await answer.push({type: 'reset', sub: 's1'});
+  assert.deepStrictEqual(cardSteps(subCard(page, 'Check Screen2')), ['Read Screen2 (running)']);
+  await answer.push({type: 'tool', id: 's1:1:call_1', name: 'read_file', state: 'done', label: 'Read Screen2',
+    sub: 's1'});
+  await answer.push(subagent('s1', 'done', 'Check Screen2', 'Screen2 is fine.'));
+  await answer.end();
+  assert.deepStrictEqual(cardSteps(subCard(page, 'Check Screen2')), ['Read Screen2 (done)']);
+});
