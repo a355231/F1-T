@@ -205,8 +205,22 @@ function numbered(text, from, to) {
   return {shown: out.join('\n'), total: all.length, start, end};
 }
 
+// One lock per answer: a draft-changing tool call waits for the one before it, so two subagents never interleave a write.
+// Read tools do not wait. The answer's lock is shared by its subagents (see ai.js).
+function draftLock() {
+  let last = Promise.resolve();
+  return fn => {
+    const result = last.then(fn);
+    last = result.catch(() => {});
+    return result;
+  };
+}
+
+// The subagent tool's mode: only "smart" asks for the smart tier; anything else is the default tier.
+const smartMode = a => String(a && a.mode || '').toLowerCase() === 'smart';
+
 // The tools. mode: 'read' (no change), 'draft' (changes the draft), 'propose', 'art' (pictures), 'web',
-// 'util', 'ask' (talks to the person), 'agent' (hands a piece of the job to the one subagent).
+// 'util', 'ask' (talks to the person), 'agent' (hands a piece of the job to a subagent).
 // needs: 'search' | 'full' | 'vision' | 'draft' (has changes).
 const TOOLS = [
   // -- reading the project
@@ -610,12 +624,14 @@ const TOOLS = [
       ctx.emit({type: 'question', text: String(a.question || '').slice(0, 500)});
       return {text: 'The question is shown. Wait for the answer.', detail: 'asked', stop: true};
     }},
-  {name: 'subagent', mode: 'agent', description: 'Hand one self-contained part of the job to a subagent: the same model, thinking less, with the project tools. It works on the same draft, cannot talk to the person or propose changes, and gives back its report as text. Give it the whole piece in task, with the screen and component names and what the report should say. Use it for a part you can describe on its own, not for small steps.',
-    properties: {task: {type: 'string', description: 'The whole piece of work: what to build or check, the names involved, and what to report back'}}, required: ['task'],
-    label: a => 'Subagent: ' + String(a.task || '').replace(/\s+/g, ' ').slice(0, 60), run: async (a, ctx) => {
+  {name: 'subagent', mode: 'agent', description: 'Hand one self-contained part of the job to a subagent. It works on the same draft with the project tools, cannot talk to the person or propose changes, and gives back its report as text. Give it the whole piece in task, with the screen and component names and what the report should say. Use it for a part you can describe on its own, not for small steps. Two modes: "default" (the Ling 3.1 Flash model, with high reasoning, and no limit on how often it is used) and "smart" (Claude Haiku 5.5, with high reasoning, usable once every 45 minutes for the whole team: a smart request inside that time is refused). Use default for most pieces, and smart only for a hard piece that default has not managed.',
+    properties: {task: {type: 'string', description: 'The whole piece of work: what to build or check, the names involved, and what to report back'},
+      mode: {type: 'string', enum: ['default', 'smart'], description: 'default (the default), or smart for a hard piece'}},
+    required: ['task'],
+    label: a => (smartMode(a) ? 'Smart subagent: ' : 'Subagent: ') + String(a.task || '').replace(/\s+/g, ' ').slice(0, 60), run: async (a, ctx) => {
       const task = String(a.task || '').trim();
       if (!task) throw new Error('give the subagent a task');
-      return ctx.assistant.runSubagent(task, ctx);
+      return ctx.assistant.runSubagent(task, ctx, smartMode(a) ? 'smart' : 'default');
     }},
   {name: 'scratch_write', mode: 'read', description: 'Keep a note for later steps (for example what you found, or a list still to do). Notes are kept for an hour, for this person and project; up to 40 notes.',
     properties: {key: {type: 'string'}, text: {type: 'string'}}, required: ['key', 'text'],
@@ -649,9 +665,9 @@ const PLANNING = new Set(['list_files', 'read_file', 'search_project', 'screen_o
   'calculate', 'web_search', 'fetch_doc', 'draft_status', 'update_plan', 'ask_user', 'scratch_read', 'scratch_list',
   'view_picture', 'subagent']);
 
-// What a subagent may not use: the tools that talk to the person or propose changes, the subagent tool itself (so a
-// subagent cannot start another one), and the pictures, since a subagent is given text only.
-const SUBAGENT_OFF = new Set(['subagent', 'propose_draft', 'propose_change', 'ask_user', 'update_plan', 'view_picture']);
+// What a subagent may not use: the tools that talk to the person or propose changes, and the subagent tool itself (so a
+// subagent cannot start another one). Pictures are offered only when its model takes them (needs: 'vision').
+const SUBAGENT_OFF = new Set(['subagent', 'propose_draft', 'propose_change', 'ask_user', 'update_plan']);
 
 // Whether a tool may be offered or used right now.
 function allowed(t, ctx) {
@@ -690,7 +706,12 @@ async function run(name, rawArgs, ctx) {
   const label = t.label(args || {});
   ctx.emit({type: 'tool', id: ctx.callId, name, label, state: 'running'});
   try {
-    const out = await t.run(args || {}, ctx);
+    // A call that was waiting for the draft lock when Stop was pressed does not run.
+    const go = () => {
+      if (ctx.signal && ctx.signal.aborted) throw new Error('stopped');
+      return t.run(args || {}, ctx);
+    };
+    const out = await (t.mode === 'draft' && ctx.lock ? ctx.lock(go) : go());
     const r = typeof out === 'string' ? {text: out} : out;
     ctx.emit({type: 'tool', id: ctx.callId, name, label, state: 'done', detail: r.detail || ''});
     return r;
@@ -700,4 +721,4 @@ async function run(name, rawArgs, ctx) {
   }
 }
 
-module.exports = {Draft, TOOLS, BLOCK_EXAMPLES, definitions, run, checkChange, numbered};
+module.exports = {Draft, TOOLS, BLOCK_EXAMPLES, definitions, run, checkChange, numbered, draftLock};

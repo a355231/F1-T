@@ -315,17 +315,35 @@ App Inventor tab that opened it as well, in case that tab's connection to the te
   property, method or event the component does not have, a block that names the wrong component type, and a global
   variable or procedure used but never defined. In full-app mode such a problem keeps the Apply button back until it
   is fixed. Yes/no and colour values are stored the way App Inventor writes them (`True`, `&HFFFF0000`).
-* **One subagent.** The helper can hand one self-contained part of a job to a subagent (the `subagent` tool). It is the
-  same model, on **low reasoning**, with the project tools, and it works on the same draft. It cannot talk to the
-  person, propose changes or ask a question, and it cannot start another subagent. The person sees its steps, not its
-  words. It gets 12 model answers and 4 minutes; if it cannot finish, the helper is told why and carries on. Reasoning
-  pieces that a reasoning model sends are kept and sent back with the tool calls they belong to.
-* **Context compactor.** One answer's conversation is kept within the model's room: **1M tokens** for the Claude 5
-  models, **256K** for the rest, or less if OpenRouter reports less for the model in use. `AI_CONTEXT_TOKENS` in
-  `ai.env` sets the room by hand. Past 75% of the room for the prompt, the oldest tool results are shortened first
-  (the draft and the project still hold what they said). If that is not enough, the model writes notes on the oldest
-  steps, and the answer goes on from them; the person is told "Making room". If the notes cannot be written, the
-  older steps are removed and the helper says so. The newest quarter of the room is never touched.
+* **Subagents.** The helper can hand one self-contained part of a job to a subagent (the `subagent` tool), in one of
+  two modes. Both use **high reasoning**, the project tools and the same draft. A subagent cannot talk to the person,
+  propose changes, ask a question or start another subagent. The person sees its steps and its reasoning, not its
+  words: its report goes back to the helper, and its card shows the start of it. A subagent that cannot finish (the
+  service still failing after retries, too many answers cut off, or a smart one that reaches its limits below) is
+  reported to the helper, and the answer goes on. Stop ends it at once, and a step repeated eight times in a row stops it.
+  * **default** (Ling 3.1 Flash) is for most pieces. It has no limit on steps, on time, or on how often it is used.
+  * **smart** (Claude Haiku 5.5) is for a hard piece. Its whole run has at most 12 model answers and 4 minutes, counted
+    from when it starts running. When it reaches either, it stops, and the helper is told to ask again with a smaller
+    piece. It can be used once every 45 minutes, for the whole team: a smart request inside that time is refused at
+    once, and the helper is told to use default or do the piece itself. The timer starts when a smart subagent starts
+    running, not when it is queued.
+* **Run modes.** How many subagents may run at once in one answer: **Normal** (one), **Parallel** (two) or
+  **Ultracode** (three). The rest wait in the order they were asked for, and their cards show them as queued. Their
+  time does not count against the answer's own time limit.
+* **Models and reasoning.** The helper answers with one of three models, chosen in the window: **Smart** (Claude Haiku
+  5.5), **Balanced** (Ling 3.1 Flash, the default) or **Fast** (Ling 3 Flash). **Reasoning** (Default, Low, Medium,
+  High or Max) sets how hard the model thinks before it answers. Max is only for Smart; on the other models it is High,
+  and the window says so. A reasoning answer has room for 32,000 tokens. If the service refuses Max, the question is
+  sent again with High, and the window says so. A model's reasoning is shown as "Thinking", and it is kept and sent back
+  with the tool calls it belongs to, so a thinking model keeps working across the steps of an answer.
+* **Context compactor.** One answer's conversation is kept within the model's room. The known rooms are **1M tokens**
+  for the Claude 5 models and **256K** (262,144 tokens) for the Ling 3 and 3.1 Flash models, and they are a ceiling:
+  `AI_CONTEXT_TOKENS` in `ai.env` may lower any room, but it cannot raise a known one. Any other model has **256K**, or
+  the number `AI_CONTEXT_TOKENS` sets. The size OpenRouter lists for the model in use can only lower the room further.
+  Past 75% of the room for the prompt, the oldest tool results are shortened first (the draft and the project still
+  hold what they said). If that is not enough, the model writes notes on the oldest steps, and the answer goes on from
+  them; the person is told "Making room". If the notes cannot be written, the older steps are removed and the helper
+  says so. The newest quarter of the room is never touched.
 * **Propose changes.** Nothing changes until someone presses Apply. Size is not a reason to refuse a change: a
   file may be up to 2 MB (a big screen is fine), and the files of one change may add up to 8 MB. The project is
   read a page at a time, so its total size alone does not stop the helper.
@@ -363,8 +381,9 @@ working on, the helper's change to that file is dropped, and the helper says so.
 away the unfinished app.
 
 **Pictures and the model.** Looking at pictures needs a model that accepts image input. The helper asks
-OpenRouter's list of models whether the configured one does, and remembers the answer for six hours.
-To set it by hand, add `AI_VISION=1` (or `AI_VISION=0`) to `/opt/appinventor/ai.env`.
+OpenRouter's list of models whether the model in use does (each of the three, and each subagent's), and remembers the
+answer for six hours. To set it by hand for the helper's own model, add `AI_VISION=1` (or `AI_VISION=0`) to
+`/opt/appinventor/ai.env`. Subagents always go by OpenRouter's list.
 
 **In the window:** Enter sends, Shift+Enter starts a new line, Esc or the square button stops, `/`
 lists the commands, Copy works on answers and code blocks, and Try again redoes the last question.
@@ -392,7 +411,7 @@ other projects, and files other than screens and PNG or JPG pictures. The helper
 names, not whether the blocks do what you intended; App Inventor still reports block errors when it opens.
 
 Set it up on the Pi:
-* `sudo /opt/appinventor/set-ai.sh` asks for the OpenRouter key and the model name.
+* `sudo /opt/appinventor/set-ai.sh` asks for the OpenRouter key.
 * `sudo /opt/appinventor/set-ai.sh --pin` asks for the full-app PIN (typing is hidden). Anyone in the Team
   panel can change it too: **Change override PIN…** asks for the current PIN, then the new one (or makes one
   up), and the new PIN works at once. Wrong guesses share the lock that `/override` has. **Also turn full-app
@@ -403,11 +422,16 @@ Set it up on the Pi:
 * Pictures made here need `librsvg2-bin`; the Pi build installs it. If it is missing:
   `sudo apt install librsvg2-bin`.
 
-Keys and the model are stored in `/opt/appinventor/ai.env`, readable only by root. The PIN is stored in
+Keys and the models are stored in `/opt/appinventor/ai.env`, readable only by root. The PIN is stored in
 `/opt/appinventor/overridepin`, readable only by the user App Inventor runs as, which is how the Team panel
 can change it without a restart (an older PIN in `ai.env` is used only until one is saved). Both are **not in the source**. They never reach a browser or the model. Questions are limited to 12 a minute
-per person and 300 a day for the team (a goal counts as five). Anyone with the team code can use the
-helper; the PIN is what unlocks full-app mode.
+per person and 300 a day for the team (a goal counts as five); subagents do not count against these limits. Anyone
+with the team code can use the helper; the PIN is what unlocks full-app mode.
+
+The three models of the presets are set in `ai.env` by `AI_MODEL_SMART`, `AI_MODEL_BALANCED` and `AI_MODEL_FAST`.
+Each changes only the model name of its preset: the labels, the names shown and the reasoning levels stay the same, and
+without them the defaults above are used. `OPENROUTER_MODEL` is no longer read for the helper, so an old line in
+`ai.env` does nothing. The subagent models are fixed.
 
 Privacy and safety: the project's screen files and your questions are sent to OpenRouter's model when
 you ask, and so are any pictures you attach or the helper looks at. Web and documentation results are read as data, never as

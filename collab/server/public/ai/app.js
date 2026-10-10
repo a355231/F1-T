@@ -1,6 +1,7 @@
 // The AI helper's window. The server streams its answer as events (see collab/server/ai.js); this file
-// shows each one as it arrives: text as it is written, tool steps as chips, pictures, proposals with
-// Apply, the plan for a goal, and notices. Everything the model writes is sanitised before it is shown.
+// shows each one as it arrives: text as it is written, the model's reasoning, tool steps as chips,
+// subagents as cards, pictures, proposals with Apply, the plan for a goal, and notices. Everything the
+// model writes is sanitised before it is shown; text from the server is shown as text.
 (function () {
   'use strict';
 
@@ -26,7 +27,8 @@
   var COPY = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 15V6.5A1.5 1.5 0 0 1 6.5 5H15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
   var RETRY = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4.5h4.5"/></svg>';
   // The slash menu. Some commands are handled here, some by the server, and /check, /explain and /fix are
-  // questions the window sends to the model for the person.
+  // questions the window sends to the model for the person. /effort, /model, /mode and /reasoning set the
+  // choices under the box.
   var COMMANDS = [
     {cmd: '/goal', help: 'Work toward a goal in steps, with a plan'},
     {cmd: '/plan', help: 'Plan a change, without changing anything'},
@@ -34,6 +36,9 @@
     {cmd: '/explain', help: 'Explain how the project works'},
     {cmd: '/fix', help: 'Make the smallest change that fixes one problem'},
     {cmd: '/effort', help: 'How hard the helper works: low, medium or high'},
+    {cmd: '/model', help: 'Which model answers: smart, balanced or fast'},
+    {cmd: '/mode', help: 'Subagents at once: normal, parallel or ultracode'},
+    {cmd: '/reasoning', help: 'How hard the model thinks: default to max'},
     {cmd: '/override', help: 'Full-app mode, with the PIN'},
     {cmd: '/discard', help: 'Throw away an unfinished full app'},
     {cmd: '/new', help: 'Start a new conversation'},
@@ -63,9 +68,11 @@
     return e;
   }
 
+  // Raw HTML in the model's words is sanitised: scripts, event handlers and javascript: links go. Pictures and
+  // drawings are not written inline (they come as picture cards), so img, svg and math are dropped too.
   function render(md) {
     var html = marked.parse(md || '', {breaks: true, gfm: true});
-    return DOMPurify.sanitize(html, {FORBID_TAGS: ['img', 'style', 'form', 'input'], FORBID_ATTR: ['style']});
+    return DOMPurify.sanitize(html, {FORBID_TAGS: ['img', 'style', 'form', 'input', 'svg', 'math'], FORBID_ATTR: ['style']});
   }
 
   function enhanceCode(root) {
@@ -107,6 +114,14 @@
     stick = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 90;
     if (stick) jump.hidden = true;
   });
+  // The "New messages" pill sits just above the box, whatever the box's height (it grows with the pickers).
+  var composerBox = $('composer');
+  function placeJump() {
+    document.documentElement.style.setProperty('--composer-h', composerBox.offsetHeight + 'px');
+  }
+  if (window.ResizeObserver) new ResizeObserver(placeJump).observe(composerBox);
+  window.addEventListener('resize', placeJump);
+  placeJump();
   jump.onclick = function () {
     stick = true;
     chat.scrollTo({top: chat.scrollHeight, behavior: 'smooth'});
@@ -153,7 +168,8 @@
     list.appendChild(row);
     keepBottom();
 
-    var api = {row: row, turn: turn, thinking: thinking, cur: null, raw: '', full: '', chips: {}, planEl: null, scheduled: false};
+    var api = {row: row, turn: turn, thinking: thinking, cur: null, raw: '', full: '', chips: Object.create(null),
+      subs: Object.create(null), think: null, thinkText: null, planEl: null, scheduled: false};
 
     function closeText() {
       if (api.cur) {
@@ -185,13 +201,30 @@
         });
       }
     };
-    // The service was tried again: what the failed try showed is taken back.
+    // The model's own reasoning, in a block above the answer. The block is made when the first of it arrives.
+    api.reason = function (delta) {
+      if (!api.think) {
+        api.think = el('details', 'think');
+        api.think.appendChild(el('summary', '', 'Thinking'));
+        api.thinkText = el('div', 'think-text');
+        api.think.appendChild(api.thinkText);
+        turn.insertBefore(api.think, turn.firstChild);
+      }
+      api.thinkText.appendChild(document.createTextNode(delta));
+      keepBottom();
+    };
+    // The service was tried again: what the failed try showed, its reasoning too, is taken back.
     api.resetText = function () {
       if (api.cur) {
         api.full = api.full.slice(0, api.full.length - api.raw.length);
         api.cur.remove();
         api.cur = null;
         api.raw = '';
+      }
+      if (api.think) {
+        api.think.remove();
+        api.think = null;
+        api.thinkText = null;
       }
       Object.keys(api.chips).forEach(function (id) {   // a step still marked as running belongs to the failed try
         var c = api.chips[id];
@@ -226,6 +259,12 @@
       if (hint) hint.remove();
       if (thinking.parentNode) thinking.remove();
       closeText();
+      Object.keys(api.subs).forEach(function (id) {   // a subagent still going when the answer ends was stopped
+        var s = api.subs[id];
+        if (s.ended) return;
+        s.card.className = 'card subagent stopped';
+        s.state.textContent = 'Stopped';
+      });
       var acts = el('div', 'row-actions keep');
       var copy = el('button', 'iconbtn');
       copy.type = 'button';
@@ -247,7 +286,8 @@
       c.appendChild(el('span', 'label'));
       c.appendChild(el('span', 'detail'));
       api.chips[ev.id] = c;
-      api.block(c);
+      if (ev.sub) subCard(api, ev.sub).chips.appendChild(c);   // a step of a subagent: inside its card
+      else api.block(c);
     }
     c.className = 'chip ' + ev.state;
     c.querySelector('.label').textContent = ev.label;
@@ -354,6 +394,105 @@
     goalUpdate(steps);
   }
 
+  // ---- subagents: a card each, with its steps as chips, its reasoning and its report ----
+
+  var SUB_STATES = {queued: 'Queued', running: 'Running', resting: 'Resting', done: 'Done', failed: 'Failed'};
+  var SUB_TIERS = {default: 'Default', smart: 'Smart'};
+
+  function hasOwn(map, key) {
+    return Object.prototype.hasOwnProperty.call(map, key);
+  }
+
+  // A part of a card that opens and shuts: a summary and a box, hidden until something goes in it.
+  function section(title) {
+    var box = el('details', 'sa-section');
+    box.hidden = true;
+    box.appendChild(el('summary', '', title));
+    var body = el('div', 'sa-body');
+    box.appendChild(body);
+    return {box: box, body: body};
+  }
+
+  // The card of one subagent, made the first time anything about it arrives. Its text is shown as text only.
+  function subCard(api, id) {
+    if (api.subs[id]) return api.subs[id];
+    var card = el('div', 'card subagent');
+    var head = el('div', 'sa-head');
+    head.appendChild(el('span', 'ctitle', 'Subagent'));
+    var state = el('span', 'sa-state');
+    head.appendChild(state);
+    var meta = el('div', 'sa-meta');
+    var tier = el('span', 'sa-tier');
+    var model = el('span', 'sa-model');
+    var eff = el('span', 'sa-eff');
+    meta.appendChild(tier);
+    meta.appendChild(model);
+    meta.appendChild(eff);
+    var task = el('div', 'sa-task');
+    var info = el('div', 'sa-info');
+    var chips = el('div', 'sa-chips');
+    var lines = el('div', 'sa-lines');
+    var reason = section('Reasoning');
+    var report = section('Report');
+    [head, meta, task, info, chips, lines, reason.box, report.box].forEach(function (n) { card.appendChild(n); });
+    api.block(card);
+    api.subs[id] = {card: card, state: state, tier: tier, model: model, eff: eff, task: task, info: info,
+      chips: chips, lines: lines, reason: reason, report: report, ended: false};
+    return api.subs[id];
+  }
+
+  // The subagent's own event: its tier, model, state and task, and its report once it is done.
+  function subagent(api, ev) {
+    var s = subCard(api, ev.id);
+    var known = hasOwn(SUB_STATES, ev.state) ? ev.state : '';
+    s.ended = ev.state === 'done' || ev.state === 'failed';
+    s.card.className = 'card subagent' + (known ? ' ' + known : '');
+    s.state.textContent = known ? SUB_STATES[known] : '';
+    s.tier.textContent = hasOwn(SUB_TIERS, ev.tier) ? SUB_TIERS[ev.tier] : 'Subagent';
+    s.tier.className = 'sa-tier' + (ev.tier === 'smart' ? ' smart' : '');
+    s.model.textContent = ev.name || ev.model || '';
+    s.model.title = ev.model || '';
+    s.eff.textContent = 'reasoning ' + (ev.reasoning || 'high');
+    if (typeof ev.task === 'string') s.task.textContent = ev.task;
+    var info = [];
+    if (typeof ev.steps === 'number') info.push(ev.steps + (ev.steps === 1 ? ' step' : ' steps'));
+    if (ev.detail) info.push(String(ev.detail));
+    s.info.textContent = info.join(' · ');
+    if (ev.state === 'done' && typeof ev.report === 'string' && ev.report) {
+      s.report.body.textContent = ev.report;
+      s.report.box.hidden = false;
+    }
+    keepBottom();
+  }
+
+  function subReason(api, ev) {
+    var s = subCard(api, ev.sub);
+    s.reason.box.hidden = false;
+    s.reason.body.appendChild(document.createTextNode(String(ev.delta)));
+    keepBottom();
+  }
+
+  function subStatus(api, ev) {
+    subCard(api, ev.sub).lines.appendChild(el('div', 'sa-line', ev.text));
+    keepBottom();
+  }
+
+  // A subagent's try was tried again: its reasoning and the steps still running from the failed try are taken back,
+  // so the retry starts clean. Its other steps, its status lines and every other card are left as they are.
+  function subReset(api, ev) {
+    var s = api.subs[ev.sub];
+    if (!s) return;
+    s.reason.body.textContent = '';
+    s.reason.box.hidden = true;
+    Object.keys(api.chips).forEach(function (id) {
+      var c = api.chips[id];
+      if (c.parentNode === s.chips && c.classList.contains('running')) {
+        c.remove();
+        delete api.chips[id];
+      }
+    });
+  }
+
   function notice(api, text, isError) {
     api.block(el('div', 'notice' + (isError ? ' error' : ''), text));
   }
@@ -370,13 +509,21 @@
     api.alive();
     switch (ev.type) {
       case 'text': api.text(ev.delta); break;
+      case 'reasoning':
+        if (ev.delta) {
+          if (ev.sub) subReason(api, ev);
+          else api.reason(String(ev.delta));
+        }
+        break;
       case 'tool': chip(api, ev); break;
+      case 'subagent': subagent(api, ev); break;
       case 'artifact': picture(api, ev); break;
       case 'proposal': proposal(api, ev); break;
       case 'plan': plan(api, ev.steps || []); break;
-      case 'status': notice(api, ev.text, false); break;
+      case 'status': if (ev.sub) subStatus(api, ev); else notice(api, ev.text, false); break;
       case 'question': question(api, ev.text); break;
-      case 'reset': api.resetText(); break;
+      case 'cooldown': smartTimer(ev.smartReadyInSeconds); break;
+      case 'reset': if (ev.sub) subReset(api, ev); else api.resetText(); break;
       case 'error': notice(api, ev.message, true); break;
       default: break;
     }
@@ -631,6 +778,249 @@
   effortInput.oninput = function () { setEffort(EFFORTS[Number(effortInput.value)] || 'medium'); };
   setEffort(effort);
 
+  // ---- model, run mode and reasoning: the pickers under the box, remembered on this computer. The lists and the
+  // defaults come from GET /collab/ai/presets; the lists here are used only until that call has answered. ----
+
+  var PRESET_IDS = ['smart', 'balanced', 'fast'];
+  var MODE_IDS = ['normal', 'parallel', 'ultracode'];
+  var REASONS = ['default', 'low', 'medium', 'high', 'max'];
+  var REASON_TEXT = {default: 'Default', low: 'Low', medium: 'Medium', high: 'High', max: 'Max'};
+  var presetList = [
+    {id: 'smart', label: 'Smart', name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5',
+      reasoningLevels: ['default', 'low', 'medium', 'high', 'max']},
+    {id: 'balanced', label: 'Balanced', name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash',
+      reasoningLevels: ['default', 'low', 'medium', 'high']},
+    {id: 'fast', label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash',
+      reasoningLevels: ['default', 'low', 'medium', 'high']},
+  ];
+  var modeList = [
+    {id: 'normal', label: 'Normal', agents: 1},
+    {id: 'parallel', label: 'Parallel', agents: 2},
+    {id: 'ultracode', label: 'Ultracode', agents: 3},
+  ];
+  var pickModel = $('pickModel');
+  var pickMode = $('pickMode');
+  var pickReasoning = $('pickReasoning');
+  var smartLine = $('smartLine');
+  var smartReadyAt = 0;      // when a smart subagent may run again (ms since the epoch); 0 when it may now
+  var serverDefaults = {};   // the defaults GET /collab/ai/presets gives
+  var kept = {               // what this computer remembers; null where nothing valid is kept
+    model: keptChoice('aihelper.model', PRESET_IDS),
+    mode: keptChoice('aihelper.mode', MODE_IDS),
+    reasoning: keptChoice('aihelper.reasoning', REASONS),
+  };
+  var preset = 'balanced';
+  var runMode = 'normal';
+  var reasoning = 'default';
+
+  function keptChoice(key, ids) {
+    try {
+      var v = localStorage.getItem(key);
+      if (ids.indexOf(v) >= 0) return v;
+    } catch (e) {
+      // no storage here: the default is used
+    }
+    return null;
+  }
+
+  function store(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch (e) {
+      // not remembered
+    }
+  }
+
+  function hasId(x) {
+    return !!x && typeof x.id === 'string';
+  }
+
+  function idOf(x) {
+    return x.id;
+  }
+
+  function presetOf(id) {
+    for (var i = 0; i < presetList.length; i++) {
+      if (presetList[i].id === id) return presetList[i];
+    }
+    return null;
+  }
+
+  function modeOf(id) {
+    for (var i = 0; i < modeList.length; i++) {
+      if (modeList[i].id === id) return modeList[i];
+    }
+    return null;
+  }
+
+  // The names the person sees: the model's name with its tier, and a mode with its count.
+  function presetText(id) {
+    var p = presetOf(id);
+    return p ? p.name + ' (' + p.label + ')' : id;
+  }
+
+  function modeText(id) {
+    var m = modeOf(id);
+    return m ? m.label + ' · ' + m.agents + ' at once' : id;
+  }
+
+  // Max is only for the preset that lists it (the Smart one).
+  function reasonAllowed(level) {
+    var p = presetOf(preset);
+    var levels = p && Array.isArray(p.reasoningLevels) ? p.reasoningLevels : ['default', 'low', 'medium', 'high'];
+    return levels.indexOf(level) >= 0;
+  }
+
+  // Sets the options of a picker. They are only written when their text changes, so a list that is open is
+  // not reset when the presets are fetched again.
+  function fillPicker(sel, items) {
+    var same = sel.options.length === items.length;
+    for (var i = 0; same && i < items.length; i++) {
+      same = sel.options[i].value === items[i].value && sel.options[i].textContent === items[i].text;
+    }
+    if (same) return;
+    sel.textContent = '';
+    items.forEach(function (it) {
+      var o = el('option', '', it.text);
+      o.value = it.value;
+      sel.appendChild(o);
+    });
+  }
+
+  function syncPickers() {
+    fillPicker(pickModel, presetList.map(function (p) { return {value: p.id, text: presetText(p.id)}; }));
+    fillPicker(pickMode, modeList.map(function (m) { return {value: m.id, text: modeText(m.id)}; }));
+    fillPicker(pickReasoning, REASONS.map(function (r) { return {value: r, text: REASON_TEXT[r]}; }));
+    pickModel.value = preset;
+    pickMode.value = runMode;
+    pickReasoning.value = reasoning;
+    Array.prototype.forEach.call(pickReasoning.options, function (o) { o.disabled = !reasonAllowed(o.value); });
+    pickReasoning.title = reasonAllowed('max') ? 'How hard the model thinks'
+      : 'How hard the model thinks. Max is only for the Smart model.';
+  }
+
+  function setReasoning(level) {
+    reasoning = level;
+    kept.reasoning = level;
+    store('aihelper.reasoning', level);
+    syncPickers();
+  }
+
+  // Returns true when Max was given up because the model changed away from Smart: High is used instead.
+  function setPreset(id) {
+    preset = id;
+    kept.model = id;
+    store('aihelper.model', id);
+    var clamped = !reasonAllowed(reasoning);
+    if (clamped) setReasoning('high');
+    else syncPickers();
+    updateVision();
+    loadVision();
+    return clamped;
+  }
+
+  function setRunMode(id) {
+    runMode = id;
+    kept.mode = id;
+    store('aihelper.mode', id);
+    syncPickers();
+  }
+
+  // The choice on this computer wins; then the server's default; then the built-in one.
+  function chosen(saved, ids, serverDefault, fallback) {
+    if (ids.indexOf(saved) >= 0) return saved;
+    return ids.indexOf(serverDefault) >= 0 ? serverDefault : fallback;
+  }
+
+  function refreshChoices() {
+    preset = chosen(kept.model, presetList.map(idOf), serverDefaults.model, 'balanced');
+    runMode = chosen(kept.mode, modeList.map(idOf), serverDefaults.mode, 'normal');
+    reasoning = chosen(kept.reasoning, REASONS, serverDefaults.reasoning, 'default');
+    if (!reasonAllowed(reasoning)) setReasoning('high');
+    else syncPickers();
+  }
+
+  pickModel.onchange = function () {
+    if (setPreset(pickModel.value)) flash('Max reasoning is only for the Smart model, so high is used.');
+  };
+  pickMode.onchange = function () { setRunMode(pickMode.value); };
+  pickReasoning.onchange = function () {
+    if (reasonAllowed(pickReasoning.value)) setReasoning(pickReasoning.value);
+    else syncPickers();
+  };
+
+  // The pictures button follows the model in use. The server says whether a model takes pictures, for the preset
+  // asked about (each preset has its own model), so the answers are kept by preset.
+  var visionByPreset = {};
+  function updateVision() {
+    visionOn = visionByPreset[preset] === true;
+    attach.hidden = !visionOn;
+  }
+
+  // The status route for a preset: its picture answer is for that preset's model.
+  function statusUrl(asked) {
+    return '/collab/ai/status?projectId=' + encodeURIComponent(projectId) + '&preset=' + encodeURIComponent(asked);
+  }
+
+  // Asks the server about the preset in use. It is asked again each time the person changes the model.
+  function loadVision() {
+    if (!projectId) return;
+    var asked = preset;
+    fetch(statusUrl(asked), {credentials: 'same-origin'})
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (s) {
+        if (!s) return;
+        visionByPreset[asked] = !!s.vision;
+        updateVision();
+      })
+      .catch(function () {
+        // the button stays as it is
+      });
+  }
+
+  // The smart subagent: ready, or the minutes until it may run again. The server says when, in the presets and
+  // in the cooldown events.
+  function showSmart() {
+    var left = smartReadyAt - Date.now();
+    smartLine.textContent = left > 0 ? 'Smart subagent: available in ' + Math.ceil(left / 60000) + ' min'
+      : 'Smart subagent: ready';
+  }
+
+  function smartTimer(secs) {
+    smartReadyAt = Date.now() + Math.max(0, Number(secs) || 0) * 1000;
+    showSmart();
+  }
+
+  function applyPresets(d) {
+    var before = preset;
+    presetList = d.presets.filter(hasId);
+    if (Array.isArray(d.runModes) && d.runModes.filter(hasId).length) modeList = d.runModes.filter(hasId);
+    serverDefaults = {model: d.defaultPreset, mode: d.defaultRunMode, reasoning: d.defaultReasoning};
+    var sm = d.subagents && d.subagents.smart;
+    if (sm) {
+      smartReadyAt = Date.now() + Math.max(0, Number(sm.readyInSeconds) || 0) * 1000;
+      smartLine.title = 'A smart subagent runs once every ' + (Number(sm.cooldownMinutes) || 45) +
+        ' minutes, for the whole team server.';
+    }
+    refreshChoices();
+    if (preset !== before) loadVision();   // the server's default changed the model in use
+    updateVision();
+    showSmart();
+  }
+
+  // Fetched on start, after each answer and every 30 seconds. If it fails, the lists and defaults stay as they are.
+  function loadPresets() {
+    fetch('/collab/ai/presets', {credentials: 'same-origin'})
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (d && Array.isArray(d.presets) && d.presets.length) applyPresets(d);
+      })
+      .catch(function () {
+        // the lists and defaults stay as they are
+      })
+      .then(showSmart);
+  }
+
   // ---- commands ----
 
   var HELP = [
@@ -642,6 +1032,9 @@
     '- `/explain [focus]`: explain how the project works',
     '- `/fix <problem>`: make the smallest change that fixes one problem',
     '- `/effort low`, `medium` or `high`: how hard the helper works (the slider does the same)',
+    '- `/model smart`, `balanced` or `fast`: which model writes the helper\'s answers (the menus under the box do the same)',
+    '- `/mode normal`, `parallel` or `ultracode`: how many subagents may work at once in one answer',
+    '- `/reasoning default`, `low`, `medium`, `high` or `max`: how hard the model thinks (max is only for Smart)',
     '- `/override <PIN>`: full-app mode for an hour; `/override off` turns it off',
     '- `/discard`: throw away an unfinished full app',
     '- `/new`: start a new conversation (also `/clear`)',
@@ -680,6 +1073,56 @@
     save();
   }
 
+  function effortCommand(arg) {
+    if (!arg) {
+      showLocal('Effort is **' + EFFORT_TEXT[effort] + '**. Move the slider under the box, or type `/effort low`, `/effort medium` or `/effort high`.');
+    } else if (EFFORTS.indexOf(arg.toLowerCase()) < 0) {
+      showLocal('Choose `low`, `medium` or `high`, for example `/effort high`.');
+    } else {
+      setEffort(arg.toLowerCase());
+      showLocal('Effort is now **' + EFFORT_TEXT[effort] + '**. ' + EFFORT_WHAT[effort]);
+    }
+  }
+
+  function modelCommand(arg) {
+    var id = arg.toLowerCase();
+    if (!arg) {
+      showLocal('The model is **' + presetText(preset) + '**. Type `/model smart`, `/model balanced` or `/model fast` to change it.');
+    } else if (!presetOf(id)) {
+      showLocal('Choose `smart`, `balanced` or `fast`, for example `/model smart`.');
+    } else {
+      var clamped = setPreset(id);
+      showLocal('The model is now **' + presetText(preset) + '**.' +
+        (clamped ? ' Reasoning is now **High**, because Max is only for the Smart model.' : ''));
+    }
+  }
+
+  function modeCommand(arg) {
+    var id = arg.toLowerCase();
+    if (!arg) {
+      showLocal('The mode is **' + modeText(runMode) + '**. Type `/mode normal`, `/mode parallel` or `/mode ultracode` to change it.');
+    } else if (!modeOf(id)) {
+      showLocal('Choose `normal`, `parallel` or `ultracode`, for example `/mode parallel`.');
+    } else {
+      setRunMode(id);
+      showLocal('The mode is now **' + modeText(runMode) + '**.');
+    }
+  }
+
+  function reasoningCommand(arg) {
+    var level = arg.toLowerCase();
+    if (!arg) {
+      showLocal('Reasoning is **' + REASON_TEXT[reasoning] + '**. Type `/reasoning default`, `low`, `medium`, `high` or `max` to change it.');
+    } else if (REASONS.indexOf(level) < 0) {
+      showLocal('Choose `default`, `low`, `medium`, `high` or `max`, for example `/reasoning high`.');
+    } else if (!reasonAllowed(level)) {
+      showLocal('Max reasoning is only for the Smart model. Type `/model smart` first, or choose `/reasoning high`.');
+    } else {
+      setReasoning(level);
+      showLocal('Reasoning is now **' + REASON_TEXT[reasoning] + '**.');
+    }
+  }
+
   // The commands the window does itself: they never reach the model.
   function runLocal(name, arg, typed) {
     input.value = '';
@@ -689,16 +1132,11 @@
       return;
     }
     addUser(typed);
-    if (name === 'help') {
-      showLocal(HELP);
-    } else if (!arg) {
-      showLocal('Effort is **' + EFFORT_TEXT[effort] + '**. Move the slider under the box, or type `/effort low`, `/effort medium` or `/effort high`.');
-    } else if (EFFORTS.indexOf(arg.toLowerCase()) < 0) {
-      showLocal('Choose `low`, `medium` or `high`, for example `/effort high`.');
-    } else {
-      setEffort(arg.toLowerCase());
-      showLocal('Effort is now **' + EFFORT_TEXT[effort] + '**. ' + EFFORT_WHAT[effort]);
-    }
+    if (name === 'help') showLocal(HELP);
+    else if (name === 'model') modelCommand(arg);
+    else if (name === 'mode') modeCommand(arg);
+    else if (name === 'reasoning') reasoningCommand(arg);
+    else effortCommand(arg);
   }
 
   function focusOn(focus) {
@@ -711,7 +1149,7 @@
     var m = /^\/([a-z]+)\s*([\s\S]*)$/i.exec(text);
     var name = m ? m[1].toLowerCase() : '';
     var arg = m ? m[2].trim() : '';
-    if (name === 'help' || name === 'effort' || name === 'new' || name === 'clear') {
+    if (['help', 'effort', 'model', 'mode', 'reasoning', 'new', 'clear'].indexOf(name) >= 0) {
       runLocal(name, arg, text);
       return;
     }
@@ -751,7 +1189,8 @@
     autosize();
     var api = newAssistant();
     if (isGoal) startGoal(text.replace(/^\/goal\s*/i, ''));
-    var body = {projectId: projectId, effort: effort, messages: isOverride ? [{role: 'user', content: text}] : history.slice(-20)};
+    var body = {projectId: projectId, effort: effort, preset: preset, runMode: runMode, reasoning: reasoning,
+      messages: isOverride ? [{role: 'user', content: text}] : history.slice(-20)};
     if (images.length) body.images = images.map(function (p) { return {name: p.name, mime: p.mime, data: p.data}; });
     runStream(api, body, {goal: isGoal, override: isOverride, row: row});
   }
@@ -789,6 +1228,7 @@
         }
       }
       save();
+      loadPresets();   // the smart subagent may have started its timer during this answer
     });
   }
 
@@ -1052,7 +1492,8 @@
       $('sub').textContent = 'Open a project in App Inventor first';
       return;
     }
-    fetch('/collab/ai/status?projectId=' + encodeURIComponent(projectId), {credentials: 'same-origin'})
+    var asked = preset;
+    fetch(statusUrl(asked), {credentials: 'same-origin'})
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
         if (!s) {
@@ -1060,8 +1501,8 @@
           return;
         }
         fullUntil = s.fullUntil || 0;
-        visionOn = !!s.vision;
-        attach.hidden = !visionOn;
+        visionByPreset[asked] = !!s.vision;
+        updateVision();
         showMode();
         $('sub').textContent = 'Signed in as ' + s.name + (s.search ? ' · web search on' : '');
         if (!s.configured) $('notSet').hidden = false;
@@ -1074,10 +1515,18 @@
 
   restore();
   if (!list.children.length) empty.hidden = false;
+  syncPickers();
+  refreshChoices();
+  showSmart();
   loadStatus();
-  setInterval(showMode, 30000);
+  loadPresets();
+  setInterval(function () { showMode(); loadPresets(); }, 30000);
   setBusy(false);
   autosize();
   input.focus();
-  window.__aiHelper = {send: send};   // for the tests
+  // for the tests
+  window.__aiHelper = {
+    send: send,
+    choices: function () { return {preset: preset, runMode: runMode, reasoning: reasoning}; },
+  };
 })();

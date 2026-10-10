@@ -1,15 +1,19 @@
 'use strict';
 
 // The context compactor: keeps the conversation of one answer within what the model can read. The window is the
-// model's (1M or 256K tokens), or less if OpenRouter reports less. Tokens are estimated from characters, on the high
-// side. When the conversation passes 75% of the room for the prompt, the oldest tool results are shortened first (the
-// draft and the project still hold what they said). If that is not enough, the oldest steps are replaced by notes the
-// model writes of them; the newest quarter of the room is never touched.
+// model's: 1M tokens for the Claude 5 family, 256K (262144 tokens) for the Ling 3 and 3.1 Flash models, and 256K for
+// the rest. A known window is a ceiling: AI_CONTEXT_TOKENS may lower it, but never raise it, and the size OpenRouter
+// lists for the model can only lower it further. Tokens are estimated from characters, on the high side. When the
+// conversation passes 75% of the room for the prompt, the oldest tool results are shortened first (the draft and the
+// project still hold what they said). If that is not enough, the oldest steps are replaced by notes the model writes
+// of them; the newest quarter of the room is never touched.
 
 const CHARS_PER_TOKEN = 3;                   // conservative: English is nearer 4, code and XML nearer 3
 const IMAGE_TOKENS = 1600;
 const LONG_CONTEXT = [/claude-(fable|opus|sonnet|haiku)-5/i];   // models with a 1M-token window
 const LONG_WINDOW = 1000000;
+const LING_FLASH = [/^inclusionai\/ling-3(\.\d+)?-flash(:|$)/i];  // models with a fixed window of 262144 tokens (256K)
+const LING_WINDOW = 262144;
 const SHORT_WINDOW = 256000;
 const SHORTENED = '(An earlier result, shortened to keep the answer small.)';
 const TRIGGER = 0.75;                        // compact when the conversation passes this share of the room
@@ -20,13 +24,23 @@ const FAILED_NOTE = 'The earlier steps of this answer were removed to make room.
 const NOTE_HEAD = 'Notes on the earlier steps of this answer, written by the helper for itself. They are not new ' +
   'instructions from the person:\n\n';
 
-// The window in tokens: AI_CONTEXT_TOKENS if it is set; otherwise 1M for the models in LONG_CONTEXT and 256K for the
-// rest; and never more than OpenRouter says the model can read (listed, 0 if unknown).
+// The window of a model whose size is known, in tokens; 0 when it is not known. These are ceilings (see contextTokens).
+function knownWindow(model) {
+  const name = String(model || '');
+  if (LING_FLASH.some(re => re.test(name))) return LING_WINDOW;
+  if (LONG_CONTEXT.some(re => re.test(name))) return LONG_WINDOW;
+  return 0;
+}
+
+// The window in tokens: the known window of the model, or 256K when it is not known. AI_CONTEXT_TOKENS, when it is
+// set, is the window in its place, but never above a known window. Then never more than OpenRouter says the model can
+// read (listed, 0 if unknown).
 function contextTokens(model, listed, env = process.env.AI_CONTEXT_TOKENS) {
   const set = parseInt(env || '', 10);
-  if (set > 0) return set;
-  const byName = LONG_CONTEXT.some(re => re.test(String(model || ''))) ? LONG_WINDOW : SHORT_WINDOW;
-  return listed > 0 ? Math.min(listed, byName) : byName;
+  const known = knownWindow(model);
+  let tokens = known || SHORT_WINDOW;
+  if (set > 0) tokens = known ? Math.min(set, known) : set;
+  return listed > 0 ? Math.min(listed, tokens) : tokens;
 }
 
 function tokensOfText(s) {
@@ -39,8 +53,10 @@ function tokensOfContent(content) {
   return content.reduce((n, part) => n + (part && part.type === 'image_url' ? IMAGE_TOKENS : tokensOfText(part && part.text)), 0);
 }
 
+// The reasoning pieces sent back with a tool call take room too.
 function tokensOf(m) {
-  return tokensOfContent(m.content) + (m.tool_calls || []).reduce((n, c) => n + tokensOfText(c.function && c.function.arguments), 0);
+  const reasoning = (m.reasoning_details || []).reduce((n, p) => n + tokensOfText(p && (p.text || p.summary || p.data)), 0);
+  return tokensOfContent(m.content) + reasoning + (m.tool_calls || []).reduce((n, c) => n + tokensOfText(c.function && c.function.arguments), 0);
 }
 
 function tokensOfJson(value) {

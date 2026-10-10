@@ -62,6 +62,20 @@
     </button>
   </div>
   <div class="tools">
+    <div class="picks">
+      <label class="pick" title="Which model writes the helper's own answers">
+        <span>Model:</span>
+        <select id="pickModel" aria-label="Model"></select>
+      </label>
+      <label class="pick" title="How many subagents may work at once in one answer">
+        <span>Mode:</span>
+        <select id="pickMode" aria-label="Mode"></select>
+      </label>
+      <label class="pick" title="How hard the model thinks before it answers">
+        <span>Reasoning:</span>
+        <select id="pickReasoning" aria-label="Reasoning"></select>
+      </label>
+    </div>
     <label class="effort" title="How hard the helper works">
       <span>Effort</span>
       <input id="effort" type="range" min="0" max="2" step="1" value="1" aria-label="Effort: how hard the helper works">
@@ -69,6 +83,7 @@
     </label>
     <div class="hint" id="hint">Enter sends · Shift+Enter for a new line · Esc stops</div>
   </div>
+  <div class="smartline" id="smartLine">Smart subagent: ready</div>
 </form>
 
 <script src="/collab/ai/static/marked.js"></script>

@@ -103,3 +103,58 @@ test('the room for the prompt is what is left after the answer and the tool defi
   assert.strictEqual(b.trigger, Math.floor(228000 * 0.75));
   assert.ok(b.goal < b.trigger && b.recent < b.goal);
 });
+
+test('reasoning pieces sent back with a tool call take room in the window too', () => {
+  const plain = {role: 'assistant', content: null, tool_calls: [{id: 't', type: 'function', function: {name: 'x', arguments: '{}'}}]};
+  const thinking = Object.assign({}, plain, {reasoning_details: [{type: 'reasoning.text', text: big(3000), index: 0}]});
+  assert.ok(c.tokensOf(thinking) - c.tokensOf(plain) >= 1000);
+});
+
+test('the Ling 3.1 and 3.0 Flash models have a window of 262144 tokens, whether OpenRouter lists 1M or nothing', () => {
+  for (const model of ['inclusionai/ling-3.1-flash', 'inclusionai/ling-3.0-flash']) {
+    assert.strictEqual(c.contextTokens(model, 1000000, undefined), 262144, model + ' when 1M is listed');
+    assert.strictEqual(c.contextTokens(model, 0, undefined), 262144, model + ' when nothing is listed');
+  }
+});
+
+test('AI_CONTEXT_TOKENS=1000000 cannot raise a Ling Flash model above 262144 tokens', () => {
+  assert.strictEqual(c.contextTokens('inclusionai/ling-3.1-flash', 0, '1000000'), 262144);
+  assert.strictEqual(c.contextTokens('inclusionai/ling-3.0-flash', 1000000, '1000000'), 262144);
+});
+
+test('AI_CONTEXT_TOKENS=100000 lowers a Ling Flash model to 100000 tokens, and OpenRouter\'s listed size can only lower it further', () => {
+  assert.strictEqual(c.contextTokens('inclusionai/ling-3.1-flash', 0, '100000'), 100000);
+  assert.strictEqual(c.contextTokens('inclusionai/ling-3.1-flash', 128000, '100000'), 100000);
+  assert.strictEqual(c.contextTokens('inclusionai/ling-3.1-flash', 128000, undefined), 128000);
+  assert.strictEqual(c.contextTokens('inclusionai/ling-3.1-flash', 128000, '200000'), 128000, 'a bigger setting does not beat the listed size');
+});
+
+test('the Claude 5 Haiku model has its 1M-token window, and AI_CONTEXT_TOKENS cannot raise it above that', () => {
+  assert.strictEqual(c.contextTokens('anthropic/claude-haiku-5.5', 0, undefined), 1000000);
+  assert.strictEqual(c.contextTokens('anthropic/claude-haiku-5.5', 0, '2000000'), 1000000);
+});
+
+test('a model whose window is not known has 256000 tokens, and so do Ling models that are not Flash models', () => {
+  assert.strictEqual(c.contextTokens('some/model', 0, undefined), 256000);
+  assert.strictEqual(c.contextTokens('inclusionai/ling-2.0-flash', 0, undefined), 256000);
+  assert.strictEqual(c.contextTokens('inclusionai/ling-3.1-pro', 0, undefined), 256000);
+});
+
+test('a Ling conversation that passes 75% of 262144 less the answer and the tools is compacted; in a 1M room the same one is not', async () => {
+  const room = c.contextTokens('inclusionai/ling-3.1-flash', 0, undefined);
+  const maxOutput = 32000;
+  const toolsTokens = 20000;
+  const trigger = Math.floor((room - maxOutput - toolsTokens) * 0.75);
+  // The conversation is the system message and 'start' (3 tokens), then messages of 1000 tokens each. This many of them
+  // stay under the trigger; one more goes over it.
+  const under = Math.floor((trigger - 3) / 1000);
+  const conversation = n => [{role: 'system', content: 's'}, {role: 'user', content: 'start'}].concat(
+    Array.from({length: n}, (_, i) => ({role: i % 2 ? 'user' : 'assistant', content: big(3000)})));
+  const refuse = async () => { throw new Error('the notes are not needed here'); };
+  assert.strictEqual(await c.compactContext(conversation(under), {window: room, maxOutput, toolsTokens, summarize: refuse}), null,
+    'under the trigger, nothing is done');
+  const r = await c.compactContext(conversation(under + 1), {window: room, maxOutput, toolsTokens, summarize: async () => 'notes'});
+  assert.ok(r && r.steps > 0, 'over the trigger, the conversation is made shorter');
+  assert.strictEqual(await c.compactContext(conversation(under + 1), {window: 1000000, maxOutput, toolsTokens, summarize: refuse}), null,
+    'the same conversation in a 1M room is not');
+});

@@ -280,7 +280,7 @@ textarea::placeholder { color: var(--muted); }
 .goalbar.finished .gbar i { background: var(--ok); }
 
 .jump {
-  position: fixed; left: 50%; bottom: 136px; transform: translateX(-50%); border: 1px solid var(--line); background: var(--panel);
+  position: fixed; left: 50%; bottom: calc(var(--composer-h, 114px) + 14px); transform: translateX(-50%); border: 1px solid var(--line); background: var(--panel);
   color: var(--text); border-radius: 999px; padding: 6px 14px; font-size: 13px; cursor: pointer; box-shadow: 0 6px 18px rgba(0, 0, 0, .12);
   animation: rise .25s var(--ease) both; z-index: 3;
 }
@@ -301,3 +301,64 @@ textarea::placeholder { color: var(--muted); }
 }
 .waiting { color: var(--muted); font-size: 13px; padding: 4px 0 2px; animation: rise .3s var(--ease) both; }
 #sub.warn { color: var(--danger); }
+
+/* the model, mode and reasoning pickers, and the smart subagent line under the box */
+.picks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.pick { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; min-width: 0; }
+.pick select {
+  appearance: none; -webkit-appearance: none; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--text);
+  max-width: 250px; min-width: 0; padding: 4px 26px 4px 11px; border: 1px solid var(--line); border-radius: 999px;
+  background-color: var(--panel); background-repeat: no-repeat; background-position: right 10px center; cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236b6b76' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  text-overflow: ellipsis; transition: background-color .2s;
+}
+.pick select:hover { background-color: var(--user); }
+.pick select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pick select option:disabled { color: var(--muted); }
+@media (max-width: 520px) {
+  .picks { gap: 6px 8px; }
+  .pick { gap: 4px; font-size: 11.5px; }
+  .pick select { font-size: 12px; padding: 3px 20px 3px 9px; background-position: right 8px center; }
+}
+.smartline { max-width: 760px; margin: 6px auto 0; text-align: center; font-size: 11.5px; color: var(--muted); }
+
+/* the model's own reasoning, in a block above the answer */
+.think { margin: 2px 0 8px; font-size: 13px; color: var(--muted); }
+.think > summary { cursor: pointer; width: max-content; padding: 2px 0; }
+.think > summary:hover { color: var(--text); }
+.think-text {
+  margin-top: 6px; padding: 2px 0 2px 12px; border-left: 2px solid var(--line); white-space: pre-wrap;
+  overflow-wrap: anywhere; line-height: 1.5; max-height: 260px; overflow-y: auto;
+}
+
+/* subagents: one card each, with its steps as chips, its reasoning and its report */
+.card.subagent { padding: 12px 14px; }
+.sa-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.sa-head .ctitle { margin: 0; }
+.sa-state { font-size: 12px; font-weight: 650; color: var(--muted); }
+.subagent.running .sa-state, .subagent.resting .sa-state { color: var(--accent); }
+.subagent.done .sa-state { color: var(--ok); }
+.subagent.failed .sa-state { color: var(--danger); }
+.sa-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 6px; font-size: 13.5px; }
+.sa-tier {
+  font: 650 10px/1 system-ui, -apple-system, sans-serif; text-transform: uppercase; letter-spacing: .05em;
+  padding: 4px 6px; border-radius: 6px; background: var(--user); color: var(--muted);
+}
+.sa-tier.smart { background: var(--accent-soft); color: var(--accent); }
+.sa-model { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.sa-eff { color: var(--muted); font-size: 12.5px; }
+.sa-task { color: var(--muted); font-size: 13.5px; margin-top: 4px; overflow-wrap: anywhere; }
+.sa-info { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.sa-info:empty { display: none; }
+.sa-chips { display: flex; flex-wrap: wrap; margin-top: 4px; }
+.sa-chips:empty { display: none; }
+.sa-chips .chip { margin: 4px 6px 0 0; font-size: 12.5px; }
+.sa-line { color: var(--muted); font-size: 12.5px; margin-top: 2px; overflow-wrap: anywhere; }
+.sa-section { margin-top: 8px; font-size: 13px; }
+.sa-section > summary { cursor: pointer; width: max-content; color: var(--muted); font-size: 12.5px; }
+.sa-section > summary:hover { color: var(--text); }
+.sa-body {
+  white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; margin-top: 6px; padding-left: 12px;
+  border-left: 2px solid var(--line); max-height: 260px; overflow-y: auto;
+}
+.subagent.stopped .sa-state { color: var(--muted); }

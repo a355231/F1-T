@@ -201,3 +201,59 @@ test('in planning mode the helper can hand over work, and its subagent is given 
   assert.ok(!sub.includes('scm_set_property'), 'the subagent cannot change the project while planning');
   assert.ok(!sub.includes('subagent'), 'the subagent cannot start another one');
 });
+
+test('draft changes take turns under the answer\'s lock, so two at once never overlap; without a lock they would', async () => {
+  let inside = 0;
+  let most = 0;
+  const slow = {
+    async write(path, text) {
+      inside++;
+      most = Math.max(most, inside);
+      await new Promise(r => setTimeout(r, 5));
+      inside--;
+      return {bytes: String(text).length, changed: 1};
+    },
+  };
+  const paths = ['src/a/S1.bky', 'src/a/S2.bky', 'src/a/S3.bky'];
+  const lock = registry.draftLock();
+  await Promise.all(paths.map(p => run('draft_write', {path: p, content: 'x'}, Object.assign(ctx(), {draft: slow, lock}))));
+  assert.strictEqual(most, 1, 'one write at a time');
+  inside = 0;
+  most = 0;
+  await Promise.all(paths.map(p => run('draft_write', {path: p, content: 'x'}, Object.assign(ctx(), {draft: slow}))));
+  assert.strictEqual(most, 3, 'without the lock they overlap');
+});
+
+test('a draft change that is waiting for the lock when Stop is pressed does not run; the one that had started finishes', async () => {
+  const controller = new AbortController();
+  const writes = [];
+  const slow = {async write(path) {
+    writes.push(path);
+    await new Promise(r => setTimeout(r, 20));
+    return {bytes: 1, changed: 1};
+  }};
+  const lock = registry.draftLock();
+  const first = run('draft_write', {path: 'src/a/S1.bky', content: 'x'}, Object.assign(ctx(), {draft: slow, lock, signal: controller.signal}));
+  const second = run('draft_write', {path: 'src/a/S2.bky', content: 'x'},
+    Object.assign(ctx(), {draft: slow, lock, signal: controller.signal, callId: 'c2'}));
+  await new Promise(r => setTimeout(r, 5));   // the first write has started; the second waits for it
+  controller.abort();
+  assert.match((await first).text, /^Saved in the draft/, 'the write that had started finishes');
+  assert.match((await second).text, /^Error: stopped/, 'the write that was waiting does not run');
+  assert.deepStrictEqual(writes, ['src/a/S1.bky'], 'only one write was made');
+});
+
+test('the subagent tool takes a task and a mode (default or smart), and a subagent is offered pictures only when its model takes them', () => {
+  const tool = registry.definitions(ctx()).find(d => d.function.name === 'subagent').function;
+  assert.deepStrictEqual(tool.parameters.required, ['task']);
+  assert.deepStrictEqual(tool.parameters.properties.mode.enum, ['default', 'smart']);
+  assert.match(tool.description, /45 minutes/);
+  assert.match(tool.description, /default/);
+  const withPictures = registry.definitions(Object.assign(ctx(), {inSubagent: true, vision: true})).map(d => d.function.name);
+  assert.ok(withPictures.includes('view_picture'));
+  for (const name of ['subagent', 'ask_user', 'propose_draft', 'propose_change', 'update_plan']) {
+    assert.ok(!withPictures.includes(name), 'a subagent is not offered ' + name);
+  }
+  const without = registry.definitions(Object.assign(ctx(), {inSubagent: true, vision: false})).map(d => d.function.name);
+  assert.ok(!without.includes('view_picture'));
+});

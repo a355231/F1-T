@@ -7,8 +7,8 @@
 // PIN, it can also build a small app there. /goal works toward a goal in several steps, with a plan.
 // When the model accepts pictures, it can look at project pictures and at pictures the person attaches.
 //
-// The OpenRouter key, the model, the PIN and the search key come from the environment of this process
-// (/opt/appinventor/ai.env on the Pi). They never reach a browser, are not in the source, and are not
+// The OpenRouter key, the companion's models (AI_MODEL_SMART, AI_MODEL_BALANCED, AI_MODEL_FAST), the PIN and the search
+// key come from the environment of this process (/opt/appinventor/ai.env on the Pi). They never reach a browser, are not in the source, and are not
 // sent to the model. The helper only changes the project that is open, and only when someone presses
 // Apply on a proposal (see CollabServlet.writeFiles and writeMedia).
 
@@ -21,7 +21,6 @@ const proj = require('./ai-project');
 const compactor = require('./ai-context');
 
 const KEY = () => process.env.OPENROUTER_API_KEY || '';
-const MODEL = () => process.env.OPENROUTER_MODEL || '';
 // The full-app PIN is the one in ai.env, unless one has been saved to its own file (from the Team panel, or by
 // set-ai.sh --pin). The file is read again whenever it changes, so a new PIN works at once. The hub's user can
 // write it; ai.env is readable by root only.
@@ -94,6 +93,39 @@ const TURN_MS = 10 * 60 * 1000;     // one model answer can run for minutes on a
 const STALLED = 'The AI service stopped sending its answer, so it was cut off. Try asking again.';
 const TOO_LONG = 'That answer ran past the time limit and was cut off. Try asking for something smaller.';
 const MAX_TOKENS = () => parseInt(process.env.AI_MAX_TOKENS || '8000', 10);
+// The companion's models, one per preset. The server is the source of truth: the browser gets this list from
+// GET /collab/ai/presets. AI_MODEL_SMART, AI_MODEL_BALANCED and AI_MODEL_FAST in ai.env change only the model string.
+const PRESETS = {
+  smart: {label: 'Smart', name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5', env: 'AI_MODEL_SMART',
+    reasoningLevels: ['default', 'low', 'medium', 'high', 'max']},
+  balanced: {label: 'Balanced', name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash', env: 'AI_MODEL_BALANCED',
+    reasoningLevels: ['default', 'low', 'medium', 'high']},
+  fast: {label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash', env: 'AI_MODEL_FAST',
+    reasoningLevels: ['default', 'low', 'medium', 'high']},
+};
+const DEFAULT_PRESET = 'balanced';
+// How many subagents may run at once in one answer. The rest wait in the order they were asked for.
+const RUN_MODES = [
+  {id: 'normal', label: 'Normal', agents: 1},
+  {id: 'parallel', label: 'Parallel', agents: 2},
+  {id: 'ultracode', label: 'Ultracode', agents: 3},
+];
+const DEFAULT_RUN_MODE = 'normal';
+const REASONING = ['default', 'low', 'medium', 'high', 'max'];
+const REASONING_MAX_TOKENS = 32000; // reasoning draws from the same max_tokens budget as the answer, so it gets room for both
+// The subagents: two tiers with fixed models. Their reasoning is always high, and the client cannot change it.
+const SUB_TIERS = {
+  default: {name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash'},
+  smart: {name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5'},
+};
+const SUB_REASONING = 'high';
+// A smart subagent's whole run is kept to this many model answers, and to this long, counted from when it starts
+// running. A default subagent has neither limit.
+const SUB_STEPS = 12;
+const SUB_MS = 4 * 60 * 1000;
+const SUB_UNFINISHED = 'The subagent did not finish within ' + SUB_STEPS + ' answers or ' + Math.round(SUB_MS / 60000) +
+  ' minutes. Ask again with a smaller piece of the job.';
+const SMART_COOLDOWN_MS = 45 * 60 * 1000;   // the smart subagent is usable once in this time, for the whole hub
 const SUMMARY_TOKENS = 2500;        // the notes on earlier steps, when an answer has to make room
 const SUMMARY_MS = 3 * 60 * 1000;
 const SUMMARY_RULES = 'You write the working notes of an AI helper that is in the middle of a job for a team building an ' +
@@ -137,18 +169,23 @@ const NUDGE_MAX = 3;                // full-app mode: answers in a row that stop
 const SAME_STEP_MAX = 8;            // the same tool calls this many steps in a row are a loop: the helper stops and says so
 const LOOPING = 'The helper kept repeating the same step, so it has stopped. Send a message to carry on, or ask it to try another way.';
 const STILL_BUILDING = 'Still building: the app is not complete, so there is no Apply button yet. Send a message to keep going.';
-// The subagent: one self-contained piece of a job, done by the same model on low reasoning. It may take this many
-// model answers and this long, and its report goes back to the helper as far as SUB_RESULT_MAX characters.
-const SUB_STEPS = 12;
-const SUB_MS = 4 * 60 * 1000;
+// A subagent's report goes back to the helper as far as SUB_RESULT_MAX characters, and to the person as REPORT_EVENT_MAX.
 const SUB_RESULT_MAX = 8000;
-const LOW_REASONING = {reasoning: {effort: 'low'}};
+const REPORT_EVENT_MAX = 2000;
+const TASK_EVENT_MAX = 200;
+const MAX_CLAMPED = 'Max reasoning is only for Claude Haiku 5.5, so high is used.';
+const MAX_REFUSED = 'Max reasoning was not accepted for this model, so high was used.';
+const SUB_LOOPING = 'The subagent kept repeating the same step, so it has stopped. Do this piece yourself, or hand it over ' +
+  'again with a clearer task.';
+const SUB_PAUSED = 'The subagent paused, because its answers kept running past their length. Hand over a smaller piece of the job.';
 const SUBAGENT_NOTE = 'You are a subagent. The AI helper of App Inventor Team Edition has handed you one piece of work on ' +
   'the open project. Do that piece with the project tools, and check your changes with check_project. You cannot talk to ' +
   'the person or propose changes: the helper does that once you have finished. When the piece is done, reply with a short ' +
   'report: what you changed or found, and anything the helper still has to do. Keep to the piece you were given.';
 // Tools that change the draft. Their successful calls mark an answer as one that built something.
 const EDITS = new Set(registry.TOOLS.filter(t => t.mode === 'draft').map(t => t.name));
+// Tools that propose the draft. A proposal in the same step as a subagent waits until the subagent has finished.
+const PROPOSALS = new Set(registry.TOOLS.filter(t => t.mode === 'propose').map(t => t.name));
 const NOT_SET_UP = 'The AI helper is not set up yet. Whoever runs the Raspberry Pi needs to run: ' +
   'sudo /opt/appinventor/set-ai.sh';
 
@@ -287,6 +324,128 @@ function modelTakesImages(m) {
   return String(arch.modality || '').split('->')[0].includes('image');
 }
 
+// The preset of a request: a missing or unknown one means balanced.
+function presetOf(id) {
+  return Object.hasOwn(PRESETS, id) ? id : DEFAULT_PRESET;
+}
+
+// The model string of a preset: the one set in ai.env (AI_MODEL_*), or the default.
+function modelOf(preset) {
+  return process.env[PRESETS[preset].env] || PRESETS[preset].model;
+}
+
+// The run mode of a request: a missing or unknown one means normal.
+function runModeOf(id) {
+  return RUN_MODES.find(m => m.id === id) || RUN_MODES[0];
+}
+
+// The reasoning sent with one request: none for default, otherwise the level. A request with reasoning gets
+// REASONING_MAX_TOKENS to write in, and compaction leaves the same room (maxTokensOf).
+function reasoningOf(level) {
+  return level && level !== 'default' ? {effort: level} : null;
+}
+
+function maxTokensOf(level) {
+  return reasoningOf(level) ? REASONING_MAX_TOKENS : MAX_TOKENS();
+}
+
+// The settings of one answer, from its stream body. Max is for the smart preset only; on any other, it is high.
+function settingsOf(data, effort) {
+  const preset = presetOf(data.preset);
+  let reasoning = REASONING.indexOf(data.reasoning) >= 0 ? data.reasoning : 'default';
+  const clamped = reasoning === 'max' && preset !== 'smart';
+  if (clamped) reasoning = 'high';
+  return {effort, preset, runMode: runModeOf(data.runMode).id, reasoning, clamped};
+}
+
+// The reasoning a streamed piece carries, as text to show: its reasoning string, or when there is none, the text of its
+// reasoning pieces (reasoning.text or reasoning.summary).
+function reasoningText(delta) {
+  if (typeof delta.reasoning === 'string') return delta.reasoning;
+  if (!Array.isArray(delta.reasoning_details)) return '';
+  return delta.reasoning_details
+    .map(p => (p && p.type === 'reasoning.text' ? p.text : p && p.type === 'reasoning.summary' ? p.summary : ''))
+    .filter(s => typeof s === 'string').join('');
+}
+
+// A reasoning model's reasoning pieces go back with the tool calls they came with, as the service asks.
+function withReasoning(message, reply) {
+  return reply.reasoning_details ? Object.assign(message, {reasoning_details: reply.reasoning_details}) : message;
+}
+
+// The pictures a tool returned, as far as one answer may show them. Returns the pictures to send, and a note for the
+// tool's result when one is left out. Call it only when the tool returned pictures and the model can look at them.
+function takePictures(out, stats) {
+  const n = out.images.length;
+  if (stats.pictures + n > IMAGES_PER_ANSWER) {
+    return {pictures: [], note: ' (The picture is not shown: this answer has reached its limit of ' + IMAGES_PER_ANSWER + ' pictures.)'};
+  }
+  stats.pictures += n;
+  return {pictures: out.images, note: ''};
+}
+
+// The message that shows pictures to the model, after the results of one step.
+function pictureMessage(pictures) {
+  return {role: 'user', content: [{type: 'text', text: 'Here ' + (pictures.length === 1 ? 'is the picture' : 'are the pictures') +
+    ' you asked to see: ' + pictures.map(p => p.name).join(', ') + '.'}].concat(pictures.map(imagePart))};
+}
+
+// The error that ends an answer when Stop was pressed. work() ends such an answer without an error shown.
+function stoppedError() {
+  return Object.assign(new Error('stopped'), {name: 'AbortError'});
+}
+
+// What a refused request answered, for the reasons it gives (a model that does not take a setting says so there).
+async function errorDetail(r) {
+  try {
+    return typeof r.text === 'function' ? String(await r.text()).slice(0, 1000) : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+// The subagents of one answer: at most `cap` run at once, and the rest wait in the order they were asked for. A slot
+// passed on by free() is taken at once, so the next waiter never has to compete with anyone else.
+class Slots {
+  constructor(cap) {
+    this.cap = cap;
+    this.busy = 0;
+    this.waiting = [];
+  }
+
+  full() {
+    return this.busy >= this.cap;
+  }
+
+  // Resolves true when the caller has a slot, or false when Stop comes first.
+  take(signal) {
+    if (signal && signal.aborted) return Promise.resolve(false);
+    if (this.busy < this.cap) {
+      this.busy++;
+      return Promise.resolve(true);
+    }
+    return new Promise(resolve => {
+      const next = () => {
+        if (signal) signal.removeEventListener('abort', gone);
+        resolve(true);
+      };
+      const gone = () => {
+        const at = this.waiting.indexOf(next);
+        if (at >= 0) this.waiting.splice(at, 1);
+        resolve(false);
+      };
+      this.waiting.push(next);
+      if (signal) signal.addEventListener('abort', gone, {once: true});
+    });
+  }
+
+  free() {
+    const next = this.waiting.shift();
+    if (next) next();
+    else this.busy--;
+  }
+}
+
 // Shows a long tool call while the model is still writing it. Writing a big file can take minutes with no
 // words in between, and the window would look stuck.
 function showWriting(acc, shown, emit) {
@@ -339,11 +498,13 @@ class Assistant {
     this.full = new Map();            // "user|project" -> time full-app mode ends
     this.pinWrong = [];               // times of recent wrong PINs, team-wide
     this.pinLockedUntil = 0;
-    this.infoCache = null;            // {model, vision, context, until}
+    this.infoCache = new Map();       // model -> {vision, context, until}
+    this.smartUntil = 0;              // the smart subagent is usable again from this time, for the whole hub
   }
 
+  // The model of each request comes from its preset, so only the key is needed here.
   configured() {
-    return !!(KEY() && MODEL());
+    return !!KEY();
   }
 
   searchKey() {
@@ -378,13 +539,12 @@ class Assistant {
     return true;
   }
 
-  // Whether the model in use takes pictures. AI_VISION=1 or 0 sets it; otherwise OpenRouter's list of
-  // models says so. The answer is kept for six hours (five minutes when the list could not be read).
-  // What OpenRouter says about the model in use: whether it takes pictures, and how many tokens it can read.
-  async modelInfo() {
-    const model = MODEL();
+  // What OpenRouter says about a model: whether it takes pictures, and how many tokens it can read. Each answer is
+  // kept for six hours (five minutes when the list could not be read).
+  async modelInfo(model) {
     const now = this.now();
-    if (this.infoCache && this.infoCache.model === model && now < this.infoCache.until) return this.infoCache;
+    const known = this.infoCache.get(model);
+    if (known && now < known.until) return known;
     let found = null;
     let ttl = VISION_RETRY_MS;
     try {
@@ -399,27 +559,52 @@ class Assistant {
     } catch (e) {
       found = null;
     }
-    this.infoCache = {model, vision: !!found && modelTakesImages(found),
-      context: found ? Number(found.context_length) || 0 : 0, until: now + ttl};
-    return this.infoCache;
+    const info = {vision: !!found && modelTakesImages(found), context: found ? Number(found.context_length) || 0 : 0,
+      until: now + ttl};
+    this.infoCache.set(model, info);
+    return info;
   }
 
-  async vision() {
-    const set = process.env.AI_VISION;
+  // Whether a model takes pictures. For the companion, AI_VISION=1 or 0 sets it; otherwise, and for subagents, the
+  // model's entry in OpenRouter's list says so.
+  async takesPictures(model, companion) {
+    const set = companion ? process.env.AI_VISION : '';
     if (set === '1' || set === 'true') return true;
     if (set === '0' || set === 'false') return false;
     if (!this.configured()) return false;
-    return (await this.modelInfo()).vision;
+    return (await this.modelInfo(model)).vision;
   }
 
-  // The room the model has for one answer's conversation, in tokens (see ai-context.js).
-  async contextWindow() {
-    const info = await this.modelInfo();
-    return compactor.contextTokens(MODEL(), info.context);
+  // The room a model has for one answer's conversation, in tokens (see ai-context.js).
+  async contextWindow(model) {
+    const info = await this.modelInfo(model);
+    return compactor.contextTokens(model, info.context);
+  }
+
+  // Milliseconds of the smart subagent's cooldown left (0 when it is usable).
+  smartLeft() {
+    return Math.max(0, this.smartUntil - this.now());
+  }
+
+  // What the browser shows for the models, the run modes and the subagents (GET /collab/ai/presets).
+  presetInfo() {
+    return {
+      presets: Object.keys(PRESETS).map(id => ({id, label: PRESETS[id].label, name: PRESETS[id].name, model: modelOf(id),
+        reasoningLevels: PRESETS[id].reasoningLevels.slice()})),
+      defaultPreset: DEFAULT_PRESET,
+      runModes: RUN_MODES.map(m => Object.assign({}, m)),
+      defaultRunMode: DEFAULT_RUN_MODE,
+      defaultReasoning: 'default',
+      subagents: {
+        default: {name: SUB_TIERS.default.name, model: SUB_TIERS.default.model, reasoning: SUB_REASONING},
+        smart: {name: SUB_TIERS.smart.name, model: SUB_TIERS.smart.model, reasoning: SUB_REASONING,
+          cooldownMinutes: SMART_COOLDOWN_MS / 60000, readyInSeconds: Math.ceil(this.smartLeft() / 1000)},
+      },
+    };
   }
 
   // The notes on earlier steps, written by the model with no tools, streamed like any answer. Throws if they fail.
-  async summarizeSteps(text, signal) {
+  async summarizeSteps(model, text, signal) {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), SUMMARY_MS);
     const stop = () => ac.abort();
@@ -431,7 +616,7 @@ class Assistant {
       const r = await this.fetch(URL_, {
         method: 'POST',
         headers: {authorization: 'Bearer ' + KEY(), 'content-type': 'application/json', 'x-title': 'App Inventor Team Edition'},
-        body: JSON.stringify({model: MODEL(), temperature: 0.2, max_tokens: SUMMARY_TOKENS, stream: true,
+        body: JSON.stringify({model, temperature: 0.2, max_tokens: SUMMARY_TOKENS, stream: true,
           messages: [{role: 'system', content: SUMMARY_RULES}, {role: 'user', content: text}]}),
         signal: ac.signal,
       });
@@ -532,10 +717,14 @@ class Assistant {
         'x-frame-options': 'SAMEORIGIN', 'x-content-type-options': 'nosniff'});
       return res.end(html);
     }
+    if (path_ === '/collab/ai/presets' && req.method === 'GET') return json(200, this.presetInfo());
     if (path_ === '/collab/ai/status') {
-      const pid = new URL(req.url, 'http://x').searchParams.get('projectId') || '';
+      const params = new URL(req.url, 'http://x').searchParams;
+      const pid = params.get('projectId') || '';
       const live = /^\d+$/.test(pid) ? this.activeRun(me.userId, pid) : null;
-      return json(200, {configured: this.configured(), search: !!SEARCH_KEY(), vision: await this.vision(),
+      // Whether pictures can be attached depends on the preset the browser asks about (balanced when none is named).
+      const vision = await this.takesPictures(modelOf(presetOf(params.get('preset'))), true);
+      return json(200, {configured: this.configured(), search: !!SEARCH_KEY(), vision,
         name: me.email.split('@')[0], fullUntil: /^\d+$/.test(pid) ? this.fullUntil(me.userId, pid) : 0,
         running: !!live, question: live ? live.question : ''});
     }
@@ -616,7 +805,7 @@ class Assistant {
         'Wait for it to finish, or press Stop.'}));
     }
     const effort = EFFORTS.indexOf(data.effort) >= 0 ? data.effort : 'medium';
-    const run = this.startRun(me, cookie, projectId, access, history, attached.images, effort);
+    const run = this.startRun(me, cookie, projectId, access, history, attached.images, settingsOf(data, effort));
     return this.attach(run, res, 0);
   }
 
@@ -630,14 +819,15 @@ class Assistant {
     return run && !run.done ? run : null;
   }
 
-  startRun(me, cookie, projectId, access, history, images, effort = 'medium') {
+  // settings: {effort, preset, runMode, reasoning, clamped}, from the stream body (see settingsOf).
+  startRun(me, cookie, projectId, access, history, images, settings) {
     const key = this.runKey(me.userId, projectId);
     const old = this.runs.get(key);
     if (old) clearTimeout(old.keepTimer);
     const question = history[history.length - 1].content.trim();
     const run = {key, userId: me.userId, projectId, by: me.email.split('@')[0], events: [], seq: 0, done: false,
       watchers: new Map(), controller: new AbortController(), orphanTimer: null, keepTimer: null,
-      startedAt: Date.now(), stats: {steps: 0, tools: 0}, effort,
+      startedAt: Date.now(), stats: {steps: 0, tools: 0, pictures: 0}, settings,
       question: /^\s*\/override\b/i.test(question) ? '/override' : question.slice(0, 6000)};
     this.runs.set(key, run);
     this.work(run, {me, cookie, projectId, access, history, images});
@@ -648,10 +838,12 @@ class Assistant {
   async work(run, {me, cookie, projectId, access, history, images}) {
     const emit = ev => this.publish(run, ev);
     const question = run.question;
-    const ctx = {me, cookie, projectId, access, emit, signal: run.controller.signal, images, stats: run.stats, effort: run.effort};
+    const ctx = Object.assign({me, cookie, projectId, access, emit, signal: run.controller.signal, images, stats: run.stats},
+      run.settings);
     let how = 'finished';
     this.log(run.by + ' asked (project ' + projectId + (this.fullActive(me.userId, projectId) ? ', full-app mode' : '') +
-      (COMMAND.test(question) ? ', ' + COMMAND.exec(question)[1].toLowerCase() : '') + ')');
+      (COMMAND.test(question) ? ', ' + COMMAND.exec(question)[1].toLowerCase() : '') + ', ' + run.settings.preset + ', ' +
+      run.settings.runMode + ', reasoning ' + run.settings.reasoning + ')');
     try {
       const command = COMMAND.exec(question);
       const name = command ? command[1].toLowerCase() : '';
@@ -767,7 +959,9 @@ class Assistant {
     const {me, projectId, access, goal, emit} = ctx;
     const plan = !!ctx.plan;
     const effort = ctx.effort || 'medium';
-    const stats = ctx.stats || {steps: 0, tools: 0};
+    const stats = ctx.stats || {steps: 0, tools: 0, pictures: 0};
+    const model = modelOf(presetOf(ctx.preset));
+    const level = ctx.reasoning || 'default';
     if (!this.configured()) {
       emit({type: 'text', delta: NOT_SET_UP});
       return;
@@ -776,10 +970,11 @@ class Assistant {
       emit({type: 'error', message: 'Too many questions for now. Wait a minute and try again.'});
       return;
     }
+    if (ctx.clamped) emit({type: 'status', text: MAX_CLAMPED});
     // Planning changes nothing, so it does not touch the unfinished app of full-app mode.
     const full = !plan && this.fullActive(me.userId, projectId);
     const key = me.userId + '|' + projectId;
-    const vision = await this.vision();
+    const vision = await this.takesPictures(model, true);
     const search = !!SEARCH_KEY();
     const notes = [];
     let draft;
@@ -805,8 +1000,11 @@ class Assistant {
     }
     const dropped = draft.dropped.splice(0);
     for (const n of notes) emit({type: 'status', text: n});
+    // The draft-changing tools of the answer, its subagents included, take turns (lock); the subagents share the run
+    // mode's slots (slots).
     const run = {me, cookie: ctx.cookie, projectId, access, full, vision, emit, goal: !!goal, assistant: this,
-      ask: this.ask, signal: ctx.signal, imagesShown: 0, draft, readOnly: plan, state: {proposed: false, edited: false}};
+      ask: this.ask, signal: ctx.signal, stats, draft, readOnly: plan, state: {proposed: false, edited: false},
+      lock: registry.draftLock(), slots: new Slots(runModeOf(ctx.runMode).agents)};
     const system = [full ? SYSTEM_FULL : SYSTEM, search ? SEARCH_NOTE : '', vision ? VISION_NOTE : '',
       plan ? PLAN_NOTE : EFFORT_NOTE[effort],
       full && draft.changed.size ? 'The draft from earlier messages has ' + draft.changed.size + ' changed file(s): ' +
@@ -829,25 +1027,26 @@ class Assistant {
     // Full-app mode has no step or time limit: it goes on until the app is complete, or the person presses Stop.
     // Any other answer is kept to a number of steps and a time, so that one question cannot run for ever.
     const limit = full ? Infinity : goal ? this.goalSteps : SMALL_STEPS;
-    const deadline = full ? Infinity : this.now() + (goal ? this.goalMs : SMALL_MS);
+    let deadline = full ? Infinity : this.now() + (goal ? this.goalMs : SMALL_MS);
     let cutOff = 0;           // answers in a row that ran out of room
     let nudges = 0;           // full-app mode: answers in a row that stopped with the app unfinished
     let lastStep = '';
     let sameStep = 0;         // how many steps in a row were exactly the same tool calls
     try {
       for (let step = 0; step < limit; step++) {
+        if (ctx.signal && ctx.signal.aborted) throw stoppedError();
         if (this.now() > deadline) {
           emit({type: 'status', text: 'Stopped: the time for this goal is up. Ask again to keep going.'});
           return;
         }
         const tools = registry.definitions(run);
         const compacted = await compactor.compactContext(messages, {
-          window: await this.contextWindow(), maxOutput: MAX_TOKENS(), toolsTokens: compactor.tokensOfJson(tools),
-          summarize: text => this.summarizeSteps(text, ctx.signal),
+          window: await this.contextWindow(model), maxOutput: maxTokensOf(level), toolsTokens: compactor.tokensOfJson(tools),
+          summarize: text => this.summarizeSteps(model, text, ctx.signal),
           notice: text => emit({type: 'status', text}),
         });
         if (compacted) this.log('the conversation of an answer was made shorter: ' + compacted.how + ' (' + compacted.steps + ' step(s))');
-        const reply = await this.streamWithRetry(messages, tools, ctx.signal, emit);
+        const reply = await this.streamWithRetry({model, messages, list: tools, signal: ctx.signal, emit, level});
         stats.steps++;
         if (reply.truncated) {
           // The model ran out of room part way through. A half-written tool call is never run. The model is told,
@@ -889,29 +1088,27 @@ class Assistant {
           return;
         }
         stats.tools += reply.tool_calls.length;
-        messages.push({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls});
+        messages.push(withReasoning({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls}, reply));
+        const began = this.now();
+        const outs = await this.runCalls(reply.tool_calls, run);
+        // A subagent has no time limit of its own, and the time it takes does not use up this answer's time.
+        if (reply.tool_calls.some(c => c.function.name === 'subagent')) deadline += this.now() - began;
         const pictures = [];
         let stop = false;
-        for (const call of reply.tool_calls) {
-          const out = await registry.run(call.function.name, call.function.arguments, Object.assign({}, run, {callId: call.id}));
+        reply.tool_calls.forEach((call, i) => {
+          const out = outs[i];
           let text = String(out.text);
           if (EDITS.has(call.function.name) && !/^Error/.test(text)) run.state.edited = true;
           if (out.images && out.images.length && vision) {
-            if (run.imagesShown + out.images.length <= IMAGES_PER_ANSWER) {
-              run.imagesShown += out.images.length;
-              pictures.push(...out.images);
-            } else {
-              text += ' (The picture is not shown: this answer has reached its limit of ' + IMAGES_PER_ANSWER + ' pictures.)';
-            }
+            const shown = takePictures(out, stats);
+            pictures.push(...shown.pictures);
+            text += shown.note;
           }
           messages.push({role: 'tool', tool_call_id: call.id, content: text.slice(0, MAX_TOOL_RESULT)});
           if (out.stop) stop = true;
-        }
+        });
         // Pictures go in a message of their own, after every tool result of this step.
-        if (pictures.length) {
-          messages.push({role: 'user', content: [{type: 'text', text: 'Here ' + (pictures.length === 1 ? 'is the picture' : 'are the pictures') +
-            ' you asked to see: ' + pictures.map(p => p.name).join(', ') + '.'}].concat(pictures.map(imagePart))});
-        }
+        if (pictures.length) messages.push(pictureMessage(pictures));
         if (stop) return;
       }
       emit({type: 'status', text: goal
@@ -925,49 +1122,163 @@ class Assistant {
     }
   }
 
-  // The subagent: a piece of the job the helper hands over. It is the same model, on low reasoning, with the project
-  // tools except the ones that talk to the person or propose changes, so it cannot start another subagent. It works on
-  // the same draft, and its report comes back to the helper as the result of the tool. The person sees its steps as
-  // they happen, but not its words. If it cannot finish, the helper is told why, and carries on without it.
-  async runSubagent(task, ctx) {
-    const emit = ev => { if (ev.type !== 'text' && ev.type !== 'reset') ctx.emit(ev); };
-    const sub = Object.assign({}, ctx, {inSubagent: true, emit});
-    const messages = [{role: 'system', content: SUBAGENT_NOTE}, {role: 'user', content: task}];
-    const deadline = this.now() + SUB_MS;
+  // Runs one model answer's tool calls, as the answer asked. The subagent calls start together, and the slots of the run
+  // mode queue the ones beyond its cap. The other calls run one after another, in their order, while those work. The
+  // results come back in the order of the calls, which is the order the model needs them in.
+  async runCalls(calls, run) {
+    const toolCtx = call => Object.assign({}, run, {callId: call.id});
+    const started = calls.map(call => (call.function.name === 'subagent'
+      ? registry.run(call.function.name, call.function.arguments, toolCtx(call)) : null));
+    const outs = [];
+    for (let i = 0; i < calls.length; i++) {
+      // A proposal waits for the subagents of this step, so that it includes everything they changed.
+      if (PROPOSALS.has(calls[i].function.name)) await Promise.all(started.filter(Boolean));
+      if (!started[i]) outs[i] = await registry.run(calls[i].function.name, calls[i].function.arguments, toolCtx(calls[i]));
+    }
+    for (let i = 0; i < calls.length; i++) {
+      if (started[i]) outs[i] = await started[i];
+    }
+    return outs;
+  }
+
+  // A smart subagent asked for inside its cooldown is refused at once, with the minutes left (rounded up).
+  smartRefused(ctx) {
+    const left = this.smartLeft();
+    const minutes = Math.ceil(left / 60000);
+    ctx.emit({type: 'cooldown', smartReadyInSeconds: Math.ceil(left / 1000)});
+    return {text: 'The smart subagent cannot be used for another ' + minutes + ' minute' + (minutes === 1 ? '' : 's') +
+      ': it can be used once every ' + SMART_COOLDOWN_MS / 60000 + ' minutes, for the whole team. Use mode default for this ' +
+      'piece, or do the piece yourself.', detail: 'smart in ' + minutes + ' min'};
+  }
+
+  // The subagent: a piece of the job the helper hands over. It runs on the model of its tier (SUB_TIERS), with high
+  // reasoning, and the project tools except the ones that talk to the person or propose changes, so it cannot start
+  // another subagent. It works on the same draft, and its report comes back to the helper as the result of the tool. The
+  // person sees its steps and its reasoning, but not its words. If it cannot finish, the helper is told why, and carries
+  // on without it. The default tier has no limit on steps or time. The smart tier has at most SUB_STEPS model answers and
+  // SUB_MS for its whole run, counted from when it starts running; when it reaches either, it stops and the helper is
+  // told to ask again with a smaller piece (SUB_UNFINISHED). The smart tier is usable once in 45 minutes, for the whole
+  // hub: its timer starts when it starts running, not when it is queued. Stop ends it at once.
+  async runSubagent(task, ctx, mode) {
+    const tier = mode === 'smart' ? 'smart' : 'default';
+    const info = SUB_TIERS[tier];
+    const id = ctx.callId;
+    const stats = ctx.stats || {steps: 0, tools: 0, pictures: 0};
+    const card = {type: 'subagent', id, tier, model: info.model, name: info.name, reasoning: SUB_REASONING,
+      task: String(task).slice(0, TASK_EVENT_MAX)};
+    const say = (state, extra) => ctx.emit(Object.assign({}, card, {state}, extra || {}));
+    if (tier === 'smart' && this.smartLeft() > 0) return this.smartRefused(ctx);
+    const slots = ctx.slots || new Slots(1);
+    if (slots.full()) say('queued');
+    if (!(await slots.take(ctx.signal))) {
+      say('failed', {detail: 'stopped'});
+      throw stoppedError();
+    }
+    // What the subagent shows the person: its steps, status lines, reasoning and resets (a try taken back), each with its
+    // id, so that a reset takes back only this subagent's try, and not the helper's words. Its words are not shown.
+    const emitSub = ev => { if (ev.type !== 'text') ctx.emit(Object.assign({}, ev, {sub: id})); };
     let steps = 0;
+    const end = (state, out, extra) => {
+      say(state, Object.assign({steps}, extra));
+      return out;
+    };
     try {
-      while (steps < SUB_STEPS && this.now() <= deadline) {
+      if (tier === 'smart' && this.smartLeft() > 0) {
+        // Another smart subagent started while this one was queued.
+        const refused = this.smartRefused(ctx);
+        return end('failed', refused, {detail: refused.detail});
+      }
+      // The timer is set at once, before anything waits, so two smart subagents can never both start.
+      say('running', {steps});
+      if (tier === 'smart') {
+        this.smartUntil = this.now() + SMART_COOLDOWN_MS;
+        ctx.emit({type: 'cooldown', smartReadyInSeconds: SMART_COOLDOWN_MS / 1000});
+      }
+      // A smart subagent's limits, counted from the moment it starts running. A default subagent has neither.
+      const maxSteps = tier === 'smart' ? SUB_STEPS : Infinity;
+      const deadline = tier === 'smart' ? this.now() + SUB_MS : Infinity;
+      this.log('a ' + tier + ' subagent started');
+      const sub = Object.assign({}, ctx, {inSubagent: true, emit: emitSub});
+      sub.vision = await this.takesPictures(info.model, false);
+      const rest = on => say(on ? 'resting' : 'running', {steps});   // resting while it waits to try a model call again
+      const messages = [{role: 'system', content: SUBAGENT_NOTE}, {role: 'user', content: task}];
+      let cutOff = 0;     // answers in a row that ran out of room
+      let sameStep = 0;   // how many steps in a row were exactly the same tool calls
+      let lastStep = '';
+      for (;;) {
+        if (ctx.signal && ctx.signal.aborted) throw stoppedError();
+        // The limits are checked before each model answer. An answer already under way is not cut short by them (its own
+        // limits apply), and the tool calls of the answer before have already run.
+        if (steps >= maxSteps || this.now() > deadline) {
+          this.log('a ' + tier + ' subagent stopped at its limit (' + (steps >= maxSteps ? 'answers' : 'time') + ') after ' +
+            steps + ' step(s)');
+          return end('failed', {text: SUB_UNFINISHED, detail: 'stopped'}, {detail: 'stopped'});
+        }
         steps++;
         const list = registry.definitions(sub);
         const compacted = await compactor.compactContext(messages, {
-          window: await this.contextWindow(), maxOutput: MAX_TOKENS(), toolsTokens: compactor.tokensOfJson(list),
-          summarize: text => this.summarizeSteps(text, ctx.signal), notice: text => emit({type: 'status', text}),
+          window: await this.contextWindow(info.model), maxOutput: REASONING_MAX_TOKENS, toolsTokens: compactor.tokensOfJson(list),
+          summarize: text => this.summarizeSteps(info.model, text, ctx.signal), notice: text => emitSub({type: 'status', text}),
         });
         if (compacted) this.log('a subagent\'s conversation was made shorter: ' + compacted.how + ' (' + compacted.steps + ' step(s))');
-        const reply = await this.streamWithRetry(messages, list, ctx.signal, emit, LOW_REASONING);
+        // A default subagent has no time limit on one answer; a smart one keeps the limit of the companion's answers.
+        const reply = await this.streamWithRetry({model: info.model, messages, list, signal: ctx.signal, emit: emitSub,
+          level: SUB_REASONING, rest, turnLimit: tier === 'smart'});
+        stats.steps++;
         if (reply.truncated) {
-          return {text: 'The subagent ran out of room before it finished. What it had written: ' +
-            ((reply.content || '').trim() || '(nothing)').slice(0, SUB_RESULT_MAX), detail: 'ran out of room'};
+          // As for the helper: a half-written tool call is never run, and the subagent carries on in smaller pieces.
+          for (const call of reply.tool_calls) {
+            emitSub({type: 'tool', id: call.id, name: call.function.name, state: 'error',
+              label: 'Writing ' + call.function.name.replace(/_/g, ' '), detail: 'too long, skipped'});
+          }
+          if (++cutOff > CUT_OFF_MAX) return end('failed', {text: SUB_PAUSED, detail: 'ran out of room'}, {detail: 'ran out of room'});
+          emitSub({type: 'status', text: reply.tool_calls.length
+            ? 'That step was too long to finish in one go, so the subagent is splitting it into smaller pieces.'
+            : 'The subagent wrote more than fits in one go, so it is carrying on in smaller pieces.'});
+          messages.push({role: 'assistant', content: reply.content || '(cut off)'});
+          messages.push({role: 'user', content: reply.tool_calls.length ? TOO_BIG_NOTE : TOO_LONG_TEXT_NOTE});
+          continue;
         }
+        cutOff = 0;
         if (!reply.tool_calls.length) {
-          return {text: (reply.content || '').trim().slice(0, SUB_RESULT_MAX) || 'The subagent finished without a written report.',
-            detail: steps + ' step(s)'};
+          const report = (reply.content || '').trim().slice(0, SUB_RESULT_MAX) || 'The subagent finished without a written report.';
+          this.log('a ' + tier + ' subagent finished after ' + steps + ' step(s)');
+          return end('done', {text: report, detail: steps + ' step(s)'},
+            {detail: steps + ' step(s)', report: report.slice(0, REPORT_EVENT_MAX)});
         }
-        // The reasoning comes back with the tool calls it belongs to, as the service asks.
-        messages.push(Object.assign({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls},
-          reply.reasoning_details ? {reasoning_details: reply.reasoning_details} : {}));
+        // The same tool calls again and again, with nothing new in between, is a loop: stop before running them again.
+        const signature = reply.tool_calls.map(c => c.function.name + ' ' + c.function.arguments).join('\n');
+        sameStep = signature === lastStep ? sameStep + 1 : 1;
+        lastStep = signature;
+        if (sameStep >= SAME_STEP_MAX) return end('failed', {text: SUB_LOOPING, detail: 'repeated a step'}, {detail: 'repeated a step'});
+        stats.tools += reply.tool_calls.length;
+        messages.push(withReasoning({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls}, reply));
+        const pictures = [];
         for (const call of reply.tool_calls) {
+          // Stop ends the subagent at once: the calls of this step that have not started do not run.
+          if (ctx.signal && ctx.signal.aborted) throw stoppedError();
           const out = await registry.run(call.function.name, call.function.arguments, Object.assign({}, sub, {callId: call.id}));
-          if (EDITS.has(call.function.name) && !/^Error/.test(String(out.text))) ctx.state.edited = true;
-          messages.push({role: 'tool', tool_call_id: call.id, content: String(out.text).slice(0, MAX_TOOL_RESULT)});
+          let text = String(out.text);
+          if (EDITS.has(call.function.name) && !/^Error/.test(text)) ctx.state.edited = true;
+          if (out.images && out.images.length && sub.vision) {
+            const shown = takePictures(out, stats);
+            pictures.push(...shown.pictures);
+            text += shown.note;
+          }
+          messages.push({role: 'tool', tool_call_id: call.id, content: text.slice(0, MAX_TOOL_RESULT)});
         }
+        if (pictures.length) messages.push(pictureMessage(pictures));
       }
-      return {text: 'The subagent did not finish within ' + SUB_STEPS + ' answers or ' + Math.round(SUB_MS / 60000) +
-        ' minutes. Ask again with a smaller piece of the job.', detail: 'stopped'};
     } catch (e) {
-      if (ctx.signal && ctx.signal.aborted) throw e;
-      this.log('a subagent could not finish: ' + String(e.message || e).slice(0, 100));
-      return {text: 'The subagent could not finish: ' + String(e.message || e).slice(0, 200), detail: 'failed'};
+      if (ctx.signal && ctx.signal.aborted) {
+        say('failed', {steps, detail: 'stopped'});
+        throw e;
+      }
+      const why = String(e.message || e).slice(0, 200);
+      this.log('a subagent could not finish: ' + why.slice(0, 100));
+      return end('failed', {text: 'The subagent could not finish: ' + why, detail: 'failed'}, {detail: why});
+    } finally {
+      slots.free();
     }
   }
 
@@ -992,10 +1303,10 @@ class Assistant {
 
   // One answer from the model, streamed: text is passed on as it arrives; the tool calls are collected.
   // The service can stop sending without closing the connection, and then the answer would wait forever.
-  // So it is cut off after idleMs of silence (or turnMs in all), and the person is told. Stop still works.
+  // So it is cut off after idleMs of silence (or turnMs in all, unless turnLimit is false), and the person is told. Stop still works.
   // The result says whether the model ran out of room (truncated); an answer that ends without a proper
-  // ending is an error that streamWithRetry tries again.
-  async streamTurn(messages, list, signal, emit, extra = {}) {
+  // ending is an error that streamWithRetry tries again. A refused request carries the service's answer as detail.
+  async streamTurn({model, messages, list, signal, emit, level, turnLimit = true}) {
     const guard = new AbortController();
     let cutOff = '';
     let idle = null;
@@ -1006,19 +1317,21 @@ class Assistant {
       if (signal.aborted) guard.abort();
       else signal.addEventListener('abort', quit, {once: true});
     }
-    const cap = setTimeout(() => stopWith(TOO_LONG), this.turnMs);
+    const cap = turnLimit ? setTimeout(() => stopWith(TOO_LONG), this.turnMs) : null;
     try {
       waitForData();
+      const payload = Object.assign({model, messages, tools: list, temperature: 0.2, max_tokens: maxTokensOf(level), stream: true},
+        reasoningOf(level) ? {reasoning: reasoningOf(level)} : {});
       const r = await this.fetch(URL_, {
         method: 'POST',
         headers: {authorization: 'Bearer ' + KEY(), 'content-type': 'application/json',
           'x-title': 'App Inventor Team Edition'},
-        body: JSON.stringify(Object.assign({model: MODEL(), messages, tools: list, temperature: 0.2, max_tokens: MAX_TOKENS(), stream: true}, extra)),
+        body: JSON.stringify(payload),
         signal: guard.signal,
       });
-      if (!r.ok) throw new Error('service answered ' + r.status);
+      if (!r.ok) throw Object.assign(new Error('service answered ' + r.status), {status: r.status, detail: await errorDetail(r)});
       const reader = r.body.getReader();
-      const body = new ReadableStream({
+      const stream = new ReadableStream({
         async pull(controller) {
           waitForData();
           const {value, done} = await reader.read();
@@ -1032,7 +1345,7 @@ class Assistant {
       const state = {sawDone: false};
       const shown = [];
       let finish = '';
-      for await (const ev of tools.sseJson(body, state)) {
+      for await (const ev of tools.sseJson(stream, state)) {
         if (ev.error) throw Object.assign(new Error(ev.error.message || 'the service stopped early'), {transient: true});
         const choice = ev.choices && ev.choices[0];
         if (choice && choice.finish_reason) finish = choice.finish_reason;
@@ -1042,6 +1355,8 @@ class Assistant {
           acc.content += delta.content;
           emit({type: 'text', delta: delta.content});
         }
+        const thought = reasoningText(delta);
+        if (thought) emit({type: 'reasoning', delta: thought});
         tools.addDelta(acc, delta);
         if (Array.isArray(delta.reasoning_details)) tools.addReasoning(acc, delta.reasoning_details);
         showWriting(acc, shown, emit);
@@ -1062,20 +1377,33 @@ class Assistant {
   }
 
   // streamTurn, tried again (up to `retries` more times) when the service stalls, ends an answer early or
-  // fails for a moment. What the failed try showed is taken back first, so the answer is not shown twice.
-  async streamWithRetry(messages, list, signal, emit, extra) {
-    for (let attempt = 0; ; attempt++) {
+  // fails for a moment. What the failed try showed is taken back first, so the answer is not shown twice. A max
+  // request the service refuses is sent once more with high. rest(true) and rest(false) tell a subagent when it
+  // waits before a try again.
+  async streamWithRetry({model, messages, list, signal, emit, level, rest, turnLimit = true}) {
+    let tries = 0;      // the tries that failed and were tried again
+    let lvl = level;
+    for (;;) {
       try {
-        return await this.streamTurn(messages, list, signal, emit, extra);
+        return await this.streamTurn({model, messages, list, signal, emit, level: lvl, turnLimit});
       } catch (e) {
-        if ((signal && signal.aborted) || !retryable(e) || attempt >= this.retries) throw e;
+        if (signal && signal.aborted) throw e;
+        if (lvl === 'max' && e.status === 400 && /effort|reasoning/i.test(String(e.detail || ''))) {
+          lvl = 'high';
+          emit({type: 'status', text: MAX_REFUSED});
+          continue;
+        }
+        if (!retryable(e) || tries >= this.retries) throw e;
+        tries++;
         const why = e.stalled ? 'stopped responding' : e.premature ? 'cut its answer short' : 'had a problem';
         this.log('the AI service ' + why + (e.stalled ? ' (no data for ' + this.idleMs + ' ms)' : ' (' + String(e.message || e).slice(0, 100) + ')') +
-          '; trying again, attempt ' + (attempt + 2) + ' of ' + (this.retries + 1));
+          '; trying again, attempt ' + (tries + 1) + ' of ' + (this.retries + 1));
         emit({type: 'reset'});
-        emit({type: 'status', text: 'The AI service ' + why + '; trying again (' + (attempt + 2) + ' of ' + (this.retries + 1) + ').'});
-        await this.pause(this.retryWaitMs * (attempt + 1), signal);
-        if (signal && signal.aborted) throw Object.assign(new Error('stopped'), {name: 'AbortError'});
+        emit({type: 'status', text: 'The AI service ' + why + '; trying again (' + (tries + 1) + ' of ' + (this.retries + 1) + ').'});
+        if (rest) rest(true);
+        await this.pause(this.retryWaitMs * tries, signal);
+        if (rest) rest(false);
+        if (signal && signal.aborted) throw stoppedError();
       }
     }
   }
@@ -1272,4 +1600,5 @@ class Assistant {
   }
 }
 
-module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, modelTakesImages};
+module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, modelTakesImages, PRESETS, RUN_MODES,
+  REASONING_MAX_TOKENS, SUB_TIERS, SMART_COOLDOWN_MS};
