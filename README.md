@@ -46,7 +46,7 @@ To see the address and the team code again, and check that everything is running
 
 Or type **`MITSTATUS`** on the Pi. It shows the address, the access code, the override code and the AI models, and
 offers: change the AI models, get a new address, restart App Inventor, change the access code, change the override
-code, or exit. It is installed with the rest, so after an update it is there too. (The first time, or after an update
+code, update the app (it checks GitHub and asks first), or exit. It is installed with the rest, so after an update it is there too. (The first time, or after an update
 from before it, you can also install just the command with `sudo install -m 755 ~/F1-T/collab/pi/mitstatus.sh /usr/local/bin/MITSTATUS`.)
 
 For a link that never changes, see **Permanent address** in [collab/README.md](collab/README.md#permanent-address).

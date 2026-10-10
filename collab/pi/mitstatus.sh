@@ -3,11 +3,12 @@
 # gives the options that change them. The install puts it in /usr/local/bin, so it is run as just MITSTATUS.
 #   MITSTATUS          shows the status and the menu
 #   MITSTATUS --show   shows the status only
-# MIT_BASE and MIT_HUB point it at other folders, for tests.
+# MIT_BASE, MIT_HUB and AI_LOCK point it at other folders and files, for tests.
 set -uo pipefail
 
 BASE="${MIT_BASE:-/opt/appinventor}"
 HUB="${MIT_HUB:-$BASE/hub}"
+LOCK="${AI_LOCK:-/run/collab-update.lock}"
 
 [ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
 
@@ -180,6 +181,45 @@ restart_app() {
   echo "  App Inventor is still starting, which can take a couple of minutes. Check with MITSTATUS."
 }
 
+# 6. The app update. It asks GitHub whether there is a newer version (update.sh --check). If there is, and the person says
+# yes, update.sh --now runs as a unit of its own, so closing this window does not stop it. The new version is built while
+# the current one keeps running; App Inventor restarts only once it is ready.
+update_app() {
+  local answer n
+  if ! flock -n "$LOCK" true; then
+    echo "  An update is already running. Its latest lines:"
+    tail -n 3 "$BASE/update.log" 2>/dev/null | sed 's/^/    /'
+    echo "  Follow it with: tail -f $BASE/update.log"
+    return
+  fi
+  echo "  Asking GitHub whether there is a newer version..."
+  if ! "$BASE/update.sh" --check | sed 's/^/  /'; then
+    echo "  Could not check. Look at the log with: tail -n 20 $BASE/update.log"
+    return
+  fi
+  [ -s "$BASE/update-available" ] || return
+  n="$(curl -fsS -m 5 http://127.0.0.1:8080/collab/status 2>/dev/null |
+    python3 -c 'import sys, json; print(len(json.load(sys.stdin)["online"]))' 2>/dev/null)" || n=0
+  echo
+  echo "  Update to $(cat "$BASE/update-available")?"
+  echo "  The new version is built first, while the current one keeps running. Then App Inventor restarts, which"
+  echo "  disconnects anyone using it. Projects, backups, the team code and settings are kept."
+  if [ "${n:-0}" -gt 0 ]; then echo "  $n people are online right now."; fi
+  read -r -p "  Update now? (y/N): " answer || return
+  case "$answer" in
+    y|Y|yes|YES) ;;
+    *) echo "  Not updated."; return ;;
+  esac
+  if ! systemd-run --unit=collab-update-now --collect --property=Nice=10 "$BASE/update.sh" --now > /dev/null; then
+    echo "  Could not start the update. Look at it with: systemctl status collab-update-now"
+    return
+  fi
+  sleep 3
+  echo "  The update is running in the background. Building the new version can take about an hour on the Pi."
+  echo "  Follow it with: tail -f $BASE/update.log"
+  tail -n 3 "$BASE/update.log" 2>/dev/null | sed 's/^/    /'
+}
+
 main_menu() {
   local choice
   while true; do
@@ -189,9 +229,10 @@ main_menu() {
     echo "  3. Restart"
     echo "  4. Change access code"
     echo "  5. Change override code"
-    echo "  6. Exit"
+    echo "  6. Update"
+    echo "  7. Exit"
     echo
-    if ! read -r -p "  Choose 1-6: " choice; then
+    if ! read -r -p "  Choose 1-7: " choice; then
       echo
       exit 0
     fi
@@ -201,8 +242,9 @@ main_menu() {
       3) restart_app; pause ;;
       4) "$BASE/set-team-code.sh"; pause ;;
       5) "$BASE/set-ai.sh" --pin; pause ;;
-      6|q|Q) exit 0 ;;
-      *) echo "  Type a number from 1 to 6." ;;
+      6) update_app; pause ;;
+      7|q|Q) exit 0 ;;
+      *) echo "  Type a number from 1 to 7." ;;
     esac
   done
 }

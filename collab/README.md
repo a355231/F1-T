@@ -102,7 +102,8 @@ To see the link and the team code again at any time, and check that everything i
 
 **`MITSTATUS`** does the same and then offers the common jobs in one menu: change the AI models (each preset, or back
 to the built-in one), get a new Cloudflare link (the old address stops working), restart App Inventor and the hub (the
-link stays), change the access code, change the override code, or exit. It is `/usr/local/bin/MITSTATUS`, installed by
+link stays), change the access code, change the override code, update the app (it checks GitHub and asks before the update starts; the update keeps running if
+the window is closed), or exit. It is `/usr/local/bin/MITSTATUS`, installed by
 the install and the update from `collab/pi/mitstatus.sh`. Its model list is read from the hub's own preset table, so it
 always shows the models the hub is running with. `set-ai.sh --model smart|balanced|fast <name>` (or `--reset`) is what
 it uses for the models, and `collab/pi/test/mitstatus-test.sh` tests it, in a folder of its own.
