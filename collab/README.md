@@ -128,13 +128,18 @@ temporary link.
 The address keeps working after a reboot. If the script says the hub does not have its second port yet, update the Pi
 first (the nightly update, or the install command).
 
-**Cloudflare named tunnel (your own domain).** Use a subdomain such as `app.yourdomain.com`, on a domain whose DNS is
-on Cloudflare. Run these as your normal user, not with `sudo`, unless a step says otherwise.
+**Cloudflare named tunnel (your own domain).** Use a subdomain such as `app.yourdomain.com`. Run these as your normal
+user, not with `sudo`, unless a step says otherwise.
 
-1. `cloudflared tunnel login` opens a browser. Pick the domain.
+0. Put the domain on Cloudflare: in the Cloudflare dashboard, add the site, then change the domain's nameservers at your
+   registrar to the two Cloudflare gives you. Wait until the site shows as active (this can take a few hours).
+1. `cloudflared tunnel login` prints a link on the Pi (or opens a browser). Open the link on your phone or PC, log in and
+   pick the domain. If the login does not finish on the Pi, log in from a PC that has cloudflared, then copy that PC's
+   `~/.cloudflared/cert.pem` to the Pi's `~/.cloudflared/`.
 2. `cloudflared tunnel create team-edu` makes the tunnel and a credentials file in `~/.cloudflared/`, and prints the
    tunnel's ID.
-3. `cloudflared tunnel route dns team-edu app.yourdomain.com` creates the DNS record.
+3. `cloudflared tunnel route dns team-edu app.yourdomain.com` creates the DNS record. If it says a record already exists,
+   delete the old record for that name in the Cloudflare DNS settings first.
 4. Write `~/.cloudflared/config.yml`:
 
    ```yaml
@@ -148,13 +153,21 @@ on Cloudflare. Run these as your normal user, not with `sudo`, unless a step say
 
 5. Install it as a service. `sudo` changes `$HOME`, so give the config path in full:
    `sudo cloudflared --config /home/<your-user>/.cloudflared/config.yml service install`, then
-   `sudo systemctl start cloudflared`.
+   `sudo systemctl enable --now cloudflared`, which starts it now and on every boot.
 6. Stop the quick tunnel so only one tunnel runs: `sudo systemctl disable --now cloudflared-quick`.
+7. Check it. `systemctl status cloudflared` should say active, and `https://app.yourdomain.com` should open the app.
+   `MITSTATUS --show` now shows the permanent link.
+
+Keep the `.json` credentials file and `cert.pem` private: anyone with them can run your tunnel. To see which config the
+service reads, run `systemctl cat cloudflared | grep ExecStart`. To change the hostname later, add the DNS route from
+step 3, change the hostname in `config.yml`, then run `sudo systemctl restart cloudflared`. After this, leave New link
+in MITSTATUS alone: it starts the temporary quick tunnel again, which you no longer need.
 
 MITSTATUS reads the hostname from that config (in your home folder, or in `/etc/cloudflared`). It shows it as the
 permanent link while the `cloudflared` service is running, and says so when it is not.
 
-Official guides: [Cloudflare: run a tunnel as a service on Linux](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/tunnel-guide/local/as-a-service/linux/),
+Official guides: [Cloudflare: create a locally-managed tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/local-management/create-local-tunnel/),
+[Cloudflare: run a tunnel as a service on Linux](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/local-management/as-a-service/linux/),
 [Tailscale Funnel](https://tailscale.com/docs/reference/tailscale-cli/funnel).
 
 ### Faster builds: build on a PC
