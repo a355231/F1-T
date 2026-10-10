@@ -315,6 +315,11 @@ App Inventor tab that opened it as well, in case that tab's connection to the te
   property, method or event the component does not have, a block that names the wrong component type, and a global
   variable or procedure used but never defined. In full-app mode such a problem keeps the Apply button back until it
   is fixed. Yes/no and colour values are stored the way App Inventor writes them (`True`, `&HFFFF0000`).
+* **One subagent.** The helper can hand one self-contained part of a job to a subagent (the `subagent` tool). It is the
+  same model, on **low reasoning**, with the project tools, and it works on the same draft. It cannot talk to the
+  person, propose changes or ask a question, and it cannot start another subagent. The person sees its steps, not its
+  words. It gets 12 model answers and 4 minutes; if it cannot finish, the helper is told why and carries on. Reasoning
+  pieces that a reasoning model sends are kept and sent back with the tool calls they belong to.
 * **Context compactor.** One answer's conversation is kept within the model's room: **1M tokens** for the Claude 5
   models, **256K** for the rest, or less if OpenRouter reports less for the model in use. `AI_CONTEXT_TOKENS` in
   `ai.env` sets the room by hand. Past 75% of the room for the prompt, the oldest tool results are shortened first

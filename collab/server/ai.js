@@ -137,6 +137,16 @@ const NUDGE_MAX = 3;                // full-app mode: answers in a row that stop
 const SAME_STEP_MAX = 8;            // the same tool calls this many steps in a row are a loop: the helper stops and says so
 const LOOPING = 'The helper kept repeating the same step, so it has stopped. Send a message to carry on, or ask it to try another way.';
 const STILL_BUILDING = 'Still building: the app is not complete, so there is no Apply button yet. Send a message to keep going.';
+// The subagent: one self-contained piece of a job, done by the same model on low reasoning. It may take this many
+// model answers and this long, and its report goes back to the helper as far as SUB_RESULT_MAX characters.
+const SUB_STEPS = 12;
+const SUB_MS = 4 * 60 * 1000;
+const SUB_RESULT_MAX = 8000;
+const LOW_REASONING = {reasoning: {effort: 'low'}};
+const SUBAGENT_NOTE = 'You are a subagent. The AI helper of App Inventor Team Edition has handed you one piece of work on ' +
+  'the open project. Do that piece with the project tools, and check your changes with check_project. You cannot talk to ' +
+  'the person or propose changes: the helper does that once you have finished. When the piece is done, reply with a short ' +
+  'report: what you changed or found, and anything the helper still has to do. Keep to the piece you were given.';
 // Tools that change the draft. Their successful calls mark an answer as one that built something.
 const EDITS = new Set(registry.TOOLS.filter(t => t.mode === 'draft').map(t => t.name));
 const NOT_SET_UP = 'The AI helper is not set up yet. Whoever runs the Raspberry Pi needs to run: ' +
@@ -915,6 +925,52 @@ class Assistant {
     }
   }
 
+  // The subagent: a piece of the job the helper hands over. It is the same model, on low reasoning, with the project
+  // tools except the ones that talk to the person or propose changes, so it cannot start another subagent. It works on
+  // the same draft, and its report comes back to the helper as the result of the tool. The person sees its steps as
+  // they happen, but not its words. If it cannot finish, the helper is told why, and carries on without it.
+  async runSubagent(task, ctx) {
+    const emit = ev => { if (ev.type !== 'text' && ev.type !== 'reset') ctx.emit(ev); };
+    const sub = Object.assign({}, ctx, {inSubagent: true, emit});
+    const messages = [{role: 'system', content: SUBAGENT_NOTE}, {role: 'user', content: task}];
+    const deadline = this.now() + SUB_MS;
+    let steps = 0;
+    try {
+      while (steps < SUB_STEPS && this.now() <= deadline) {
+        steps++;
+        const list = registry.definitions(sub);
+        const compacted = await compactor.compactContext(messages, {
+          window: await this.contextWindow(), maxOutput: MAX_TOKENS(), toolsTokens: compactor.tokensOfJson(list),
+          summarize: text => this.summarizeSteps(text, ctx.signal), notice: text => emit({type: 'status', text}),
+        });
+        if (compacted) this.log('a subagent\'s conversation was made shorter: ' + compacted.how + ' (' + compacted.steps + ' step(s))');
+        const reply = await this.streamWithRetry(messages, list, ctx.signal, emit, LOW_REASONING);
+        if (reply.truncated) {
+          return {text: 'The subagent ran out of room before it finished. What it had written: ' +
+            ((reply.content || '').trim() || '(nothing)').slice(0, SUB_RESULT_MAX), detail: 'ran out of room'};
+        }
+        if (!reply.tool_calls.length) {
+          return {text: (reply.content || '').trim().slice(0, SUB_RESULT_MAX) || 'The subagent finished without a written report.',
+            detail: steps + ' step(s)'};
+        }
+        // The reasoning comes back with the tool calls it belongs to, as the service asks.
+        messages.push(Object.assign({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls},
+          reply.reasoning_details ? {reasoning_details: reply.reasoning_details} : {}));
+        for (const call of reply.tool_calls) {
+          const out = await registry.run(call.function.name, call.function.arguments, Object.assign({}, sub, {callId: call.id}));
+          if (EDITS.has(call.function.name) && !/^Error/.test(String(out.text))) ctx.state.edited = true;
+          messages.push({role: 'tool', tool_call_id: call.id, content: String(out.text).slice(0, MAX_TOOL_RESULT)});
+        }
+      }
+      return {text: 'The subagent did not finish within ' + SUB_STEPS + ' answers or ' + Math.round(SUB_MS / 60000) +
+        ' minutes. Ask again with a smaller piece of the job.', detail: 'stopped'};
+    } catch (e) {
+      if (ctx.signal && ctx.signal.aborted) throw e;
+      this.log('a subagent could not finish: ' + String(e.message || e).slice(0, 100));
+      return {text: 'The subagent could not finish: ' + String(e.message || e).slice(0, 200), detail: 'failed'};
+    }
+  }
+
   // The draft of the app for this person and project in full-app mode. It is kept between messages, for an
   // hour after the last one was used, so that a big app can be built over several answers.
   fullDraft(me, projectId, cookie) {
@@ -939,7 +995,7 @@ class Assistant {
   // So it is cut off after idleMs of silence (or turnMs in all), and the person is told. Stop still works.
   // The result says whether the model ran out of room (truncated); an answer that ends without a proper
   // ending is an error that streamWithRetry tries again.
-  async streamTurn(messages, list, signal, emit) {
+  async streamTurn(messages, list, signal, emit, extra = {}) {
     const guard = new AbortController();
     let cutOff = '';
     let idle = null;
@@ -957,7 +1013,7 @@ class Assistant {
         method: 'POST',
         headers: {authorization: 'Bearer ' + KEY(), 'content-type': 'application/json',
           'x-title': 'App Inventor Team Edition'},
-        body: JSON.stringify({model: MODEL(), messages, tools: list, temperature: 0.2, max_tokens: MAX_TOKENS(), stream: true}),
+        body: JSON.stringify(Object.assign({model: MODEL(), messages, tools: list, temperature: 0.2, max_tokens: MAX_TOKENS(), stream: true}, extra)),
         signal: guard.signal,
       });
       if (!r.ok) throw new Error('service answered ' + r.status);
@@ -987,6 +1043,7 @@ class Assistant {
           emit({type: 'text', delta: delta.content});
         }
         tools.addDelta(acc, delta);
+        if (Array.isArray(delta.reasoning_details)) tools.addReasoning(acc, delta.reasoning_details);
         showWriting(acc, shown, emit);
       }
       if (finish === 'error') throw Object.assign(new Error('the service reported an error'), {transient: true});
@@ -1006,10 +1063,10 @@ class Assistant {
 
   // streamTurn, tried again (up to `retries` more times) when the service stalls, ends an answer early or
   // fails for a moment. What the failed try showed is taken back first, so the answer is not shown twice.
-  async streamWithRetry(messages, list, signal, emit) {
+  async streamWithRetry(messages, list, signal, emit, extra) {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await this.streamTurn(messages, list, signal, emit);
+        return await this.streamTurn(messages, list, signal, emit, extra);
       } catch (e) {
         if ((signal && signal.aborted) || !retryable(e) || attempt >= this.retries) throw e;
         const why = e.stalled ? 'stopped responding' : e.premature ? 'cut its answer short' : 'had a problem';

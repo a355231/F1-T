@@ -206,7 +206,8 @@ function numbered(text, from, to) {
 }
 
 // The tools. mode: 'read' (no change), 'draft' (changes the draft), 'propose', 'art' (pictures), 'web',
-// 'util', 'ask' (talks to the person). needs: 'search' | 'full' | 'vision' | 'draft' (has changes).
+// 'util', 'ask' (talks to the person), 'agent' (hands a piece of the job to the one subagent).
+// needs: 'search' | 'full' | 'vision' | 'draft' (has changes).
 const TOOLS = [
   // -- reading the project
   {name: 'list_files', mode: 'read', description: 'List the project\'s files (designer, blocks, pictures and settings) with their sizes. Files changed in this conversation are marked.',
@@ -609,6 +610,13 @@ const TOOLS = [
       ctx.emit({type: 'question', text: String(a.question || '').slice(0, 500)});
       return {text: 'The question is shown. Wait for the answer.', detail: 'asked', stop: true};
     }},
+  {name: 'subagent', mode: 'agent', description: 'Hand one self-contained part of the job to a subagent: the same model, thinking less, with the project tools. It works on the same draft, cannot talk to the person or propose changes, and gives back its report as text. Give it the whole piece in task, with the screen and component names and what the report should say. Use it for a part you can describe on its own, not for small steps.',
+    properties: {task: {type: 'string', description: 'The whole piece of work: what to build or check, the names involved, and what to report back'}}, required: ['task'],
+    label: a => 'Subagent: ' + String(a.task || '').replace(/\s+/g, ' ').slice(0, 60), run: async (a, ctx) => {
+      const task = String(a.task || '').trim();
+      if (!task) throw new Error('give the subagent a task');
+      return ctx.assistant.runSubagent(task, ctx);
+    }},
   {name: 'scratch_write', mode: 'read', description: 'Keep a note for later steps (for example what you found, or a list still to do). Notes are kept for an hour, for this person and project; up to 40 notes.',
     properties: {key: {type: 'string'}, text: {type: 'string'}}, required: ['key', 'text'],
     label: () => 'Taking a note', run: async (a, ctx) => {
@@ -639,10 +647,15 @@ const BY_NAME = new Map(TOOLS.map(t => [t.name, t]));
 const PLANNING = new Set(['list_files', 'read_file', 'search_project', 'screen_outline', 'blocks_outline', 'check_project',
   'project_settings', 'list_pictures', 'component_info', 'component_types', 'blocks_examples', 'current_time',
   'calculate', 'web_search', 'fetch_doc', 'draft_status', 'update_plan', 'ask_user', 'scratch_read', 'scratch_list',
-  'view_picture']);
+  'view_picture', 'subagent']);
+
+// What a subagent may not use: the tools that talk to the person or propose changes, the subagent tool itself (so a
+// subagent cannot start another one), and the pictures, since a subagent is given text only.
+const SUBAGENT_OFF = new Set(['subagent', 'propose_draft', 'propose_change', 'ask_user', 'update_plan', 'view_picture']);
 
 // Whether a tool may be offered or used right now.
 function allowed(t, ctx) {
+  if (ctx.inSubagent && SUBAGENT_OFF.has(t.name)) return false;
   if (ctx.readOnly && !PLANNING.has(t.name)) return false;
   if (t.needs === 'search') return !!ctx.assistant.searchKey();
   if (t.needs === 'full') return !!ctx.full;

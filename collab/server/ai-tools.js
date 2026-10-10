@@ -144,6 +144,26 @@ function addDelta(acc, delta) {
   }
 }
 
+// Adds one streamed delta's reasoning pieces to acc. A reasoning model sends its reasoning in pieces, each with an
+// index: text is joined, and a signature or an encrypted block replaces what was there. The service needs the pieces
+// sent back with the tool calls they came with, so they are kept as they arrived.
+function addReasoning(acc, pieces) {
+  acc.reasoning_details = acc.reasoning_details || [];
+  for (const p of pieces) {
+    if (!p || typeof p !== 'object') continue;
+    const at = Number.isInteger(p.index) ? p.index : 0;
+    const have = acc.reasoning_details.find(d => d.index === at && d.type === p.type);
+    if (!have) {
+      acc.reasoning_details.push(Object.assign({}, p, {index: at}));
+      continue;
+    }
+    if (typeof p.text === 'string') have.text = (have.text || '') + p.text;
+    if (typeof p.summary === 'string') have.summary = (have.summary || '') + p.summary;
+    if (p.signature) have.signature = p.signature;
+    if (p.data) have.data = p.data;
+  }
+}
+
 // ---- reading documentation pages ----
 
 // Only these sites may be read, so that the helper can look up App Inventor, Android, web and Python
@@ -314,5 +334,5 @@ function calculate(expression) {
   }
 }
 
-module.exports = {MAX_SVG_CHARS, MAX_PNG_BYTES, DOC_HOSTS, checkSvg, rasterize, webSearch, sseJson, addDelta,
+module.exports = {MAX_SVG_CHARS, MAX_PNG_BYTES, DOC_HOSTS, checkSvg, rasterize, webSearch, sseJson, addDelta, addReasoning,
   fetchDoc, isPublicAddress, hostAllowed, calculate};

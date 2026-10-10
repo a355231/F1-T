@@ -191,3 +191,13 @@ test('the files of one change may add up to 8 MB, and not more', () => {
   assert.doesNotThrow(() => registry.checkChange(base, change(4), true));
   assert.throws(() => registry.checkChange(base, change(5), true), /over 8 MB/);
 });
+
+test('in planning mode the helper can hand over work, and its subagent is given only the reading tools', () => {
+  const ctx = {readOnly: true, inSubagent: false, full: false, vision: false, assistant: {searchKey: () => ''}, draft: {changed: new Map()}};
+  const helper = registry.definitions(ctx).map(t => t.function.name);
+  assert.ok(helper.includes('subagent'), 'the helper can hand over work while planning');
+  const sub = registry.definitions(Object.assign({}, ctx, {inSubagent: true})).map(t => t.function.name);
+  assert.ok(sub.includes('read_file'), 'the subagent can read');
+  assert.ok(!sub.includes('scm_set_property'), 'the subagent cannot change the project while planning');
+  assert.ok(!sub.includes('subagent'), 'the subagent cannot start another one');
+});

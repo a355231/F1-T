@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const {execFileSync} = require('node:child_process');
 const {EventEmitter} = require('events');
-const {checkSvg, rasterize, webSearch, sseJson, addDelta, fetchDoc, isPublicAddress, calculate} = require('../ai-tools');
+const {checkSvg, rasterize, webSearch, sseJson, addDelta, addReasoning, fetchDoc, isPublicAddress, calculate} = require('../ai-tools');
 
 const GOOD = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect width="200" height="100" fill="#3a7"/><circle id="c" cx="50" cy="50" r="20" fill="#fff"/><use href="#c" x="60"/></svg>';
 
@@ -196,4 +196,16 @@ test('calculate refuses anything that is not arithmetic, and says why', () => {
   assert.match(calculate('(1 + 2').error, /a bracket is missing/);
   assert.match(calculate('').error, /nothing to calculate/);
   assert.match(calculate('while(true){}').error, /only numbers/);
+});
+
+test('reasoning pieces are joined by index, and a signature or an encrypted block is kept as it arrived', () => {
+  const acc = {content: '', tool_calls: []};
+  addReasoning(acc, [{type: 'reasoning.text', text: 'Look ', index: 0}]);
+  addReasoning(acc, [{type: 'reasoning.text', text: 'at the screen.', index: 0, signature: 'sig-1'}]);
+  addReasoning(acc, [{type: 'reasoning.encrypted', data: 'enc-1', index: 1}]);
+  addReasoning(acc, [{type: 'reasoning.encrypted', data: 'enc-2', index: 1}]);
+  assert.deepStrictEqual(acc.reasoning_details, [
+    {type: 'reasoning.text', text: 'Look at the screen.', index: 0, signature: 'sig-1'},
+    {type: 'reasoning.encrypted', data: 'enc-2', index: 1},
+  ]);
 });

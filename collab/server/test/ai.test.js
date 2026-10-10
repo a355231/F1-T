@@ -1333,3 +1333,72 @@ test('if the notes cannot be written, the answer still goes on, and says that ea
     delete process.env.AI_CONTEXT_TOKENS;
   }
 });
+
+test('the helper hands a piece of the job to its one subagent: the same model on low reasoning; the person sees its steps but not its words', async () => {
+  const t = setup([
+    toolTurn('subagent', {task: 'Set the label on Screen1 to Hello.'}, 'h1'),
+    toolTurn('scm_set_property', {screen: 'Screen1', component: 'Label1', property: 'Text', value: 'Hello'}, 'c1'),
+    textTurn('The label now says Hello.'),
+    toolTurn('propose_draft', {summary: 'The label says Hello'}, 'p1'),
+    textTurn('Press Apply to add it.'),
+  ]);
+  const evs = await say(t.ai, 'ann', 'change the label');
+  assert.strictEqual(t.calls.length, 5);
+  assert.strictEqual(t.calls[0].payload.reasoning, undefined, 'the helper itself is not sent a reasoning setting');
+  assert.deepStrictEqual(t.calls[1].payload.reasoning, {effort: 'low'}, 'the subagent is sent low reasoning');
+  assert.deepStrictEqual(t.calls[2].payload.reasoning, {effort: 'low'}, 'and so is each of its answers');
+  assert.strictEqual(t.calls[3].payload.reasoning, undefined);
+  assert.ok(!texts(evs).includes('The label now says Hello.'), "the subagent's words are not shown to the person");
+  assert.ok(evs.some(e => e.type === 'tool' && e.name === 'scm_set_property' && e.state === 'done'), 'its steps are shown');
+  assert.ok(evs.some(e => e.type === 'tool' && e.name === 'subagent' && e.state === 'done'), 'the hand-over is one step');
+  assert.ok(evs.find(e => e.type === 'proposal'), 'the helper proposes the change the subagent made');
+});
+
+test('the subagent is not offered the tools that talk to the person or propose changes, and a subagent it asks for is refused', async () => {
+  const t = setup([
+    toolTurn('subagent', {task: 'Check the project.'}, 'h1'),
+    toolTurn('subagent', {task: 'Start another one.'}, 's1'),
+    textTurn('Checked: no problems.'),
+    textTurn('The project is fine.'),
+  ]);
+  await say(t.ai, 'ann', 'check the project');
+  const helperTools = t.calls[0].payload.tools.map(x => x.function.name);
+  const subTools = t.calls[1].payload.tools.map(x => x.function.name);
+  assert.ok(helperTools.includes('subagent'), 'the helper has its subagent');
+  for (const name of ['subagent', 'propose_draft', 'propose_change', 'ask_user', 'update_plan', 'view_picture']) {
+    assert.ok(!subTools.includes(name), 'the subagent is not offered ' + name);
+  }
+  assert.ok(subTools.includes('check_project') && subTools.includes('scm_set_property'), 'the subagent has the project tools');
+  const refused = t.calls[2].payload.messages.find(m => m.role === 'tool' && m.tool_call_id === 's1');
+  assert.match(refused.content, /not available here/, 'a subagent asked for another one is refused');
+});
+
+test('reasoning a reasoning model sends with a tool call goes back with that call, as the service asks', async () => {
+  const t = setup([
+    toolTurn('subagent', {task: 'Check the project.'}, 'h1'),
+    [
+      {choices: [{delta: {reasoning_details: [{type: 'reasoning.text', text: 'Check the screen ', index: 0}]}}]},
+      {choices: [{delta: {reasoning_details: [{type: 'reasoning.text', text: 'first.', index: 0, signature: 'sig-1'}]}}]},
+      {choices: [{delta: {tool_calls: [{index: 0, id: 's1', type: 'function', function: {name: 'check_project', arguments: '{}'}}]}}]},
+      '[DONE]',
+    ],
+    textTurn('Checked: no problems.'),
+    textTurn('The project is fine.'),
+  ]);
+  await say(t.ai, 'ann', 'check the project');
+  const sent = t.calls[2].payload.messages.find(m => m.role === 'assistant' && m.tool_calls);
+  assert.deepStrictEqual(sent.reasoning_details, [{type: 'reasoning.text', text: 'Check the screen first.', index: 0, signature: 'sig-1'}]);
+});
+
+test('if the subagent cannot finish, the helper is told why and carries on without it; the person is not shown an error', async () => {
+  const t = setup([
+    toolTurn('subagent', {task: 'Set the label.'}, 'h1'),
+    {status: 500}, {status: 500}, {status: 500},
+    textTurn('The subagent could not finish, so I stopped there.'),
+  ]);
+  const evs = await say(t.ai, 'ann', 'change the label');
+  const told = t.calls[4].payload.messages.find(m => m.role === 'tool' && m.tool_call_id === 'h1');
+  assert.match(told.content, /^The subagent could not finish: service answered 500/);
+  assert.ok(!evs.some(e => e.type === 'error'), 'no error is shown to the person');
+  assert.match(texts(evs), /The subagent could not finish, so I stopped there\./);
+});
