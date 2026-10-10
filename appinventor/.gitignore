@@ -7,6 +7,7 @@ build/
 reports/
 DerivedData/
 Versions/
+node_modules/
 
 ## OS Generated Files
 */.DS_Store
