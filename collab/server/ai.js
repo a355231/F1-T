@@ -452,9 +452,18 @@ class Slots {
   }
 }
 
+// The id of a tool event: the tag of the model call, plus the provider's id for the call. A model can give two calls in
+// one message the same id, so each later call with the same id adds "#2", "#3" and so on, by its place in the message.
+function eventId(tag, calls, i) {
+  const id = calls[i].id;
+  let same = 0;
+  for (let j = 0; j < i; j++) if (calls[j] && calls[j].id === id) same++;
+  return tag + id + (same ? '#' + (same + 1) : '');
+}
+
 // Shows a long tool call while the model is still writing it. Writing a big file can take minutes with no
-// words in between, and the window would look stuck. The chip's id is the tag of the model call plus the provider's id
-// for the call (see converse), so it is the same chip that the running and done steps of the call use.
+// words in between, and the window would look stuck. The chip's id is the event id of the call (see eventId), so it is
+// the same chip that the running and done steps of the call use.
 function showWriting(acc, shown, emit, tag) {
   const now = Date.now();
   acc.tool_calls.forEach((slot, i) => {
@@ -462,7 +471,7 @@ function showWriting(acc, shown, emit, tag) {
     const size = slot.function.arguments.length;
     if (size < WRITING_BYTES || (shown[i] && now - shown[i] < 1200)) return;
     shown[i] = now;
-    emit({type: 'tool', id: tag + slot.id, name: slot.function.name, state: 'running',
+    emit({type: 'tool', id: eventId(tag, acc.tool_calls, i), name: slot.function.name, state: 'running',
       label: 'Writing ' + slot.function.name.replace(/_/g, ' '), detail: (size / 1024).toFixed(1) + ' KB so far'});
   });
 }
@@ -1075,10 +1084,10 @@ class Assistant {
           // The model ran out of room part way through. A half-written tool call is never run. The model is told,
           // and carries on in smaller pieces; only if that keeps happening is the helper paused.
           this.log('the model ran out of room (' + reply.tool_calls.length + ' tool call(s) cut off)');
-          for (const call of reply.tool_calls) {
-            emit({type: 'tool', id: tag + call.id, name: call.function.name, state: 'error',
+          reply.tool_calls.forEach((call, i) => {
+            emit({type: 'tool', id: eventId(tag, reply.tool_calls, i), name: call.function.name, state: 'error',
               label: 'Writing ' + call.function.name.replace(/_/g, ' '), detail: 'too long, skipped'});
-          }
+          });
           if (++cutOff > CUT_OFF_MAX) {
             emit({type: 'status', text: PAUSED_LONG});
             return;
@@ -1148,16 +1157,16 @@ class Assistant {
   // Runs one model answer's tool calls, as the answer asked. The subagent calls start together, and the slots of the run
   // mode queue the ones beyond its cap. The other calls run one after another, in their order, while those work. The
   // results come back in the order of the calls, which is the order the model needs them in. Each call's steps use the
-  // tag of the model call that asked for it, plus the call's id (see converse).
+  // event id of the call (see eventId), which starts with the tag of the model call that asked for it.
   async runCalls(calls, run, tag) {
-    const toolCtx = call => Object.assign({}, run, {callId: tag + call.id});
-    const started = calls.map(call => (call.function.name === 'subagent'
-      ? registry.run(call.function.name, call.function.arguments, toolCtx(call)) : null));
+    const toolCtx = i => Object.assign({}, run, {callId: eventId(tag, calls, i)});
+    const started = calls.map((call, i) => (call.function.name === 'subagent'
+      ? registry.run(call.function.name, call.function.arguments, toolCtx(i)) : null));
     const outs = [];
     for (let i = 0; i < calls.length; i++) {
       // A proposal waits for the subagents of this step, so that it includes everything they changed.
       if (PROPOSALS.has(calls[i].function.name)) await Promise.all(started.filter(Boolean));
-      if (!started[i]) outs[i] = await registry.run(calls[i].function.name, calls[i].function.arguments, toolCtx(calls[i]));
+      if (!started[i]) outs[i] = await registry.run(calls[i].function.name, calls[i].function.arguments, toolCtx(i));
     }
     for (let i = 0; i < calls.length; i++) {
       if (started[i]) outs[i] = await started[i];
@@ -1264,10 +1273,10 @@ class Assistant {
         stats.steps++;
         if (reply.truncated) {
           // As for the helper: a half-written tool call is never run, and the subagent carries on in smaller pieces.
-          for (const call of reply.tool_calls) {
-            emitSub({type: 'tool', id: tag + call.id, name: call.function.name, state: 'error',
+          reply.tool_calls.forEach((call, i) => {
+            emitSub({type: 'tool', id: eventId(tag, reply.tool_calls, i), name: call.function.name, state: 'error',
               label: 'Writing ' + call.function.name.replace(/_/g, ' '), detail: 'too long, skipped'});
-          }
+          });
           if (++cutOff > CUT_OFF_MAX) return end('failed', {text: SUB_PAUSED, detail: 'ran out of room'}, {detail: 'ran out of room'});
           emitSub({type: 'status', text: reply.tool_calls.length
             ? 'That step was too long to finish in one go, so the subagent is splitting it into smaller pieces.'
@@ -1292,7 +1301,8 @@ class Assistant {
         messages.push(withReasoning({role: 'assistant', content: reply.content || null, tool_calls: reply.tool_calls}, reply));
         const pictures = [];
         let outOfTime = false;   // a call came at or after the deadline: it was not run, and the run ends below
-        for (const call of reply.tool_calls) {
+        for (let k = 0; k < reply.tool_calls.length; k++) {
+          const call = reply.tool_calls[k];
           // Stop ends the subagent at once: the calls of this step that have not started do not run.
           if (ctx.signal && ctx.signal.aborted) throw stoppedError();
           // The deadline is checked before each tool call. A call that would start at or after it is not run, and is answered
@@ -1302,7 +1312,7 @@ class Assistant {
             messages.push({role: 'tool', tool_call_id: call.id, content: TIME_CALL});
             continue;
           }
-          const out = await registry.run(call.function.name, call.function.arguments, Object.assign({}, sub, {callId: tag + call.id}));
+          const out = await registry.run(call.function.name, call.function.arguments, Object.assign({}, sub, {callId: eventId(tag, reply.tool_calls, k)}));
           let text = String(out.text);
           if (EDITS.has(call.function.name) && !/^Error/.test(text)) ctx.state.edited = true;
           if (out.images && out.images.length && sub.vision) {

@@ -2352,3 +2352,54 @@ test('every model call is sized for the model it sends: its room is that model\'
     compactor.compactContext = real;
   }
 });
+
+test('two calls in one message that share a provider id each keep their own step', async () => {
+  const twice = [
+    {choices: [{delta: {tool_calls: [
+      {index: 0, id: 'x', type: 'function', function: {name: 'list_files', arguments: '{}'}},
+      {index: 1, id: 'x', type: 'function', function: {name: 'read_file', arguments: '{"path": "src/a/Screen1.scm"}'}},
+    ]}}]},
+    '[DONE]',
+  ];
+  const t = setup([twice, textTurn('Both done.')]);
+  const evs = await say(t.ai, 'ann', 'list and read');
+  const done = evs.filter(e => e.type === 'tool' && e.state === 'done');
+  assert.deepStrictEqual(done.map(e => e.id), ['s0:x', 's0:x#2'], 'the second call with the same id gets its own id');
+  assert.deepStrictEqual(done.map(e => e.name), ['list_files', 'read_file']);
+});
+
+test('a subagent shows the Writing step of a long call under its own tag, and finishes it under the same id', async () => {
+  const long = JSON.stringify({note: 'x'.repeat(2000)});
+  const t = setup([
+    toolTurn('subagent', {task: 'Check the project.'}, 'h1'),
+    [
+      {choices: [{delta: {tool_calls: [{index: 0, id: 'w1', type: 'function', function: {name: 'check_project', arguments: long.slice(0, 5)}}]}}]},
+      {choices: [{delta: {tool_calls: [{index: 0, function: {arguments: long.slice(5)}}]}}]},
+      '[DONE]',
+    ],
+    textTurn('Checked.'),
+    textTurn('Done.'),
+  ]);
+  const evs = await say(t.ai, 'ann', 'check it');
+  const writing = evs.find(e => e.type === 'tool' && e.sub && /^Writing/.test(e.label || ''));
+  assert.ok(writing, 'the subagent shows a Writing step');
+  assert.match(writing.id, /^s0:h1:\d+:w1$/, 'its id carries the subagent tag');
+  assert.ok(evs.some(e => e.type === 'tool' && e.sub && e.id === writing.id && e.state === 'done'), 'the same step finishes under the same id');
+});
+
+test('a subagent cut off in the middle of a call shows that step under its own tag', async () => {
+  const t = setup([
+    toolTurn('subagent', {task: 'Check the project.'}, 'h1'),
+    [
+      {choices: [{delta: {tool_calls: [{index: 0, id: 'w1', type: 'function', function: {name: 'check_project', arguments: '{}'}}]}}]},
+      {choices: [{finish_reason: 'length'}]},
+      '[DONE]',
+    ],
+    textTurn('Checked in smaller pieces.'),
+    textTurn('Done.'),
+  ]);
+  const evs = await say(t.ai, 'ann', 'check it');
+  const cut = evs.find(e => e.type === 'tool' && e.sub && e.state === 'error' && e.detail === 'too long, skipped');
+  assert.ok(cut, 'the cut-off call is shown as skipped');
+  assert.match(cut.id, /^s0:h1:\d+:w1$/, 'with the subagent tag');
+});
