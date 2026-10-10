@@ -71,6 +71,7 @@ install -m 755 "$ROOT/collab/pi/apply-config.sh" "$ROOT/collab/pi/set-team-code.
   "$ROOT/collab/pi/tunnel-url.sh" "$ROOT/collab/pi/show-info.sh" "$ROOT/collab/pi/protect-sd.sh" \
   "$ROOT/collab/pi/move-data.sh" "$ROOT/collab/pi/watchdog.sh" "$ROOT/collab/pi/update.sh" \
   "$ROOT/collab/pi/stable-link.sh" "$ROOT/collab/pi/set-build-server.sh" "$ROOT/collab/pi/set-ai.sh" "$BASE/"
+install -m 755 "$ROOT/collab/pi/mitstatus.sh" /usr/local/bin/MITSTATUS
 echo "$ROOT" > "$BASE/repo"
 git -c safe.directory="$ROOT" -C "$ROOT" rev-parse --short HEAD > "$BASE/version" 2>/dev/null || echo unknown > "$BASE/version"
 chown -R "$RUN_AS:$RUN_AS" "$BASE"

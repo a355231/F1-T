@@ -53,6 +53,7 @@ mkdir -p /opt/appinventor/war /opt/appinventor/hub /opt/appinventor/tools
 install -m 755 "$HERE/apply-config.sh" "$HERE/set-team-code.sh" "$HERE/tunnel-url.sh" \
   "$HERE/show-info.sh" "$HERE/protect-sd.sh" "$HERE/move-data.sh" "$HERE/watchdog.sh" \
   "$HERE/update.sh" "$HERE/stable-link.sh" "$HERE/set-build-server.sh" "$HERE/set-ai.sh" /opt/appinventor/
+install -m 755 "$HERE/mitstatus.sh" /usr/local/bin/MITSTATUS
 echo "$(cd "$HERE/../.." && pwd)" > /opt/appinventor/repo
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 git -c safe.directory="$REPO_ROOT" -C "$HERE" rev-parse --short HEAD > /opt/appinventor/version 2>/dev/null || true

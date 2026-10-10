@@ -5,13 +5,15 @@
 #   sudo /opt/appinventor/set-ai.sh --pin      # asks for the PIN that turns on full-app mode (the Team panel
 #                                              # can change it too: Change override PIN)
 #   sudo /opt/appinventor/set-ai.sh --search   # asks for the Brave Search key (optional web search)
+#   sudo /opt/appinventor/set-ai.sh --model smart anthropic/claude-haiku-5.5   # the model of one preset
+#   sudo /opt/appinventor/set-ai.sh --model smart --reset                      # back to the built-in model
 #   sudo /opt/appinventor/set-ai.sh --status   # shows what is set
 #   sudo /opt/appinventor/set-ai.sh --off      # turns the helper off, and removes the key, the PIN and the search key
 #
 # The key and the search key are stored only in /opt/appinventor/ai.env (readable by root only) and read by the
-# collaboration hub when it starts. The models are not asked for. AI_MODEL_SMART, AI_MODEL_BALANCED and AI_MODEL_FAST
-# in that file, set by hand, change the model of one preset each (model names are OpenRouter's, see
-# https://openrouter.ai/models). This script keeps every line of ai.env that it does not manage, so those lines
+# collaboration hub when it starts. The models are not asked for. --model sets the model of one preset (smart,
+# balanced or fast); AI_MODEL_SMART, AI_MODEL_BALANCED and AI_MODEL_FAST in that file do the same by hand (model names
+# are OpenRouter's, see https://openrouter.ai/models). This script keeps every line of ai.env that it does not manage, so those lines
 # survive a new key. The full-app PIN is kept in /opt/appinventor/overridepin instead, which the hub reads again
 # whenever it changes, so the Team panel can change it too. The keys and the PIN are never in the source code, never
 # sent to a browser, and never printed. Get an OpenRouter key at https://openrouter.ai/keys. Web search uses a Brave
@@ -131,6 +133,29 @@ case "${1:-}" in
     set_setting BRAVE_API_KEY "$search"
     systemctl restart collab-hub
     echo "Web search is on. The helper can now search the web when it needs to."
+    exit 0 ;;
+  --model)
+    # The model of one preset: smart, balanced or fast. --reset (or no name) puts the built-in model back.
+    preset="$(printf '%s' "${2:-}" | tr '[:lower:]' '[:upper:]')"
+    case "$preset" in
+      SMART|BALANCED|FAST) ;;
+      *) echo "Use: set-ai.sh --model smart|balanced|fast <model name>, or --reset" >&2; exit 1 ;;
+    esac
+    var="AI_MODEL_$preset"
+    if [ -z "${3:-}" ] || [ "${3:-}" = "--reset" ]; then
+      rewrite_env "^$var="
+      what="the built-in model again"
+    else
+      model="$3"
+      if ! [[ "$model" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:-]*$ ]]; then
+        echo "That does not look like an OpenRouter model name, for example anthropic/claude-haiku-5.5." >&2
+        exit 1
+      fi
+      set_setting "$var" "$model"
+      what="$model"
+    fi
+    systemctl restart collab-hub
+    echo "The $(printf '%s' "$preset" | tr '[:upper:]' '[:lower:]') model is now $what."
     exit 0 ;;
 esac
 

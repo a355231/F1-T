@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Tests MITSTATUS and set-ai.sh --model in a folder of their own: a fake systemctl, curl and link scripts, and the
+# hub's preset table from this repository. Run: bash collab/pi/test/mitstatus-test.sh
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")/.." && pwd)"          # collab/pi
+REPO="$(cd "$HERE/../.." && pwd)"
+T="$(mktemp -d)"
+trap 'rm -rf "$T"' EXIT
+mkdir -p "$T/base" "$T/bin"
+fails=0
+ok() { echo "ok   $1"; }
+bad() { echo "FAIL $1"; fails=$((fails + 1)); }
+check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+
+# Fake services: systemctl logs its calls, and a restart of the quick tunnel moves its address on.
+printf '%s\n' '#!/usr/bin/env bash' "echo \"systemctl \$*\" >> '$T/systemctl.log'" \
+  "if [ \"\$*\" = 'restart cloudflared-quick' ]; then echo \$(( \$(cat '$T/gen' 2>/dev/null || echo 1) + 1 )) > '$T/gen'; fi" \
+  'exit 0' > "$T/bin/systemctl"
+printf '%s\n' '#!/usr/bin/env bash' "echo 200" > "$T/bin/curl"
+printf '%s\n' '#!/usr/bin/env bash' "echo https://gen\$(cat '$T/gen' 2>/dev/null || echo 1).trycloudflare.com" \
+  > "$T/base/tunnel-url.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$T/base/stable-link.sh"
+chmod +x "$T/bin/systemctl" "$T/bin/curl" "$T/base/tunnel-url.sh" "$T/base/stable-link.sh"
+cp "$HERE/set-ai.sh" "$T/base/set-ai.sh"
+printf 'k7qm-2xwd-9fha\n' > "$T/base/teamcode"
+printf 'Qx7mR2pL\n' > "$T/base/overridepin"
+printf 'OPENROUTER_API_KEY=sk-test-123\nAI_MODEL_FAST=mistralai/example-model\n' > "$T/base/ai.env"
+chmod 600 "$T/base/ai.env"
+
+export PATH="$T/bin:$PATH" MIT_BASE="$T/base" MIT_HUB="$REPO/collab/server" AI_BASE="$T/base"
+MS="$HERE/mitstatus.sh"
+
+# 1. The status: the link, the codes and the models (the hub's table, with the ai.env override applied)
+out="$(bash "$MS" --show 2>&1)"
+check "status shows the link" "printf '%s' \"\$out\" | grep -q 'https://gen1.trycloudflare.com'"
+check "status shows the access code" "printf '%s' \"\$out\" | grep -q 'Access code:        k7qm-2xwd-9fha'"
+check "status shows the override code" "printf '%s' \"\$out\" | grep -q 'Override code:      Qx7mR2pL'"
+check "status shows the Smart model" "printf '%s' \"\$out\" | grep -q 'anthropic/claude-haiku-5.5 *(built in)'"
+check "status shows the Balanced model" "printf '%s' \"\$out\" | grep -q 'inclusionai/ling-3.1-flash *(built in)'"
+check "status shows the Fast override from ai.env" "printf '%s' \"\$out\" | grep -q 'mistralai/example-model *(set in ai.env)'"
+
+# 2. Without the hub's preset table (an install from before it), the status still works
+out2="$(MIT_HUB="$T/no-hub" bash "$MS" --show 2>&1)"
+check "status without the preset table says so" "printf '%s' \"\$out2\" | grep -q 'does not list them yet'"
+
+# 3. The menu lists the six options; a wrong choice is refused; 6 exits
+out3="$(printf 'x\n6\n' | bash "$MS" 2>&1)"; rc3=$?
+check "menu lists the options" "printf '%s' \"\$out3\" | grep -q '1. Change AI models' && printf '%s' \"\$out3\" | grep -q '6. Exit'"
+check "a wrong choice is refused" "printf '%s' \"\$out3\" | grep -q 'Type a number from 1 to 6.'"
+check "6 exits with 0" "[ \$rc3 -eq 0 ]"
+
+# 4. Change AI models: Balanced to a new name
+printf '1\n2\nanthropic/claude-haiku-5.5\n\n6\n' | bash "$MS" > "$T/out4" 2>&1
+check "Balanced is set in ai.env" "grep -q '^AI_MODEL_BALANCED=anthropic/claude-haiku-5.5$' '$T/base/ai.env'"
+check "the other override is kept" "grep -q '^AI_MODEL_FAST=mistralai/example-model$' '$T/base/ai.env'"
+check "the key is kept" "grep -q '^OPENROUTER_API_KEY=sk-test-123$' '$T/base/ai.env'"
+check "ai.env stays mode 600" "[ \"\$(stat -c %a '$T/base/ai.env')\" = 600 ]"
+check "the hub restarts after a model change" "grep -q 'restart collab-hub' '$T/systemctl.log'"
+
+# 5. Change AI models: back to the built-in model
+printf '1\n3\ndefault\n\n6\n' | bash "$MS" > "$T/out5" 2>&1
+check "default removes the Fast override" "! grep -q '^AI_MODEL_FAST=' '$T/base/ai.env'"
+
+# 6. New link: the quick tunnel restarts and the new address is shown
+printf '2\n\n6\n' | bash "$MS" > "$T/out6" 2>&1
+check "new link restarts the quick tunnel" "grep -q 'restart cloudflared-quick' '$T/systemctl.log'"
+check "new link shows the new address" "grep -q 'New link: https://gen2.trycloudflare.com' '$T/out6'"
+
+# 7. Restart: App Inventor and the hub, not the tunnel
+printf '3\n\n6\n' | bash "$MS" > "$T/out7" 2>&1
+check "restart restarts App Inventor and the hub" "grep -q 'restart appinventor collab-hub' '$T/systemctl.log'"
+check "restart does not restart the tunnel again" "[ \"\$(grep -c 'restart cloudflared-quick' '$T/systemctl.log')\" = 1 ]"
+check "restart reports App Inventor running" "grep -q 'App Inventor is running again' '$T/out7'"
+
+# 8. Access code and override code run their own scripts (stand-ins here)
+printf '#!/usr/bin/env bash\necho "set-team-code called"\n' > "$T/base/set-team-code.sh"
+chmod +x "$T/base/set-team-code.sh"
+printf '4\n\n6\n' | bash "$MS" > "$T/out8" 2>&1
+check "change access code runs set-team-code.sh" "grep -q 'set-team-code called' '$T/out8'"
+cp "$HERE/set-ai.sh" "$T/base/set-ai.sh"
+printf '5\n\n6\n' | bash "$MS" > "$T/out8b" 2>&1
+check "change override code runs set-ai.sh --pin" "grep -q 'Full-app PIN' '$T/out8b' || grep -q 'Full-app PIN saved' '$T/out8b' || grep -q 'The PIN must be' '$T/out8b'"
+
+# 9. set-ai.sh --model: rules and results
+cp "$HERE/set-ai.sh" "$T/base/set-ai.sh"
+bash "$T/base/set-ai.sh" --model gpt inclusionai/x > /dev/null 2>&1; rc=$?
+check "an unknown preset is refused" "[ $rc -eq 1 ]"
+before="$(cat "$T/base/ai.env")"
+bash "$T/base/set-ai.sh" --model smart "bad name" > /dev/null 2>&1; rc=$?
+check "a model name with a space is refused" "[ $rc -eq 1 ] && [ \"\$(cat '$T/base/ai.env')\" = \"\$before\" ]"
+bash "$T/base/set-ai.sh" --model smart anthropic/claude-haiku-5.5 > /dev/null 2>&1
+check "--model sets a preset" "grep -q '^AI_MODEL_SMART=anthropic/claude-haiku-5.5$' '$T/base/ai.env'"
+bash "$T/base/set-ai.sh" --model smart --reset > /dev/null 2>&1
+check "--reset removes the preset's override" "! grep -q '^AI_MODEL_SMART=' '$T/base/ai.env'"
+check "--reset keeps the key" "grep -q '^OPENROUTER_API_KEY=sk-test-123$' '$T/base/ai.env'"
+
+# 10. The changed scripts parse
+for f in "$HERE/mitstatus.sh" "$HERE/set-ai.sh" "$HERE/build-on-pi.sh" "$HERE/install.sh"; do
+  check "syntax: $(basename "$f")" "bash -n '$f'"
+done
+
+echo
+if [ "$fails" -eq 0 ]; then echo "All checks passed."; else echo "$fails check(s) failed."; exit 1; fi

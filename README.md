@@ -44,6 +44,11 @@ To see the address and the team code again, and check that everything is running
 /opt/appinventor/show-info.sh
 ```
 
+Or type **`MITSTATUS`** on the Pi. It shows the address, the access code, the override code and the AI models, and
+offers: change the AI models, get a new address, restart App Inventor, change the access code, change the override
+code, or exit. It is installed with the rest, so after an update it is there too. (The first time, or after an update
+from before it, you can also install just the command with `sudo install -m 755 ~/F1-T/collab/pi/mitstatus.sh /usr/local/bin/MITSTATUS`.)
+
 Building on a PC is faster (about five minutes). See [collab/README.md](collab/README.md#faster-builds-build-on-a-pc).
 
 ## Using it with your team
@@ -91,6 +96,7 @@ components and documentation, draw pictures, and ask you a question when it need
 sudo /opt/appinventor/set-ai.sh            # the OpenRouter key
 sudo /opt/appinventor/set-ai.sh --pin      # the PIN that unlocks full-app mode (also Change override PIN in the Team panel)
 sudo /opt/appinventor/set-ai.sh --search   # optional: a Brave Search key for web search
+sudo /opt/appinventor/set-ai.sh --model smart anthropic/claude-haiku-5.5   # the model of one preset (or --reset)
 sudo /opt/appinventor/set-ai.sh --status   # what is set
 ```
 
