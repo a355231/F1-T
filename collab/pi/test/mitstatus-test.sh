@@ -44,9 +44,9 @@ check "status shows the Smart model" "printf '%s' \"\$out\" | grep -q 'anthropic
 check "status shows the Balanced model" "printf '%s' \"\$out\" | grep -q 'inclusionai/ling-3.1-flash *(built in)'"
 check "status shows the Fast override from ai.env" "printf '%s' \"\$out\" | grep -q 'mistralai/example-model *(set in ai.env)'"
 
-# 2. Without the hub's preset table (an install from before it), the status still works
+# 2. Without a model list anywhere (no preset table in the hub, no project folder), the status still works and says so
 out2="$(MIT_HUB="$T/no-hub" bash "$MS" --show 2>&1)"
-check "status without the preset table says so" "printf '%s' \"\$out2\" | grep -q 'does not list them yet'"
+check "status without a model list says so" "printf '%s' \"\$out2\" | grep -q 'have no model list'"
 
 # 3. The menu lists the six options; a wrong choice is refused; 6 exits
 out3="$(printf 'x\n7\n' | bash "$MS" 2>&1)"; rc3=$?
@@ -163,6 +163,20 @@ touch "$T/base/check-fails"
 printf '6\n\n7\n' | bash "$MS" > "$T/out13e" 2>&1
 check "a failed check says so" "grep -q 'Could not check' '$T/out13e'"
 rm -f "$T/base/newer" "$T/base/check-fails"
+
+# 14. A hub from before the preset table: the models come from the project folder, the status says they take effect once
+# the hub is updated, and Change AI models works from that list. A current hub gets no such note.
+mkdir -p "$T/old-hub"
+printf 'module.exports = {};\n' > "$T/old-hub/ai.js"
+printf '%s\n' "$REPO" > "$T/base/repo"
+out14="$(MIT_HUB="$T/old-hub" bash "$MS" --show 2>&1)"
+check "an older hub still shows the models, from the project folder" "printf '%s' \"\$out14\" | grep -q 'Smart     Claude Haiku 5.5' && printf '%s' \"\$out14\" | grep -q 'anthropic/claude-haiku-5.5 *(built in)'"
+check "an older hub says the models take effect once it is updated" "printf '%s' \"\$out14\" | grep -q 'is older and does not use these yet'"
+out15="$(MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1)"
+check "a current hub gets no older note" "! printf '%s' \"\$out15\" | grep -q 'is older'"
+printf '1\n\n\n7\n' | MIT_HUB="$T/old-hub" bash "$MS" > "$T/out16" 2>&1
+check "Change AI models works from the project folder's list" "grep -q 'Which model should change' '$T/out16' && grep -q 'Smart' '$T/out16'"
+rm -f "$T/base/repo"
 
 # 10. The changed scripts parse
 for f in "$HERE/mitstatus.sh" "$HERE/set-ai.sh" "$HERE/stable-link.sh" "$HERE/build-on-pi.sh" "$HERE/install.sh"; do

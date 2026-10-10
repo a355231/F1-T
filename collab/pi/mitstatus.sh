@@ -18,9 +18,9 @@ setting() {
   { grep "^$1=" "$BASE/ai.env" 2>/dev/null || true; } | tail -n 1 | cut -d= -f2-
 }
 
-# The three presets as the hub has them, with the overrides from ai.env applied the way the hub applies them.
-# One line per preset: id, label, name, model, and where the model comes from. Nothing is printed when the hub does not
-# have its preset table yet (an install from before it).
+# The three presets as the hub folder given ($1) has them, with the overrides from ai.env applied the way the hub applies
+# them. One line per preset: id, label, name, model, and where the model comes from. Nothing is printed when that folder
+# has no preset table (a hub from before it).
 presets() {
   AI_MODEL_SMART="$(setting AI_MODEL_SMART)" AI_MODEL_BALANCED="$(setting AI_MODEL_BALANCED)" \
   AI_MODEL_FAST="$(setting AI_MODEL_FAST)" node -e '
@@ -28,7 +28,20 @@ presets() {
     for (const id of ["smart", "balanced", "fast"]) {
       const p = PRESETS[id], over = process.env[p.env];
       console.log([id, p.label, p.name, over || p.model, over ? "set in ai.env" : "built in"].join("\t"));
-    }' "$HUB/ai.js" 2>/dev/null
+    }' "$1/ai.js" 2>/dev/null
+}
+
+# The model list. The hub that runs is read first. A Pi whose hub was installed before the preset table has none, so the
+# copy in the project folder ($BASE/repo) is read instead. show_status says so, because those models take effect only
+# once the hub is updated.
+model_rows() {
+  local rows repo
+  rows="$(presets "$HUB")"
+  if [ -z "$rows" ]; then
+    repo="$(cat "$BASE/repo" 2>/dev/null || true)"
+    [ -n "$repo" ] && rows="$(presets "$repo/collab/server")"
+  fi
+  echo "$rows"
 }
 
 # The Cloudflare named tunnel's address: the first hostname in its config file (the App Inventor user's, or the one
@@ -88,14 +101,17 @@ show_status() {
   link_lines
   echo "  Access code:        ${code:-not set}"
   echo "  Override code:      ${pin:-not set}"
-  rows="$(presets)"
+  rows="$(model_rows)"
   if [ -z "$rows" ]; then
-    echo "  AI models:          the hub on this Pi does not list them yet (the next update adds this)"
+    echo "  AI models:          not found (the hub and the project folder have no model list)"
   else
     echo "  AI models:"
     while IFS=$'\t' read -r id label name model source; do
       printf '    %-9s %-18s %-38s (%s)\n' "$label" "$name" "$model" "$source"
     done <<< "$rows"
+    if [ -z "$(presets "$HUB")" ]; then
+      echo "    The hub that is running is older and does not use these yet. They take effect when it is updated."
+    fi
   fi
   echo
 }
@@ -107,9 +123,9 @@ pause() {
 # 1. The model of one preset: a model name from OpenRouter, or 'default' to put the built-in one back.
 change_models() {
   local rows choice id label name model model_name
-  rows="$(presets)"
+  rows="$(model_rows)"
   if [ -z "$rows" ]; then
-    echo "  The hub on this Pi does not have its model list yet, so there is nothing to choose from."
+    echo "  Neither the hub nor the project folder has a model list, so there is nothing to choose from."
     echo "  Run the update first: sudo $BASE/update.sh --now"
     return
   fi

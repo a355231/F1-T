@@ -105,7 +105,8 @@ to the built-in one), get a new Cloudflare link (the old address stops working),
 link stays), change the access code, change the override code, update the app (it checks GitHub and asks before the update starts; the update keeps running if
 the window is closed), or exit. It is `/usr/local/bin/MITSTATUS`, installed by
 the install and the update from `collab/pi/mitstatus.sh`. Its model list is read from the hub's own preset table, so it
-always shows the models the hub is running with. `set-ai.sh --model smart|balanced|fast <name>` (or `--reset`) is what
+shows the models the hub is running with. On a Pi whose hub is older than that table, it reads the project folder's copy
+and says the models take effect once the hub is updated. `set-ai.sh --model smart|balanced|fast <name>` (or `--reset`) is what
 it uses for the models, and `collab/pi/test/mitstatus-test.sh` tests it, in a folder of its own.
 
 ### Permanent address
