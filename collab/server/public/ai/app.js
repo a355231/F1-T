@@ -169,7 +169,7 @@
     keepBottom();
 
     var api = {row: row, turn: turn, thinking: thinking, cur: null, raw: '', full: '', chips: Object.create(null),
-      subs: Object.create(null), think: null, thinkText: null, planEl: null, scheduled: false};
+      subs: Object.create(null), think: null, thinkText: null, planEl: null, scheduled: false, texts: []};
 
     function closeText() {
       if (api.cur) {
@@ -189,6 +189,7 @@
         api.cur = el('div', 'md streaming');
         api.raw = '';
         turn.appendChild(api.cur);
+        api.texts.push(api.cur);   // every block of this answer's words, open or closed by a step or a card since
       }
       api.raw += delta;
       api.full += delta;
@@ -213,14 +214,14 @@
       api.thinkText.appendChild(document.createTextNode(delta));
       keepBottom();
     };
-    // The service was tried again: what the failed try showed, its reasoning too, is taken back.
+    // The service was tried again: the words written in this answer are taken back, also those in blocks a step or a
+    // card has closed since, so the retry is not shown twice. Its reasoning is taken back too.
     api.resetText = function () {
-      if (api.cur) {
-        api.full = api.full.slice(0, api.full.length - api.raw.length);
-        api.cur.remove();
-        api.cur = null;
-        api.raw = '';
-      }
+      api.texts.forEach(function (t) { t.remove(); });
+      api.texts = [];
+      api.cur = null;
+      api.raw = '';
+      api.full = '';
       if (api.think) {
         api.think.remove();
         api.think = null;

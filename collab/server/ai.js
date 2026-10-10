@@ -125,6 +125,9 @@ const SUB_STEPS = 12;
 const SUB_MS = 4 * 60 * 1000;
 const SUB_UNFINISHED = 'The subagent did not finish within ' + SUB_STEPS + ' answers or ' + Math.round(SUB_MS / 60000) +
   ' minutes. Ask again with a smaller piece of the job.';
+// Why a model call is cut off, or not made, when a smart subagent's run reaches its deadline. Nobody is shown it: the run
+// ends with SUB_UNFINISHED.
+const TIME_UP = 'The subagent ran out of its time.';
 const SMART_COOLDOWN_MS = 45 * 60 * 1000;   // the smart subagent is usable once in this time, for the whole hub
 const SUMMARY_TOKENS = 2500;        // the notes on earlier steps, when an answer has to make room
 const SUMMARY_MS = 3 * 60 * 1000;
@@ -460,9 +463,17 @@ function showWriting(acc, shown, emit) {
   });
 }
 
+// The error for a model call that a smart subagent's run may not make, because the run has reached its deadline. It is
+// never tried again (see retryable), and runSubagent ends the run with SUB_UNFINISHED.
+function timeUpError() {
+  return Object.assign(new Error(TIME_UP), {timeUp: true});
+}
+
 // Whether a failed model call is worth trying again: the service stopped answering, ended early, or was busy
-// or unreachable for a moment. A refused key, or an answer that ran past its time limit, is not.
+// or unreachable for a moment. A refused key, an answer that ran past its time limit, or a call that reached the
+// deadline of a smart subagent's run, is not.
 function retryable(e) {
+  if (e.timeUp) return false;
   if (e.premature || e.transient) return true;
   if (e.stalled) return !!e.idle;
   const m = /service answered (\d+)/.exec(String(e.message || ''));
@@ -603,10 +614,12 @@ class Assistant {
     };
   }
 
-  // The notes on earlier steps, written by the model with no tools, streamed like any answer. Throws if they fail.
-  async summarizeSteps(model, text, signal) {
+  // The notes on earlier steps, written by the model with no tools, streamed like any answer. Throws if they fail, or if
+  // the deadline of a smart subagent's run (when one is given) comes first: the notes are a model call of that run too.
+  async summarizeSteps(model, text, signal, deadline = Infinity) {
+    if (this.now() >= deadline) throw timeUpError();
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), SUMMARY_MS);
+    const timer = setTimeout(() => ac.abort(), Math.min(SUMMARY_MS, deadline - this.now()));
     const stop = () => ac.abort();
     if (signal) {
       if (signal.aborted) ac.abort();
@@ -1156,9 +1169,11 @@ class Assistant {
   // another subagent. It works on the same draft, and its report comes back to the helper as the result of the tool. The
   // person sees its steps and its reasoning, but not its words. If it cannot finish, the helper is told why, and carries
   // on without it. The default tier has no limit on steps or time. The smart tier has at most SUB_STEPS model answers and
-  // SUB_MS for its whole run, counted from when it starts running; when it reaches either, it stops and the helper is
-  // told to ask again with a smaller piece (SUB_UNFINISHED). The smart tier is usable once in 45 minutes, for the whole
-  // hub: its timer starts when it starts running, not when it is queued. Stop ends it at once.
+  // SUB_MS for its whole run, counted from when it starts running: no model call it makes (an answer, a retry of one, or
+  // the notes on earlier steps) goes on past that time, and none is started after it. When it reaches either limit, it
+  // stops and the helper is told to ask again with a smaller piece (SUB_UNFINISHED). A tool step that began before the
+  // deadline is finished, and then the run stops before its next answer. The smart tier is usable once in 45 minutes, for
+  // the whole hub: its timer starts when it starts running, not when it is queued. Stop ends it at once.
   async runSubagent(task, ctx, mode) {
     const tier = mode === 'smart' ? 'smart' : 'default';
     const info = SUB_TIERS[tier];
@@ -1181,6 +1196,11 @@ class Assistant {
     const end = (state, out, extra) => {
       say(state, Object.assign({steps}, extra));
       return out;
+    };
+    // Either limit ends the run the same way: the helper gets SUB_UNFINISHED, and the card says it was stopped.
+    const stopAtLimit = which => {
+      this.log('a ' + tier + ' subagent stopped at its limit (' + which + ') after ' + steps + ' step(s)');
+      return end('failed', {text: SUB_UNFINISHED, detail: 'stopped'}, {detail: 'stopped'});
     };
     try {
       if (tier === 'smart' && this.smartLeft() > 0) {
@@ -1207,23 +1227,21 @@ class Assistant {
       let lastStep = '';
       for (;;) {
         if (ctx.signal && ctx.signal.aborted) throw stoppedError();
-        // The limits are checked before each model answer. An answer already under way is not cut short by them (its own
-        // limits apply), and the tool calls of the answer before have already run.
-        if (steps >= maxSteps || this.now() > deadline) {
-          this.log('a ' + tier + ' subagent stopped at its limit (' + (steps >= maxSteps ? 'answers' : 'time') + ') after ' +
-            steps + ' step(s)');
-          return end('failed', {text: SUB_UNFINISHED, detail: 'stopped'}, {detail: 'stopped'});
-        }
+        // The limits are checked before each model answer. An answer under way is cut off at the deadline (streamTurn), so
+        // no model call of the run goes on past it. The tool calls of the answer before have already run.
+        if (steps >= maxSteps || this.now() >= deadline) return stopAtLimit(steps >= maxSteps ? 'answers' : 'time');
         steps++;
         const list = registry.definitions(sub);
         const compacted = await compactor.compactContext(messages, {
           window: await this.contextWindow(info.model), maxOutput: REASONING_MAX_TOKENS, toolsTokens: compactor.tokensOfJson(list),
-          summarize: text => this.summarizeSteps(info.model, text, ctx.signal), notice: text => emitSub({type: 'status', text}),
+          summarize: text => this.summarizeSteps(info.model, text, ctx.signal, deadline),
+          notice: text => emitSub({type: 'status', text}),
         });
         if (compacted) this.log('a subagent\'s conversation was made shorter: ' + compacted.how + ' (' + compacted.steps + ' step(s))');
-        // A default subagent has no time limit on one answer; a smart one keeps the limit of the companion's answers.
+        // A default subagent has no time limit on one answer or on its run. A smart one keeps the limit of the companion's
+        // answers, and the deadline of its run, which its answers and their retries cannot pass.
         const reply = await this.streamWithRetry({model: info.model, messages, list, signal: ctx.signal, emit: emitSub,
-          level: SUB_REASONING, rest, turnLimit: tier === 'smart'});
+          level: SUB_REASONING, rest, turnLimit: tier === 'smart', deadline});
         stats.steps++;
         if (reply.truncated) {
           // As for the helper: a half-written tool call is never run, and the subagent carries on in smaller pieces.
@@ -1274,6 +1292,7 @@ class Assistant {
         say('failed', {steps, detail: 'stopped'});
         throw e;
       }
+      if (e.timeUp) return stopAtLimit('time');   // a model call that reached the run's deadline
       const why = String(e.message || e).slice(0, 200);
       this.log('a subagent could not finish: ' + why.slice(0, 100));
       return end('failed', {text: 'The subagent could not finish: ' + why, detail: 'failed'}, {detail: why});
@@ -1304,9 +1323,12 @@ class Assistant {
   // One answer from the model, streamed: text is passed on as it arrives; the tool calls are collected.
   // The service can stop sending without closing the connection, and then the answer would wait forever.
   // So it is cut off after idleMs of silence (or turnMs in all, unless turnLimit is false), and the person is told. Stop still works.
+  // A deadline (given for a smart subagent's run; Infinity otherwise) cuts the answer off when it comes, and an answer that
+  // would start at or after it is not made. Both throw timeUpError, which is not tried again.
   // The result says whether the model ran out of room (truncated); an answer that ends without a proper
   // ending is an error that streamWithRetry tries again. A refused request carries the service's answer as detail.
-  async streamTurn({model, messages, list, signal, emit, level, turnLimit = true}) {
+  async streamTurn({model, messages, list, signal, emit, level, turnLimit = true, deadline = Infinity}) {
+    if (this.now() >= deadline) throw timeUpError();
     const guard = new AbortController();
     let cutOff = '';
     let idle = null;
@@ -1318,6 +1340,7 @@ class Assistant {
       else signal.addEventListener('abort', quit, {once: true});
     }
     const cap = turnLimit ? setTimeout(() => stopWith(TOO_LONG), this.turnMs) : null;
+    const deadlineTimer = deadline === Infinity ? null : setTimeout(() => stopWith(TIME_UP), deadline - this.now());
     try {
       waitForData();
       const payload = Object.assign({model, messages, tools: list, temperature: 0.2, max_tokens: maxTokensOf(level), stream: true},
@@ -1367,11 +1390,13 @@ class Assistant {
       acc.truncated = finish === 'length';
       return acc;
     } catch (e) {
+      if (cutOff === TIME_UP) throw timeUpError();
       if (cutOff) throw Object.assign(new Error(cutOff), {stalled: true, idle: cutOff === STALLED});
       throw e;
     } finally {
       clearTimeout(idle);
       clearTimeout(cap);
+      clearTimeout(deadlineTimer);
       if (signal) signal.removeEventListener('abort', quit);
     }
   }
@@ -1379,13 +1404,14 @@ class Assistant {
   // streamTurn, tried again (up to `retries` more times) when the service stalls, ends an answer early or
   // fails for a moment. What the failed try showed is taken back first, so the answer is not shown twice. A max
   // request the service refuses is sent once more with high. rest(true) and rest(false) tell a subagent when it
-  // waits before a try again.
-  async streamWithRetry({model, messages, list, signal, emit, level, rest, turnLimit = true}) {
+  // waits before a try again. A try that would start at or after the deadline of a smart subagent's run is not made,
+  // and nothing is shown or waited for in its place: the run ends (see streamTurn).
+  async streamWithRetry({model, messages, list, signal, emit, level, rest, turnLimit = true, deadline = Infinity}) {
     let tries = 0;      // the tries that failed and were tried again
     let lvl = level;
     for (;;) {
       try {
-        return await this.streamTurn({model, messages, list, signal, emit, level: lvl, turnLimit});
+        return await this.streamTurn({model, messages, list, signal, emit, level: lvl, turnLimit, deadline});
       } catch (e) {
         if (signal && signal.aborted) throw e;
         if (lvl === 'max' && e.status === 400 && /effort|reasoning/i.test(String(e.detail || ''))) {
@@ -1394,6 +1420,7 @@ class Assistant {
           continue;
         }
         if (!retryable(e) || tries >= this.retries) throw e;
+        if (this.now() + this.retryWaitMs * (tries + 1) >= deadline) throw timeUpError();
         tries++;
         const why = e.stalled ? 'stopped responding' : e.premature ? 'cut its answer short' : 'had a problem';
         this.log('the AI service ' + why + (e.stalled ? ' (no data for ' + this.idleMs + ' ms)' : ' (' + String(e.message || e).slice(0, 100) + ')') +

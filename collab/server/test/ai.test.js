@@ -1679,6 +1679,106 @@ test('a smart subagent stops once four minutes have passed on the clock, counted
   assert.match(texts(evs), /I will do the piece myself/);
 });
 
+test('a smart subagent\'s answer that starts a second before its deadline is cut off at the deadline, and the run ends with the stop text', async () => {
+  // The second answer starts with one second of the four minutes left, and it never ends, so only the deadline can stop
+  // it. turnMs (1.5 seconds) is a safety net only: if the deadline did not work, the answer would be cut off at turnMs,
+  // and the test would fail on the wrong text rather than wait.
+  const t = setup(null, {turnMs: 1500, respond: async p => {
+    if (isSub(p)) {
+      if (toolMessages(p).length === 0) {
+        t.advance(239 * 1000);
+        return toolTurn('read_file', {path: 'src/a/Screen1.scm', from: 1}, 'r0');
+      }
+      return {paced: Infinity, gap: 15};
+    }
+    if (toolMessages(p).length) return textTurn('I will do the piece myself.');
+    return toolTurn('subagent', {task: 'read it', mode: 'smart'}, 'h1');
+  }});
+  const evs = await say(t.ai, 'ann', 'read it');
+  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 2, 'two model answers: the second is cut off');
+  assert.strictEqual(t.calls[1].payload.model, 'anthropic/claude-haiku-5.5');
+  assert.strictEqual(t.calls[2].signal.aborted, true, 'the model call is cancelled at the deadline');
+  assert.strictEqual(toolMessages(t.calls.at(-1).payload)[0].content, UNFINISHED);
+  const card = cardOf(evs, 'h1').at(-1);
+  assert.deepStrictEqual([card.state, card.detail, card.steps], ['failed', 'stopped', 2]);
+  assert.match(texts(evs), /I will do the piece myself/);
+  assert.ok(!evs.some(e => e.type === 'error'), 'no error is shown');
+});
+
+test('a retry that would start after the deadline does not run: nothing is shown as trying again, and the run ends with the stop text', async () => {
+  // The first try fails two seconds before the deadline. Its retry would wait five seconds, so it would start after the
+  // deadline: it is not made, and the wait is not made either.
+  let tries = 0;
+  const t = setup(null, {retryWaitMs: 5000, respond: async p => {
+    if (isSub(p)) {
+      if (tries++ === 0) {
+        t.advance(238 * 1000);
+        return {status: 500, detail: 'busy'};
+      }
+      return textTurn('Report: fine.');
+    }
+    if (toolMessages(p).length) return textTurn('It did not finish, so I will do the piece myself.');
+    return toolTurn('subagent', {task: 'check', mode: 'smart'}, 'h1');
+  }});
+  const evs = await say(t.ai, 'ann', 'check');
+  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 1, 'the retry is not made');
+  assert.strictEqual(toolMessages(t.calls.at(-1).payload)[0].content, UNFINISHED);
+  assert.deepStrictEqual(statesOf(evs, 'h1'), ['running', 'failed']);
+  const card = cardOf(evs, 'h1').at(-1);
+  assert.deepStrictEqual([card.detail, card.steps], ['stopped', 1]);
+  assert.ok(!evs.some(e => e.type === 'reset' || e.type === 'status'), 'nothing is shown as trying again');
+  assert.match(texts(evs), /I will do the piece myself/);
+  assert.ok(!evs.some(e => e.type === 'error'), 'no error is shown');
+});
+
+test('a retry that would start before the deadline runs as usual', async () => {
+  let tries = 0;
+  const t = setup(null, {respond: async p => {
+    if (isSub(p)) {
+      if (tries++ === 0) {
+        t.advance(230 * 1000);   // the first try fails ten seconds before the deadline; its retry starts well before it
+        return {status: 500, detail: 'busy'};
+      }
+      return textTurn('Report: fine.');
+    }
+    if (toolMessages(p).length) return textTurn('Checked.');
+    return toolTurn('subagent', {task: 'check', mode: 'smart'}, 'h1');
+  }});
+  const evs = await say(t.ai, 'ann', 'check');
+  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 2, 'the retry is made');
+  assert.deepStrictEqual(statesOf(evs, 'h1'), ['running', 'resting', 'running', 'done']);
+  assert.strictEqual(cardOf(evs, 'h1').at(-1).steps, 1);
+  assert.strictEqual(texts(evs), 'Checked.');
+});
+
+test('a default run is not stopped by time: its answers go on past four minutes, and one begun after that is not cut off', async () => {
+  // Each answer takes five minutes on the clock, so the default run is past four minutes from its second answer on, and its
+  // last answer begins at fifteen minutes. turnMs is short, but it is not applied to the default tier.
+  const t = setup(null, {turnMs: 50, respond: async p => {
+    if (isSub(p)) {
+      t.advance(5 * 60 * 1000);
+      const n = toolMessages(p).length;
+      if (n < 3) return toolTurn('read_file', {path: 'src/a/Screen1.scm', from: n + 1}, 'r' + n);
+      return {paced: 6, gap: 80};
+    }
+    if (toolMessages(p).length) return textTurn('Checked.');
+    return toolTurn('subagent', {task: 'read it all'}, 'h1');
+  }});
+  const evs = await say(t.ai, 'ann', 'read it');
+  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 4, 'four answers, none of them stopped');
+  const card = cardOf(evs, 'h1').at(-1);
+  assert.deepStrictEqual([card.state, card.steps], ['done', 4]);
+  assert.ok(!evs.some(e => e.type === 'status' || e.type === 'error'), 'nothing stops it');
+  assert.strictEqual(texts(evs), 'Checked.');
+});
+
+test('the notes on earlier steps are a model call too: they end at the deadline of the run they are for', async () => {
+  // The notes would take about two and a half seconds; the deadline is one second away.
+  const t = setup([{paced: 30, gap: 80}]);
+  await assert.rejects(t.ai.summarizeSteps('anthropic/claude-haiku-5.5', 'Person: read it', null, t.ai.now() + 1000));
+  assert.strictEqual(t.calls[0].signal.aborted, true, 'the model call is cancelled at the deadline');
+});
+
 test('a default subagent is not stopped at twelve answers: it can make fifteen', async () => {
   const t = setup(null, {respond: async p => {
     if (isSub(p)) {
