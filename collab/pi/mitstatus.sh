@@ -44,10 +44,16 @@ model_rows() {
   echo "$rows"
 }
 
-# The Cloudflare named tunnel's address: the first hostname in its config file (the App Inventor user's, or the one
-# cloudflared keeps in /etc/cloudflared), or nothing. MIT_CF_CONFIG names another file, for tests.
+# The Cloudflare tunnel's address. A tunnel made in the Cloudflare dashboard keeps its hostname there, so the command that
+# installs it writes the hostname to $BASE/cloudflare-hostname. Otherwise it is the first hostname in the tunnel's config
+# file (the App Inventor user's, or the one cloudflared keeps in /etc/cloudflared), or nothing. MIT_CF_CONFIG names another
+# config file, for tests.
 cloudflare_hostname() {
   local cfg="${MIT_CF_CONFIG:-}" owner
+  if [ -s "$BASE/cloudflare-hostname" ]; then
+    head -n 1 "$BASE/cloudflare-hostname" | tr -d '[:space:]'
+    return 0
+  fi
   if [ -z "$cfg" ]; then
     owner="$(stat -c %U "$BASE" 2>/dev/null || true)"
     for cfg in "/home/$owner/.cloudflared/config.yml" /etc/cloudflared/config.yml; do

@@ -178,6 +178,13 @@ printf '1\n\n\n7\n' | MIT_HUB="$T/old-hub" bash "$MS" > "$T/out16" 2>&1
 check "Change AI models works from the project folder's list" "grep -q 'Which model should change' '$T/out16' && grep -q 'Smart' '$T/out16'"
 rm -f "$T/base/repo"
 
+# 15. A dashboard tunnel keeps its hostname in the dashboard, so the install command writes it to $BASE/cloudflare-hostname
+printf 'app.from-file.test\n' > "$T/base/cloudflare-hostname"
+touch "$T/cf-active"
+out17="$(MIT_CF_CONFIG="$T/none.yml" bash "$MS" --show 2>&1)"
+check "a dashboard tunnel's hostname is shown as the permanent link" "printf '%s' \"\$out17\" | grep -q 'Permanent link:     https://app.from-file.test  (Cloudflare)'"
+rm -f "$T/cf-active" "$T/base/cloudflare-hostname"
+
 # 10. The changed scripts parse
 for f in "$HERE/mitstatus.sh" "$HERE/set-ai.sh" "$HERE/stable-link.sh" "$HERE/build-on-pi.sh" "$HERE/install.sh"; do
   check "syntax: $(basename "$f")" "bash -n '$f'"

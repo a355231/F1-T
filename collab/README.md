@@ -166,6 +166,21 @@ in MITSTATUS alone: it starts the temporary quick tunnel again, which you no lon
 MITSTATUS reads the hostname from that config (in your home folder, or in `/etc/cloudflared`). It shows it as the
 permanent link while the `cloudflared` service is running, and says so when it is not.
 
+**If you made the tunnel in the Cloudflare dashboard** (it shows an install command with a long token), there is no config
+file, and the hostname is set in the dashboard. In the dashboard, add a public hostname such as `app.yourdomain.com` for
+the tunnel, with the service `http://127.0.0.1:8080`. Then run these on the Pi, with the token from the dashboard in place
+of `<token>`:
+
+```
+echo app.yourdomain.com | sudo tee /opt/appinventor/cloudflare-hostname > /dev/null
+sudo cloudflared service install <token>
+sudo systemctl enable --now cloudflared
+sudo systemctl disable --now cloudflared-quick
+```
+
+MITSTATUS reads the hostname from `/opt/appinventor/cloudflare-hostname` first. Treat the token like a password: anyone
+who has it can run the tunnel.
+
 Official guides: [Cloudflare: create a locally-managed tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/local-management/create-local-tunnel/),
 [Cloudflare: run a tunnel as a service on Linux](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/local-management/as-a-service/linux/),
 [Tailscale Funnel](https://tailscale.com/docs/reference/tailscale-cli/funnel).
