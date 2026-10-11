@@ -109,8 +109,9 @@ when you ask.
 
 ## Keeping it up to date
 
-Every night at **3 AM** the Pi checks for a new version. If there is one, it builds it while the current version
-keeps running, and installs it only once the build succeeds. If the new version fails, the previous version is
+Every night at **3 AM** the Pi checks for a new version. If there is one, or the installed copy is older than the code in
+the project folder, it builds the code while the current version keeps running, and installs it only once the build
+succeeds. If the new version fails, the previous version is
 put back automatically, and everyone who opens the app sees a notice saying so.
 
 ```

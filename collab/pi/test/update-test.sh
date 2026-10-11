@@ -173,5 +173,29 @@ run; rc=$?
 check "notify mode does not build" [ "$(installs)" = "$before" ]
 check "notify mode says it only reports" grep -q "notify only" "$T/out"
 
+# 10. The installed copy is older than the checkout, and GitHub has nothing new: the checkout is installed anyway.
+run --mode install
+git -C "$REPO" fetch -q origin
+git -C "$REPO" reset -q --hard origin/main
+CHECKOUT_SHORT="$(git -C "$REPO" rev-parse --short HEAD)"
+echo stale > "$AI_BASE/version"
+rm -f "$AI_BASE/update-state" "$AI_BASE/update-available"
+before="$(installs)"
+run --check; rc=$?
+check "a stale installed copy is reported by the check" [ "$rc" = 0 ]
+check "the check says the installed copy is not the checkout" grep -q "installed copy (stale)" "$T/out"
+check "the check does not build" [ "$(installs)" = "$before" ]
+run --now; rc=$?
+check "the checkout is installed when GitHub has nothing new" [ "$rc" = 0 ]
+check "the installed copy is now the checkout" [ "$(cat "$AI_BASE/version")" = "$CHECKOUT_SHORT" ]
+echo stale > "$AI_BASE/version"
+rm -f "$AI_BASE/update-state"
+before="$(installs)"
+run; rc=$?
+check "a nightly run installs a stale copy too" [ "$rc" = 0 ]
+check "the nightly run builds once" [ "$(installs)" = "$((before + 1))" ]
+run
+check "and after that the copy is up to date" grep -q "Up to date" "$T/out"
+
 echo "$pass passed, $failed failed"
 [ "$failed" = 0 ]

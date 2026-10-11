@@ -13,7 +13,8 @@
 # is it installed and started. The version it replaces is kept in /opt/appinventor/rollback. If the
 # build fails, or the new version does not answer within 10 minutes, the old version is put back,
 # and everyone who opens the link sees a notice until a later update succeeds. Projects, backups,
-# the team code and the OpenRouter settings are never touched.
+# the team code and the OpenRouter settings are never touched. If the installed copy is older than the checkout (after a
+# manual git pull, say), the checkout is installed too, even when GitHub has nothing new.
 #
 # Modes (/opt/appinventor/update-mode): install (default) does all of this by itself; notify only
 # reports that a newer version exists; off does nothing unless you run it by hand.
@@ -198,19 +199,26 @@ main() {
   OLD="$(as_owner git -C "$REPO" rev-parse HEAD)"
   NEW="$(as_owner git -C "$REPO" rev-parse "origin/$branch")"
   NEW_SHORT="$(as_owner git -C "$REPO" rev-parse --short "origin/$branch")"
+  # The installed copy can be older than the checkout: after a manual git pull, or an install that stopped before it
+  # finished. Then GitHub has nothing new, but the checkout still has to be installed.
+  INSTALLED="$(cat "$BASE/version" 2>/dev/null || true)"
+  STALE=0
+  if [ "$OLD" = "$NEW" ] && [ "$INSTALLED" != "$NEW_SHORT" ]; then STALE=1; fi
 
-  if [ "$OLD" = "$NEW" ] && [ -z "$sim" ]; then
+  if [ "$OLD" = "$NEW" ] && [ "$STALE" = 0 ] && [ -z "$sim" ]; then
     rm -f "$BASE/update-available"
     log "Up to date ($(cat "$BASE/version" 2>/dev/null || echo "$NEW_SHORT"))."
     exit 0
   fi
   as_owner git -C "$REPO" log -1 --format='%h %s' "origin/$branch" > "$BASE/update-available"
+  WHY="A newer version exists"
+  if [ "$STALE" = 1 ]; then WHY="The installed copy (${INSTALLED:-unknown}) is not the code in the checkout ($NEW_SHORT)"; fi
   if [ "$check" = 1 ]; then
-    log "A newer version exists: $(cat "$BASE/update-available")"
+    log "$WHY: $(cat "$BASE/update-available")"
     exit 0
   fi
   if [ "$now" = 0 ] && [ "$mode" = notify ]; then
-    log "A newer version exists; nightly updates are set to notify only."
+    log "$WHY; nightly updates are set to notify only."
     exit 0
   fi
   if [ "$now" = 0 ] && [ "$(state_get last_day)" = "$(date +%F)" ]; then exit 0; fi

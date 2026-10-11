@@ -326,8 +326,8 @@ when App Inventor stops answering, or when a newer version of this software exis
 **Version, updates, restarts.** `/opt/appinventor/show-info.sh` shows the version.
 
 **Nightly updates.** Every night at **3 AM** a systemd timer (`collab-update.timer`) checks the
-branch on GitHub. If there is something new, it downloads it and **builds it while the current
-version keeps running**. Only when the build has succeeded is the new version installed and
+branch on GitHub. If there is something new, or the installed copy is older than the code in the project folder (after a
+manual `git pull`, say), it gets that code and **builds it while the current version keeps running**. Only when the build has succeeded is the new version installed and
 started. If people are online at 3 AM, it tries again every half hour until 6 AM, and it never
 interrupts a session. Your projects, backups, team code and OpenRouter settings are never touched.
 
