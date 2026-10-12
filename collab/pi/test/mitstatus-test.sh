@@ -49,13 +49,13 @@ out2="$(MIT_HUB="$T/no-hub" bash "$MS" --show 2>&1)"
 check "status without a model list says so" "printf '%s' \"\$out2\" | grep -q 'have no model list'"
 
 # 3. The menu lists the six options; a wrong choice is refused; 6 exits
-out3="$(printf 'x\n7\n' | bash "$MS" 2>&1)"; rc3=$?
-check "menu lists the options" "printf '%s' \"\$out3\" | grep -q '1. Change AI models' && printf '%s' \"\$out3\" | grep -q '6. Update' && printf '%s' \"\$out3\" | grep -q '7. Exit'"
-check "a wrong choice is refused" "printf '%s' \"\$out3\" | grep -q 'Type a number from 1 to 7.'"
-check "7 exits with 0" "[ \$rc3 -eq 0 ]"
+out3="$(printf 'x\n8\n' | bash "$MS" 2>&1)"; rc3=$?
+check "menu lists the options" "printf '%s' \"\$out3\" | grep -q '1. Change AI models' && printf '%s' \"\$out3\" | grep -q '6. Update' && printf '%s' \"\$out3\" | grep -q '7. Change API key' && printf '%s' \"\$out3\" | grep -q '8. Exit'"
+check "a wrong choice is refused" "printf '%s' \"\$out3\" | grep -q 'Type a number from 1 to 8.'"
+check "8 exits with 0" "[ \$rc3 -eq 0 ]"
 
 # 4. Change AI models: Balanced to a new name
-printf '1\n2\nanthropic/claude-haiku-5.5\n\n7\n' | bash "$MS" > "$T/out4" 2>&1
+printf '1\n2\nanthropic/claude-haiku-5.5\n\n8\n' | bash "$MS" > "$T/out4" 2>&1
 check "Balanced is set in ai.env" "grep -q '^AI_MODEL_BALANCED=anthropic/claude-haiku-5.5$' '$T/base/ai.env'"
 check "the other override is kept" "grep -q '^AI_MODEL_FAST=mistralai/example-model$' '$T/base/ai.env'"
 check "the key is kept" "grep -q '^OPENROUTER_API_KEY=sk-test-123$' '$T/base/ai.env'"
@@ -63,16 +63,16 @@ check "ai.env stays mode 600" "[ \"\$(stat -c %a '$T/base/ai.env')\" = 600 ]"
 check "the hub restarts after a model change" "grep -q 'restart collab-hub' '$T/systemctl.log'"
 
 # 5. Change AI models: back to the built-in model
-printf '1\n3\ndefault\n\n7\n' | bash "$MS" > "$T/out5" 2>&1
+printf '1\n3\ndefault\n\n8\n' | bash "$MS" > "$T/out5" 2>&1
 check "default removes the Fast override" "! grep -q '^AI_MODEL_FAST=' '$T/base/ai.env'"
 
 # 6. New link: the quick tunnel restarts and the new address is shown
-printf '2\n\n7\n' | bash "$MS" > "$T/out6" 2>&1
+printf '2\n\n8\n' | bash "$MS" > "$T/out6" 2>&1
 check "new link restarts the quick tunnel" "grep -q 'restart cloudflared-quick' '$T/systemctl.log'"
 check "new link shows the new address" "grep -q 'New link: https://gen2.trycloudflare.com' '$T/out6'"
 
 # 7. Restart: App Inventor and the hub, not the tunnel
-printf '3\n\n7\n' | bash "$MS" > "$T/out7" 2>&1
+printf '3\n\n8\n' | bash "$MS" > "$T/out7" 2>&1
 check "restart restarts App Inventor and the hub" "grep -q 'restart appinventor collab-hub' '$T/systemctl.log'"
 check "restart does not restart the tunnel again" "[ \"\$(grep -c 'restart cloudflared-quick' '$T/systemctl.log')\" = 1 ]"
 check "restart reports App Inventor running" "grep -q 'App Inventor is running again' '$T/out7'"
@@ -80,10 +80,10 @@ check "restart reports App Inventor running" "grep -q 'App Inventor is running a
 # 8. Access code and override code run their own scripts (stand-ins here)
 printf '#!/usr/bin/env bash\necho "set-team-code called"\n' > "$T/base/set-team-code.sh"
 chmod +x "$T/base/set-team-code.sh"
-printf '4\n\n7\n' | bash "$MS" > "$T/out8" 2>&1
+printf '4\n\n8\n' | bash "$MS" > "$T/out8" 2>&1
 check "change access code runs set-team-code.sh" "grep -q 'set-team-code called' '$T/out8'"
 cp "$HERE/set-ai.sh" "$T/base/set-ai.sh"
-printf '5\n\n7\n' | bash "$MS" > "$T/out8b" 2>&1
+printf '5\n\n8\n' | bash "$MS" > "$T/out8b" 2>&1
 check "change override code runs set-ai.sh --pin" "grep -q 'Full-app PIN' '$T/out8b' || grep -q 'Full-app PIN saved' '$T/out8b' || grep -q 'The PIN must be' '$T/out8b'"
 
 # 9. set-ai.sh --model: rules and results
@@ -145,22 +145,22 @@ fi
 exit 0
 EOF
 chmod +x "$T/base/update.sh"
-printf '6\n\n7\n' | bash "$MS" > "$T/out13a" 2>&1
+printf '6\n\n8\n' | bash "$MS" > "$T/out13a" 2>&1
 check "an up-to-date app says so" "grep -q 'Up to date (test)' '$T/out13a'"
 check "an up-to-date app asks nothing" "! grep -q 'Update to' '$T/out13a'"
 touch "$T/base/newer"
-printf '6\nn\n\n7\n' | bash "$MS" > "$T/out13b" 2>&1
+printf '6\nn\n\n8\n' | bash "$MS" > "$T/out13b" 2>&1
 check "a newer version is offered by name" "grep -q 'Update to abc1234 Test change?' '$T/out13b'"
 check "declining starts nothing" "grep -q 'Not updated.' '$T/out13b' && [ ! -e '$T/systemd-run.log' ]"
-printf '6\ny\n\n7\n' | bash "$MS" > "$T/out13c" 2>&1
+printf '6\ny\n\n8\n' | bash "$MS" > "$T/out13c" 2>&1
 check "accepting starts update.sh --now as a unit of its own" "grep -q -- '--unit=collab-update-now' '$T/systemd-run.log' && grep -q 'update.sh --now' '$T/systemd-run.log'"
 check "accepting says the update runs in the background" "grep -q 'running in the background' '$T/out13c'"
 exec 8>"$T/update.lock"; flock -x 8
-printf '6\n\n7\n' | bash "$MS" > "$T/out13d" 2>&1
+printf '6\n\n8\n' | bash "$MS" > "$T/out13d" 2>&1
 exec 8>&-
 check "an update already running is reported, not started again" "grep -q 'An update is already running' '$T/out13d' && [ \"\$(grep -c -- '--unit=collab-update-now' '$T/systemd-run.log')\" = 1 ]"
 touch "$T/base/check-fails"
-printf '6\n\n7\n' | bash "$MS" > "$T/out13e" 2>&1
+printf '6\n\n8\n' | bash "$MS" > "$T/out13e" 2>&1
 check "a failed check says so" "grep -q 'Could not check' '$T/out13e'"
 rm -f "$T/base/newer" "$T/base/check-fails"
 
@@ -174,7 +174,7 @@ check "an older hub still shows the models, from the project folder" "printf '%s
 check "an older hub says the models take effect once it is updated" "printf '%s' \"\$out14\" | grep -q 'is older and does not use these yet'"
 out15="$(MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1)"
 check "a current hub gets no older note" "! printf '%s' \"\$out15\" | grep -q 'is older'"
-printf '1\n\n\n7\n' | MIT_HUB="$T/old-hub" bash "$MS" > "$T/out16" 2>&1
+printf '1\n\n\n8\n' | MIT_HUB="$T/old-hub" bash "$MS" > "$T/out16" 2>&1
 check "Change AI models works from the project folder's list" "grep -q 'Which model should change' '$T/out16' && grep -q 'Smart' '$T/out16'"
 rm -f "$T/base/repo"
 
@@ -184,6 +184,13 @@ touch "$T/cf-active"
 out17="$(MIT_CF_CONFIG="$T/none.yml" bash "$MS" --show 2>&1)"
 check "a dashboard tunnel's hostname is shown as the permanent link" "printf '%s' \"\$out17\" | grep -q 'Permanent link:     https://app.from-file.test  (Cloudflare)'"
 rm -f "$T/cf-active" "$T/base/cloudflare-hostname"
+
+# 16. Change API key (option 7) runs set-ai.sh, which asks for the key, saves it, and restarts the hub
+out16b="$(printf '7\nsk-new-test-key-123\n\n8\n' | MIT_HUB="$REPO/collab/server" bash "$MS" 2>&1)"
+check "option 7 runs the key setup and says the helper is on" "printf '%s' \"\$out16b\" | grep -q 'The AI helper is on'"
+check "the new key is saved in ai.env" "grep -q '^OPENROUTER_API_KEY=sk-new-test-key-123$' '$T/base/ai.env'"
+check "the key is saved once, and the other settings are kept" "[ \"\$(grep -c '^OPENROUTER_API_KEY=' '$T/base/ai.env')\" = 1 ] && grep -q '^AI_DAILY_LIMIT=' '$T/base/ai.env'"
+check "the hub restarts after a new key" "grep -q 'restart collab-hub' '$T/systemctl.log'"
 
 # 10. The changed scripts parse
 for f in "$HERE/mitstatus.sh" "$HERE/set-ai.sh" "$HERE/stable-link.sh" "$HERE/build-on-pi.sh" "$HERE/install.sh"; do

@@ -252,9 +252,10 @@ main_menu() {
     echo "  4. Change access code"
     echo "  5. Change override code"
     echo "  6. Update"
-    echo "  7. Exit"
+    echo "  7. Change API key"
+    echo "  8. Exit"
     echo
-    if ! read -r -p "  Choose 1-7: " choice; then
+    if ! read -r -p "  Choose 1-8: " choice; then
       echo
       exit 0
     fi
@@ -265,8 +266,9 @@ main_menu() {
       4) "$BASE/set-team-code.sh"; pause ;;
       5) "$BASE/set-ai.sh" --pin; pause ;;
       6) update_app; pause ;;
-      7|q|Q) exit 0 ;;
-      *) echo "  Type a number from 1 to 7." ;;
+      7) "$BASE/set-ai.sh"; pause ;;
+      8|q|Q) exit 0 ;;
+      *) echo "  Type a number from 1 to 8." ;;
     esac
   done
 }
