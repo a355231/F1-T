@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Sets up (or turns off) the AI helper that opens with Ctrl+I+M in App Inventor.
 #
-#   sudo /opt/appinventor/set-ai.sh            # asks for the OpenRouter key, the only thing it asks for
+#   sudo /opt/appinventor/set-ai.sh            # asks for the key of the service in use, the only thing it asks for
 #   sudo /opt/appinventor/set-ai.sh --pin      # asks for the PIN that turns on full-app mode (the Team panel
 #                                              # can change it too: Change override PIN)
 #   sudo /opt/appinventor/set-ai.sh --search   # asks for the Brave Search key (optional web search)
+#   sudo /opt/appinventor/set-ai.sh --provider opencode     # uses OpenCode Go (opencode.ai) and asks for its key;
+#   sudo /opt/appinventor/set-ai.sh --provider openrouter   # back to OpenRouter (the default)
 #   sudo /opt/appinventor/set-ai.sh --model smart anthropic/claude-haiku-5.5   # the model of one preset
 #   sudo /opt/appinventor/set-ai.sh --model smart --reset                      # back to the built-in model
 #   sudo /opt/appinventor/set-ai.sh --status   # shows what is set
@@ -29,6 +31,11 @@ get_setting() {
   [ -f "$FILE" ] || return 0
   { grep "^$1=" "$FILE" || true; } | tail -n 1 | cut -d= -f2-
 }
+
+# The service in use: openrouter (the default) or opencode (OpenCode Go). Each has its own key, kept under its own name.
+provider_of() { [ "$(get_setting AI_PROVIDER)" = opencode ] && echo opencode || echo openrouter; }
+key_var_of() { [ "$1" = opencode ] && echo OPENCODE_API_KEY || echo OPENROUTER_API_KEY; }
+provider_label() { [ "$1" = opencode ] && echo "OpenCode Go" || echo "OpenRouter"; }
 
 # Rewrites ai.env without the lines whose names match the extended regular expression $1, then adds the line $2 if it
 # is given. Every other line is kept as it is, including lines this script does not know. The new copy replaces the
@@ -78,7 +85,7 @@ case "${1:-}" in
     # Removes the key, the full-app PIN and the search key. Other lines (the model overrides, for example) stay, so
     # they are still there when the helper is set up again. The file itself goes only when nothing else is in it.
     if [ -f "$FILE" ]; then
-      rewrite_env '^(OPENROUTER_API_KEY|AI_OVERRIDE_PIN|BRAVE_API_KEY)='
+      rewrite_env '^(OPENROUTER_API_KEY|OPENCODE_API_KEY|AI_OVERRIDE_PIN|BRAVE_API_KEY)='
       if ! grep -q '[^[:space:]]' "$FILE"; then rm -f "$FILE"; fi
     fi
     rm -f "$PIN_FILE"
@@ -86,7 +93,9 @@ case "${1:-}" in
     echo "The AI helper is off. The key, the full-app PIN and the search key were removed; other lines in ai.env were kept."
     exit 0 ;;
   --status)
-    if [ -s "$FILE" ] && grep -q '^OPENROUTER_API_KEY=.' "$FILE"; then
+    provider="$(provider_of)"
+    echo "Provider: $(provider_label "$provider")"
+    if [ -s "$FILE" ] && grep -q "^$(key_var_of "$provider")=." "$FILE"; then
       echo "AI helper: on"
     else
       echo "AI helper: not set up"
@@ -134,6 +143,16 @@ case "${1:-}" in
     systemctl restart collab-hub
     echo "Web search is on. The helper can now search the web when it needs to."
     exit 0 ;;
+  --provider)
+    # Switches the service. The model overrides are removed, since they name models of the old one. The key of the new
+    # service is asked for below, as the default does.
+    case "${2:-}" in
+      openrouter|opencode) ;;
+      *) echo "Use: set-ai.sh --provider openrouter|opencode" >&2; exit 1 ;;
+    esac
+    rewrite_env '^(AI_PROVIDER|AI_MODEL_SMART|AI_MODEL_BALANCED|AI_MODEL_FAST)=' "AI_PROVIDER=$2"
+    echo "The service is now $(provider_label "$2")."
+    ;;
   --model)
     # The model of one preset: smart, balanced or fast. --reset (or no name) puts the built-in model back.
     preset="$(printf '%s' "${2:-}" | tr '[:lower:]' '[:upper:]')"
@@ -147,8 +166,8 @@ case "${1:-}" in
       what="the built-in model again"
     else
       model="$3"
-      if ! [[ "$model" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:-]*$ ]]; then
-        echo "That does not look like an OpenRouter model name, for example anthropic/claude-haiku-5.5." >&2
+      if ! [[ "$model" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ ]]; then
+        echo "That does not look like a model name, for example anthropic/claude-haiku-5.5 (OpenRouter) or kimi-k2.6 (OpenCode Go)." >&2
         exit 1
       fi
       set_setting "$var" "$model"
@@ -159,21 +178,22 @@ case "${1:-}" in
     exit 0 ;;
 esac
 
-# Only the OpenRouter key is asked for. The daily limit is written when ai.env has none yet, or when AI_DAILY_LIMIT is
-# set in the environment; a limit already in ai.env is kept.
-read -r -s -p "OpenRouter key (typing is hidden): " key; echo
+# Only the key of the service in use is asked for. The daily limit is written when ai.env has none yet, or when
+# AI_DAILY_LIMIT is set in the environment; a limit already in ai.env is kept.
+provider="$(provider_of)"
+read -r -s -p "$(provider_label "$provider") key (typing is hidden): " key; echo
 if [ -z "$key" ]; then
-  echo "An OpenRouter key is needed." >&2
+  echo "A $(provider_label "$provider") key is needed." >&2
   exit 1
 fi
 case "$key" in *[[:space:]\"\'\\\$]*) echo "No spaces or quotes please." >&2; exit 1 ;; esac
 # Only the key and the daily limit are written here. Every other line of ai.env (the models, the full-app PIN, the
 # search key and any line this script does not know) is kept.
-set_setting OPENROUTER_API_KEY "$key"
+set_setting "$(key_var_of "$provider")" "$key"
 if [ -n "${AI_DAILY_LIMIT:-}" ] || [ -z "$(get_setting AI_DAILY_LIMIT)" ]; then
   set_setting AI_DAILY_LIMIT "${AI_DAILY_LIMIT:-300}"
 fi
 limit="$(get_setting AI_DAILY_LIMIT)"
 systemctl restart collab-hub
-echo "The AI helper is on (at most $limit questions a day for the whole team)."
+echo "The AI helper is on with $(provider_label "$provider") (at most $limit questions a day for the whole team)."
 echo "Press Ctrl+I+M inside App Inventor to open it."

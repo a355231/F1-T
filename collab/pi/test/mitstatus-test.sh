@@ -198,6 +198,21 @@ out17b="$(MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1)"
 check "a changed model shows its own name in the status" "printf '%s' \"\$out17b\" | grep -q 'Balanced  Claude Haiku 5.5'"
 check "the old name is gone from the changed preset" "! printf '%s' \"\$out17b\" | grep -q 'Balanced  Ling 3.1 Flash'"
 
+# 18. OpenCode Go: --provider switches the service and asks for its key; the old model overrides go; the status follows
+printf 'sk-opencode-test-456\n' | bash "$T/base/set-ai.sh" --provider opencode > "$T/out18" 2>&1
+check "--provider opencode records the service" "grep -qx 'AI_PROVIDER=opencode' '$T/base/ai.env'"
+check "the OpenCode key is saved under its own name" "grep -qx 'OPENCODE_API_KEY=sk-opencode-test-456' '$T/base/ai.env'"
+check "the OpenRouter key is kept" "grep -qx 'OPENROUTER_API_KEY=sk-new-test-key-123' '$T/base/ai.env'"
+check "the model overrides of the old service are removed" "! grep -q '^AI_MODEL_' '$T/base/ai.env'"
+check "the switch says the service is now OpenCode Go" "grep -q 'The service is now OpenCode Go' '$T/out18'"
+check "--status shows the provider" "bash '$T/base/set-ai.sh' --status > '$T/out18s' && grep -q 'Provider: OpenCode Go' '$T/out18s'"
+out18b="$(MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1)"
+check "the status shows the OpenCode provider and its models" "printf '%s' \"\$out18b\" | grep -q 'AI provider:        OpenCode Go' && printf '%s' \"\$out18b\" | grep -q 'Smart     Kimi K2.6'"
+check "--model takes a model name without a slash" "bash '$T/base/set-ai.sh' --model fast deepseek-v4-flash >/dev/null 2>&1 && grep -qx 'AI_MODEL_FAST=deepseek-v4-flash' '$T/base/ai.env'"
+bash "$T/base/set-ai.sh" --model fast --reset >/dev/null 2>&1
+printf 'sk-new-test-key-123\n' | bash "$T/base/set-ai.sh" --provider openrouter > "$T/out18c" 2>&1
+check "--provider openrouter goes back" "grep -qx 'AI_PROVIDER=openrouter' '$T/base/ai.env'"
+
 # 10. The changed scripts parse
 for f in "$HERE/mitstatus.sh" "$HERE/set-ai.sh" "$HERE/stable-link.sh" "$HERE/build-on-pi.sh" "$HERE/install.sh"; do
   check "syntax: $(basename "$f")" "bash -n '$f'"

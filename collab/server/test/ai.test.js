@@ -2417,3 +2417,19 @@ test('a preset named by its model in ai.env shows that model, not the built-in n
     if (was === undefined) delete process.env.AI_MODEL_BALANCED; else process.env.AI_MODEL_BALANCED = was;
   }
 });
+
+test('OpenCode Go has its own endpoint, key and models, and OpenRouter stays the default', () => {
+  const info = env => JSON.parse(execFileSync(process.execPath, ['-e',
+    "const a = require('./ai'); console.log(JSON.stringify({info: a.providerInfo(), models: Object.values(a.PRESETS).map(p => p.model)}));"],
+  {cwd: __dirname + '/..', encoding: 'utf8', env: Object.assign({}, process.env, {OPENROUTER_URL: '', AI_PROVIDER: ''}, env)}));
+  const oc = info({AI_PROVIDER: 'opencode'});
+  assert.equal(oc.info.name, 'OpenCode Go');
+  assert.equal(oc.info.url, 'https://opencode.ai/zen/go/v1/chat/completions');
+  assert.equal(oc.info.keyVar, 'OPENCODE_API_KEY');
+  assert.deepEqual(oc.models, ['kimi-k2.6', 'glm-5.3', 'deepseek-v4-flash']);
+  const or = info({});
+  assert.equal(or.info.name, 'OpenRouter');
+  assert.equal(or.info.keyVar, 'OPENROUTER_API_KEY');
+  assert.ok(or.models.includes('anthropic/claude-haiku-5.5'));
+  assert.equal(info({AI_PROVIDER: 'nonsense'}).info.name, 'OpenRouter', 'an unknown provider means OpenRouter');
+});

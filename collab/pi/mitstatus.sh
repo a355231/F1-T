@@ -23,7 +23,7 @@ setting() {
 # has no preset table (a hub from before it).
 presets() {
   AI_MODEL_SMART="$(setting AI_MODEL_SMART)" AI_MODEL_BALANCED="$(setting AI_MODEL_BALANCED)" \
-  AI_MODEL_FAST="$(setting AI_MODEL_FAST)" node -e '
+  AI_MODEL_FAST="$(setting AI_MODEL_FAST)" AI_PROVIDER="$(setting AI_PROVIDER)" node -e '
     const {PRESETS, nameOf} = require(process.argv[1]);
     for (const id of ["smart", "balanced", "fast"]) {
       const p = PRESETS[id], over = process.env[p.env];
@@ -107,6 +107,10 @@ show_status() {
   link_lines
   echo "  Access code:        ${code:-not set}"
   echo "  Override code:      ${pin:-not set}"
+  case "$(setting AI_PROVIDER)" in
+    opencode) echo "  AI provider:        OpenCode Go" ;;
+    *) echo "  AI provider:        OpenRouter" ;;
+  esac
   rows="$(model_rows)"
   if [ -z "$rows" ]; then
     echo "  AI models:          not found (the hub and the project folder have no model list)"

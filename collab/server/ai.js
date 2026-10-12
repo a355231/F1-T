@@ -20,7 +20,18 @@ const registry = require('./ai-registry');
 const proj = require('./ai-project');
 const compactor = require('./ai-context');
 
-const KEY = () => process.env.OPENROUTER_API_KEY || '';
+// The services the companion can use. OpenRouter is the default. OpenCode Go (opencode.ai) has its own key and endpoint: an
+// OpenAI-style chat completions API that takes no OpenRouter reasoning setting and has no model list, so pictures and
+// context sizes use the built-in ones there.
+const PROVIDERS = {
+  openrouter: {name: 'OpenRouter', url: 'https://openrouter.ai/api/v1/chat/completions', keyVar: 'OPENROUTER_API_KEY',
+    models: true},
+  opencode: {name: 'OpenCode Go', url: 'https://opencode.ai/zen/go/v1/chat/completions', keyVar: 'OPENCODE_API_KEY',
+    models: false},
+};
+const PROVIDER_NAME = Object.hasOwn(PROVIDERS, process.env.AI_PROVIDER || '') ? process.env.AI_PROVIDER : 'openrouter';
+const PROVIDER = PROVIDERS[PROVIDER_NAME];
+const KEY = () => process.env[PROVIDER.keyVar] || '';
 // The full-app PIN is the one in ai.env, unless one has been saved to its own file (from the Team panel, or by
 // set-ai.sh --pin). The file is read again whenever it changes, so a new PIN works at once. The hub's user can
 // write it; ai.env is readable by root only.
@@ -59,8 +70,8 @@ function savePin(value) {
   fs.renameSync(temp, file);
 }
 const SEARCH_KEY = () => process.env.BRAVE_API_KEY || '';
-const URL_ = process.env.OPENROUTER_URL || 'https://openrouter.ai/api/v1/chat/completions';
-const MODELS_URL = URL_.replace(/\/chat\/completions$/, '/models');
+const URL_ = PROVIDER_NAME === 'openrouter' && process.env.OPENROUTER_URL ? process.env.OPENROUTER_URL : PROVIDER.url;
+const MODELS_URL = PROVIDER.models ? URL_.replace(/\/chat\/completions$/, '/models') : null;
 const PER_MINUTE = 12;
 const DAILY = () => parseInt(process.env.AI_DAILY_LIMIT || '300', 10);
 const MAX_TOOL_RESULT = 60000;
@@ -95,7 +106,7 @@ const TOO_LONG = 'That answer ran past the time limit and was cut off. Try askin
 const MAX_TOKENS = () => parseInt(process.env.AI_MAX_TOKENS || '8000', 10);
 // The companion's models, one per preset. The server is the source of truth: the browser gets this list from
 // GET /collab/ai/presets. AI_MODEL_SMART, AI_MODEL_BALANCED and AI_MODEL_FAST in ai.env change only the model string.
-const PRESETS = {
+const OPENROUTER_PRESETS = {
   smart: {label: 'Smart', name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5', env: 'AI_MODEL_SMART',
     reasoningLevels: ['default', 'low', 'medium', 'high', 'max']},
   balanced: {label: 'Balanced', name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash', env: 'AI_MODEL_BALANCED',
@@ -103,6 +114,14 @@ const PRESETS = {
   fast: {label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash', env: 'AI_MODEL_FAST',
     reasoningLevels: ['default', 'low', 'medium', 'high']},
 };
+// OpenCode Go's models in the companion: open models through its chat completions endpoint, with no reasoning setting.
+const OPENCODE_PRESETS = {
+  smart: {label: 'Smart', name: 'Kimi K2.6', model: 'kimi-k2.6', env: 'AI_MODEL_SMART', reasoningLevels: ['default']},
+  balanced: {label: 'Balanced', name: 'GLM 5.3', model: 'glm-5.3', env: 'AI_MODEL_BALANCED', reasoningLevels: ['default']},
+  fast: {label: 'Fast', name: 'DeepSeek V4 Flash', model: 'deepseek-v4-flash', env: 'AI_MODEL_FAST',
+    reasoningLevels: ['default']},
+};
+const PRESETS = PROVIDER_NAME === 'opencode' ? OPENCODE_PRESETS : OPENROUTER_PRESETS;
 const DEFAULT_PRESET = 'balanced';
 // How many subagents may run at once in one answer. The rest wait in the order they were asked for.
 const RUN_MODES = [
@@ -114,7 +133,10 @@ const DEFAULT_RUN_MODE = 'normal';
 const REASONING = ['default', 'low', 'medium', 'high', 'max'];
 const REASONING_MAX_TOKENS = 32000; // reasoning draws from the same max_tokens budget as the answer, so it gets room for both
 // The subagents: two tiers with fixed models. Their reasoning is always high, and the client cannot change it.
-const SUB_TIERS = {
+const SUB_TIERS = PROVIDER_NAME === 'opencode' ? {
+  default: {name: 'GLM 5.3', model: 'glm-5.3'},
+  smart: {name: 'Kimi K2.6', model: 'kimi-k2.6'},
+} : {
   default: {name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash'},
   smart: {name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5'},
 };
@@ -346,11 +368,19 @@ const KNOWN_NAMES = {
   'anthropic/claude-haiku-5.5': 'Claude Haiku 5.5',
   'inclusionai/ling-3.1-flash': 'Ling 3.1 Flash',
   'inclusionai/ling-3.0-flash': 'Ling 3 Flash',
+  'kimi-k2.6': 'Kimi K2.6',
+  'glm-5.3': 'GLM 5.3',
+  'deepseek-v4-flash': 'DeepSeek V4 Flash',
 };
 function nameOf(preset) {
   const model = modelOf(preset);
   if (model === PRESETS[preset].model) return PRESETS[preset].name;
   return KNOWN_NAMES[model] || model;
+}
+
+// The provider in use: its name, its endpoint, and the name in ai.env of its key.
+function providerInfo() {
+  return {name: PROVIDER.name, url: URL_, keyVar: PROVIDER.keyVar};
 }
 
 // The run mode of a request: a missing or unknown one means normal.
@@ -361,6 +391,7 @@ function runModeOf(id) {
 // The reasoning sent with one request: none for default, otherwise the level. A request with reasoning gets
 // REASONING_MAX_TOKENS to write in, and compaction leaves the same room (maxTokensOf).
 function reasoningOf(level) {
+  if (PROVIDER_NAME === 'opencode') return null;   // OpenCode Go takes no reasoning setting here
   return level && level !== 'default' ? {effort: level} : null;
 }
 
@@ -582,6 +613,11 @@ class Assistant {
     const now = this.now();
     const known = this.infoCache.get(model);
     if (known && now < known.until) return known;
+    if (!MODELS_URL) {   // a service with no model list: the built-in sizes apply
+      const none = {vision: false, context: 0, until: now + VISION_TTL_MS};
+      this.infoCache.set(model, none);
+      return none;
+    }
     let found = null;
     let ttl = VISION_RETRY_MS;
     try {
@@ -1679,5 +1715,5 @@ class Assistant {
   }
 }
 
-module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, modelTakesImages, PRESETS, RUN_MODES, nameOf,
+module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, modelTakesImages, PRESETS, RUN_MODES, nameOf, providerInfo,
   REASONING_MAX_TOKENS, SUB_TIERS, SMART_COOLDOWN_MS};
