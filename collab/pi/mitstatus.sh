@@ -24,10 +24,10 @@ setting() {
 presets() {
   AI_MODEL_SMART="$(setting AI_MODEL_SMART)" AI_MODEL_BALANCED="$(setting AI_MODEL_BALANCED)" \
   AI_MODEL_FAST="$(setting AI_MODEL_FAST)" node -e '
-    const {PRESETS} = require(process.argv[1]);
+    const {PRESETS, nameOf} = require(process.argv[1]);
     for (const id of ["smart", "balanced", "fast"]) {
       const p = PRESETS[id], over = process.env[p.env];
-      console.log([id, p.label, p.name, over || p.model, over ? "set in ai.env" : "built in"].join("\t"));
+      console.log([id, p.label, nameOf(id), over || p.model, over ? "set in ai.env" : "built in"].join("\t"));
     }' "$1/ai.js" 2>/dev/null
 }
 

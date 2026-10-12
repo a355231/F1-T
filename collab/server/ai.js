@@ -340,6 +340,19 @@ function modelOf(preset) {
   return process.env[PRESETS[preset].env] || PRESETS[preset].model;
 }
 
+// The name the page and the status show for a preset. A model set in ai.env shows its own name when the helper knows
+// it, and its OpenRouter id when it does not, so a preset never keeps the name of a model it no longer runs.
+const KNOWN_NAMES = {
+  'anthropic/claude-haiku-5.5': 'Claude Haiku 5.5',
+  'inclusionai/ling-3.1-flash': 'Ling 3.1 Flash',
+  'inclusionai/ling-3.0-flash': 'Ling 3 Flash',
+};
+function nameOf(preset) {
+  const model = modelOf(preset);
+  if (model === PRESETS[preset].model) return PRESETS[preset].name;
+  return KNOWN_NAMES[model] || model;
+}
+
 // The run mode of a request: a missing or unknown one means normal.
 function runModeOf(id) {
   return RUN_MODES.find(m => m.id === id) || RUN_MODES[0];
@@ -613,7 +626,7 @@ class Assistant {
   // What the browser shows for the models, the run modes and the subagents (GET /collab/ai/presets).
   presetInfo() {
     return {
-      presets: Object.keys(PRESETS).map(id => ({id, label: PRESETS[id].label, name: PRESETS[id].name, model: modelOf(id),
+      presets: Object.keys(PRESETS).map(id => ({id, label: PRESETS[id].label, name: nameOf(id), model: modelOf(id),
         reasoningLevels: PRESETS[id].reasoningLevels.slice()})),
       defaultPreset: DEFAULT_PRESET,
       runModes: RUN_MODES.map(m => Object.assign({}, m)),
@@ -1666,5 +1679,5 @@ class Assistant {
   }
 }
 
-module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, modelTakesImages, PRESETS, RUN_MODES,
+module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, modelTakesImages, PRESETS, RUN_MODES, nameOf,
   REASONING_MAX_TOKENS, SUB_TIERS, SMART_COOLDOWN_MS};

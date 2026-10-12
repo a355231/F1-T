@@ -6,7 +6,7 @@ const {execFileSync} = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {Assistant, checkAttachments, modelTakesImages} = require('../ai');
+const {Assistant, checkAttachments, modelTakesImages, nameOf} = require('../ai');
 const registry = require('../ai-registry');
 const proj = require('../ai-project');
 const {Hub} = require('../rooms');
@@ -2402,4 +2402,18 @@ test('a subagent cut off in the middle of a call shows that step under its own t
   const cut = evs.find(e => e.type === 'tool' && e.sub && e.state === 'error' && e.detail === 'too long, skipped');
   assert.ok(cut, 'the cut-off call is shown as skipped');
   assert.match(cut.id, /^s0:h1:\d+:w1$/, 'with the subagent tag');
+});
+
+test('a preset named by its model in ai.env shows that model, not the built-in name', () => {
+  const was = process.env.AI_MODEL_BALANCED;
+  try {
+    delete process.env.AI_MODEL_BALANCED;
+    assert.equal(nameOf('balanced'), 'Ling 3.1 Flash');
+    process.env.AI_MODEL_BALANCED = 'anthropic/claude-haiku-5.5';
+    assert.equal(nameOf('balanced'), 'Claude Haiku 5.5');
+    process.env.AI_MODEL_BALANCED = 'mistralai/example-model';
+    assert.equal(nameOf('balanced'), 'mistralai/example-model', 'an unknown model shows its id');
+  } finally {
+    if (was === undefined) delete process.env.AI_MODEL_BALANCED; else process.env.AI_MODEL_BALANCED = was;
+  }
 });

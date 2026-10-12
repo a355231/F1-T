@@ -192,6 +192,12 @@ check "the new key is saved in ai.env" "grep -q '^OPENROUTER_API_KEY=sk-new-test
 check "the key is saved once, and the other settings are kept" "[ \"\$(grep -c '^OPENROUTER_API_KEY=' '$T/base/ai.env')\" = 1 ] && grep -q '^AI_DAILY_LIMIT=' '$T/base/ai.env'"
 check "the hub restarts after a new key" "grep -q 'restart collab-hub' '$T/systemctl.log'"
 
+# 17. A preset whose model is changed in ai.env shows the name of that model
+printf 'AI_MODEL_BALANCED=anthropic/claude-haiku-5.5\n' >> "$T/base/ai.env"
+out17b="$(MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1)"
+check "a changed model shows its own name in the status" "printf '%s' \"\$out17b\" | grep -q 'Balanced  Claude Haiku 5.5'"
+check "the old name is gone from the changed preset" "! printf '%s' \"\$out17b\" | grep -q 'Balanced  Ling 3.1 Flash'"
+
 # 10. The changed scripts parse
 for f in "$HERE/mitstatus.sh" "$HERE/set-ai.sh" "$HERE/stable-link.sh" "$HERE/build-on-pi.sh" "$HERE/install.sh"; do
   check "syntax: $(basename "$f")" "bash -n '$f'"
