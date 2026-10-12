@@ -6,7 +6,8 @@ const {execFileSync} = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {Assistant, checkAttachments, modelTakesImages, nameOf} = require('../ai');
+const {Assistant, checkAttachments, modelTakesImages, nameOf, PROVIDERS, responsesRequest, responsesToChat} = require('../ai');
+const aiTools = require('../ai-tools');
 const registry = require('../ai-registry');
 const proj = require('../ai-project');
 const {Hub} = require('../rooms');
@@ -2426,10 +2427,69 @@ test('OpenCode Go has its own endpoint, key and models, and OpenRouter stays the
   assert.equal(oc.info.name, 'OpenCode Go');
   assert.equal(oc.info.url, 'https://opencode.ai/zen/go/v1/chat/completions');
   assert.equal(oc.info.keyVar, 'OPENCODE_API_KEY');
-  assert.deepEqual(oc.models, ['kimi-k2.6', 'glm-5.3', 'deepseek-v4-flash']);
+  assert.deepEqual(oc.models, ['muse-spark-1.3-contributor', 'step-5-preview-free', 'deepseek-v4.1-flash']);
+  assert.equal(PROVIDERS.opencode.vision, true, 'OpenCode Go takes pictures');
   const or = info({});
   assert.equal(or.info.name, 'OpenRouter');
   assert.equal(or.info.keyVar, 'OPENROUTER_API_KEY');
   assert.ok(or.models.includes('anthropic/claude-haiku-5.5'));
   assert.equal(info({AI_PROVIDER: 'nonsense'}).info.name, 'OpenRouter', 'an unknown provider means OpenRouter');
+});
+
+test('the Responses API request is built from the chat body, pictures and tool calls included', () => {
+  const body = responsesRequest({model: 'muse-spark-1.3-contributor', max_tokens: 500, stream: true,
+    messages: [
+      {role: 'system', content: 'Be brief.'},
+      {role: 'user', content: [{type: 'text', text: 'What is this?'}, {type: 'image_url', image_url: {url: 'data:image/png;base64,AAAA'}}]},
+      {role: 'assistant', content: null, tool_calls: [{id: 'c1', type: 'function', function: {name: 'read_file', arguments: '{"path":"a"}'}}]},
+      {role: 'tool', tool_call_id: 'c1', content: 'file text'},
+    ],
+    tools: [{type: 'function', function: {name: 'read_file', description: 'Reads a file', parameters: {type: 'object'}}}]});
+  assert.equal(body.model, 'muse-spark-1.3-contributor');
+  assert.equal(body.max_output_tokens, 500);
+  assert.deepEqual(body.input[0], {role: 'system', content: [{type: 'input_text', text: 'Be brief.'}]});
+  assert.deepEqual(body.input[1].content, [{type: 'input_text', text: 'What is this?'},
+    {type: 'input_image', image_url: 'data:image/png;base64,AAAA'}]);
+  assert.deepEqual(body.input[2], {type: 'function_call', call_id: 'c1', name: 'read_file', arguments: '{"path":"a"}'});
+  assert.deepEqual(body.input[3], {type: 'function_call_output', call_id: 'c1', output: 'file text'});
+  assert.deepEqual(body.tools, [{type: 'function', name: 'read_file', description: 'Reads a file', parameters: {type: 'object'}}]);
+});
+
+test('a Responses API stream is read as chat completions: text, a tool call, and the finish', async () => {
+  const events = [
+    {type: 'response.output_text.delta', delta: 'Hi '},
+    {type: 'response.output_text.delta', delta: 'there'},
+    {type: 'response.output_item.added', item: {type: 'function_call', id: 'fc_1', call_id: 'c2', name: 'read_file', arguments: ''}},
+    {type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: '{"path":'},
+    {type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: '"a"}'},
+    {type: 'response.completed', response: {}},
+  ];
+  const text = events.map(e => 'event: ' + e.type + '\ndata: ' + JSON.stringify(e) + '\n\n').join('');
+  const source = new ReadableStream({start(c) { c.enqueue(new TextEncoder().encode(text)); c.close(); }});
+  const state = {sawDone: false};
+  const acc = {content: '', tool_calls: []};
+  let finish = '';
+  for await (const ev of aiTools.sseJson(responsesToChat(source), state)) {
+    const choice = ev.choices[0];
+    if (choice.finish_reason) finish = choice.finish_reason;
+    if (choice.delta.content) acc.content += choice.delta.content;
+    aiTools.addDelta(acc, choice.delta);
+  }
+  assert.equal(acc.content, 'Hi there');
+  assert.deepEqual(acc.tool_calls.filter(Boolean).map(c => ({id: c.id, name: c.function.name, args: c.function.arguments})),
+    [{id: 'c2', name: 'read_file', args: '{"path":"a"}'}]);
+  assert.equal(finish, 'tool_calls');
+  assert.equal(state.sawDone, true);
+});
+
+test('a Responses API stream that ends without its completion is taken as ended early', async () => {
+  const text = 'event: response.output_text.delta\ndata: ' + JSON.stringify({type: 'response.output_text.delta', delta: 'Hi'}) + '\n\n';
+  const source = new ReadableStream({start(c) { c.enqueue(new TextEncoder().encode(text)); c.close(); }});
+  const state = {sawDone: false};
+  let finish = '';
+  for await (const ev of aiTools.sseJson(responsesToChat(source), state)) {
+    if (ev.choices[0].finish_reason) finish = ev.choices[0].finish_reason;
+  }
+  assert.equal(finish, '');
+  assert.equal(state.sawDone, false, 'no done line, so the answer is taken as ended early');
 });

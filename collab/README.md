@@ -517,10 +517,13 @@ names, not whether the blocks do what you intended; App Inventor still reports b
 
 Set it up on the Pi:
 * `sudo /opt/appinventor/set-ai.sh` asks for the key of the service in use (OpenRouter, unless you switch).
-* `sudo /opt/appinventor/set-ai.sh --provider opencode` uses **OpenCode Go** (opencode.ai, a low-cost plan with open
-  models) instead, and asks for its key. It removes the model overrides, since they name the old service's models. The
-  built-in models there are Kimi K2.6, GLM 5.3 and DeepSeek V4 Flash, changed with `--model` as usual. Pictures stay off
-  unless `AI_VISION=1` is set. `--provider openrouter` switches back.
+* `sudo /opt/appinventor/set-ai.sh --provider opencode` makes **OpenCode Go** (opencode.ai) the service in use, and asks
+  for its key. In the companion, the **Service** list picks either service for each question, and only the services that
+  have a key are offered. The built-in models for OpenCode Go are Muse Spark 1.3 (Smart), Step 5 Preview (Balanced) and
+  DeepSeek V4.1 Flash (Fast). `--model` changes them, and `AI_OPENCODE_MODEL_*` in ai.env does the same by hand. Pictures
+  are on for OpenCode Go, and it takes no reasoning setting. Muse Spark answers on OpenCode's Responses API, which the hub
+  converts to the same stream; check that with a real key before relying on Smart. `--provider openrouter` switches the
+  default back.
 * `sudo /opt/appinventor/set-ai.sh --pin` asks for the full-app PIN (typing is hidden). Anyone in the Team
   panel can change it too: **Change override PIN…** asks for the current PIN, then the new one (or makes one
   up), and the new PIN works at once. Wrong guesses share the lock that `/override` has. **Also turn full-app

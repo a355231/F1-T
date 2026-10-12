@@ -20,18 +20,6 @@ const registry = require('./ai-registry');
 const proj = require('./ai-project');
 const compactor = require('./ai-context');
 
-// The services the companion can use. OpenRouter is the default. OpenCode Go (opencode.ai) has its own key and endpoint: an
-// OpenAI-style chat completions API that takes no OpenRouter reasoning setting and has no model list, so pictures and
-// context sizes use the built-in ones there.
-const PROVIDERS = {
-  openrouter: {name: 'OpenRouter', url: 'https://openrouter.ai/api/v1/chat/completions', keyVar: 'OPENROUTER_API_KEY',
-    models: true},
-  opencode: {name: 'OpenCode Go', url: 'https://opencode.ai/zen/go/v1/chat/completions', keyVar: 'OPENCODE_API_KEY',
-    models: false},
-};
-const PROVIDER_NAME = Object.hasOwn(PROVIDERS, process.env.AI_PROVIDER || '') ? process.env.AI_PROVIDER : 'openrouter';
-const PROVIDER = PROVIDERS[PROVIDER_NAME];
-const KEY = () => process.env[PROVIDER.keyVar] || '';
 // The full-app PIN is the one in ai.env, unless one has been saved to its own file (from the Team panel, or by
 // set-ai.sh --pin). The file is read again whenever it changes, so a new PIN works at once. The hub's user can
 // write it; ai.env is readable by root only.
@@ -70,8 +58,6 @@ function savePin(value) {
   fs.renameSync(temp, file);
 }
 const SEARCH_KEY = () => process.env.BRAVE_API_KEY || '';
-const URL_ = PROVIDER_NAME === 'openrouter' && process.env.OPENROUTER_URL ? process.env.OPENROUTER_URL : PROVIDER.url;
-const MODELS_URL = PROVIDER.models ? URL_.replace(/\/chat\/completions$/, '/models') : null;
 const PER_MINUTE = 12;
 const DAILY = () => parseInt(process.env.AI_DAILY_LIMIT || '300', 10);
 const MAX_TOOL_RESULT = 60000;
@@ -114,14 +100,66 @@ const OPENROUTER_PRESETS = {
   fast: {label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash', env: 'AI_MODEL_FAST',
     reasoningLevels: ['default', 'low', 'medium', 'high']},
 };
-// OpenCode Go's models in the companion: open models through its chat completions endpoint, with no reasoning setting.
+// OpenCode Go's models in the companion: open models, and a Responses API model for Smart (see responsesRequest). None
+// of them takes a reasoning setting here.
 const OPENCODE_PRESETS = {
-  smart: {label: 'Smart', name: 'Kimi K2.6', model: 'kimi-k2.6', env: 'AI_MODEL_SMART', reasoningLevels: ['default']},
-  balanced: {label: 'Balanced', name: 'GLM 5.3', model: 'glm-5.3', env: 'AI_MODEL_BALANCED', reasoningLevels: ['default']},
-  fast: {label: 'Fast', name: 'DeepSeek V4 Flash', model: 'deepseek-v4-flash', env: 'AI_MODEL_FAST',
+  smart: {label: 'Smart', name: 'Muse Spark 1.3', model: 'muse-spark-1.3-contributor', env: 'AI_OPENCODE_MODEL_SMART',
+    reasoningLevels: ['default']},
+  balanced: {label: 'Balanced', name: 'Step 5 Preview', model: 'step-5-preview-free', env: 'AI_OPENCODE_MODEL_BALANCED',
+    reasoningLevels: ['default']},
+  fast: {label: 'Fast', name: 'DeepSeek V4.1 Flash', model: 'deepseek-v4.1-flash', env: 'AI_OPENCODE_MODEL_FAST',
     reasoningLevels: ['default']},
 };
-const PRESETS = PROVIDER_NAME === 'opencode' ? OPENCODE_PRESETS : OPENROUTER_PRESETS;
+// The subagents of each service. A tier's reasoning is what its model is asked for (OpenCode Go takes none).
+const OPENROUTER_SUB_TIERS = {
+  default: {name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash', reasoning: 'high'},
+  smart: {name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5', reasoning: 'high'},
+};
+const OPENCODE_SUB_TIERS = {
+  default: {name: 'DeepSeek V4.1 Flash', model: 'deepseek-v4.1-flash', reasoning: 'default'},
+  smart: {name: 'Muse Spark 1.3', model: 'muse-spark-1.3-contributor', reasoning: 'default'},
+};
+// The services the companion can use. OpenRouter is the default unless AI_PROVIDER names another, and a person can pick
+// either in the companion (the server only offers the ones that have a key). OpenCode Go (opencode.ai) has its own key,
+// an OpenAI-style chat completions endpoint, and a Responses endpoint for the models that need it. It has no model list,
+// so pictures follow its own setting and the built-in context sizes apply.
+const PROVIDERS = {
+  openrouter: {id: 'openrouter', name: 'OpenRouter', keyVar: 'OPENROUTER_API_KEY',
+    url: process.env.OPENROUTER_URL || 'https://openrouter.ai/api/v1/chat/completions', modelList: true, vision: false,
+    reasoning: true, responseModels: [], presets: OPENROUTER_PRESETS, subTiers: OPENROUTER_SUB_TIERS},
+  opencode: {id: 'opencode', name: 'OpenCode Go', keyVar: 'OPENCODE_API_KEY',
+    url: 'https://opencode.ai/zen/go/v1/chat/completions', responsesUrl: 'https://opencode.ai/zen/go/v1/responses',
+    modelList: false, vision: true, reasoning: false,
+    responseModels: ['muse-spark-1.3-contributor', 'muse-spark-1.2-contributor'],
+    presets: OPENCODE_PRESETS, subTiers: OPENCODE_SUB_TIERS},
+};
+const DEFAULT_PROVIDER = Object.hasOwn(PROVIDERS, process.env.AI_PROVIDER || '') ? process.env.AI_PROVIDER : 'openrouter';
+// The service a name stands for: the default one when the name is unknown.
+function serviceOf(name) {
+  return Object.hasOwn(PROVIDERS, name) ? PROVIDERS[name] : PROVIDERS[DEFAULT_PROVIDER];
+}
+const keyOf = service => process.env[service.keyVar] || '';
+// The model list of a service with one, for pictures and context sizes; null for a service without one.
+function modelsUrl(service) {
+  return service.modelList ? service.url.replace(/\/chat\/completions$/, '/models') : null;
+}
+// The API a model answers on: the Responses API for the models listed for it, chat completions otherwise.
+function apiOf(service, model) {
+  return service.responseModels.includes(model) ? 'responses' : 'chat';
+}
+// The address and the body of one request to a service, in the API its model answers on.
+function requestFor(service, model, payload) {
+  if (apiOf(service, model) === 'responses') {
+    return {url: service.responsesUrl, body: responsesRequest(Object.assign({}, payload, {model}))};
+  }
+  return {url: service.url, body: Object.assign({}, payload, {model})};
+}
+// The stream of chat completions chunks for a request's body, whichever API answers.
+function streamOf(service, model, body) {
+  return apiOf(service, model) === 'responses' ? responsesToChat(body) : body;
+}
+
+const PRESETS = serviceOf().presets;
 const DEFAULT_PRESET = 'balanced';
 // How many subagents may run at once in one answer. The rest wait in the order they were asked for.
 const RUN_MODES = [
@@ -133,14 +171,7 @@ const DEFAULT_RUN_MODE = 'normal';
 const REASONING = ['default', 'low', 'medium', 'high', 'max'];
 const REASONING_MAX_TOKENS = 32000; // reasoning draws from the same max_tokens budget as the answer, so it gets room for both
 // The subagents: two tiers with fixed models. Their reasoning is always high, and the client cannot change it.
-const SUB_TIERS = PROVIDER_NAME === 'opencode' ? {
-  default: {name: 'GLM 5.3', model: 'glm-5.3'},
-  smart: {name: 'Kimi K2.6', model: 'kimi-k2.6'},
-} : {
-  default: {name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash'},
-  smart: {name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5'},
-};
-const SUB_REASONING = 'high';
+const SUB_TIERS = serviceOf().subTiers;
 // A smart subagent's whole run is kept to this many model answers, and to this long, counted from when it starts
 // running. The time is checked before each model answer and before each tool call. A default subagent has neither limit.
 const SUB_STEPS = 12;
@@ -345,6 +376,120 @@ function imagePart(img) {
   return {type: 'image_url', image_url: {url: 'data:' + img.mime + ';base64,' + img.data}};
 }
 
+// The Responses API, for the request a chat completions body describes: messages become input items, and a function call
+// and its result are items of their own. Tools and pictures carry over.
+function responsesRequest(p) {
+  const input = [];
+  for (const m of p.messages) {
+    if (m.role === 'tool') {
+      input.push({type: 'function_call_output', call_id: m.tool_call_id, output: String(m.content || '')});
+    } else if (m.role === 'assistant') {
+      if (m.content) input.push({role: 'assistant', content: [{type: 'output_text', text: String(m.content)}]});
+      for (const c of m.tool_calls || []) {
+        input.push({type: 'function_call', call_id: c.id, name: c.function.name, arguments: c.function.arguments || ''});
+      }
+    } else {
+      input.push({role: m.role, content: responsesParts(m.content)});
+    }
+  }
+  const out = {model: p.model, input, stream: true, max_output_tokens: p.max_tokens};
+  if (p.tools && p.tools.length) {
+    out.tools = p.tools.map(t => ({type: 'function', name: t.function.name, description: t.function.description,
+      parameters: t.function.parameters}));
+  }
+  return out;
+}
+
+function responsesParts(content) {
+  if (!Array.isArray(content)) return [{type: 'input_text', text: String(content || '')}];
+  return content.map(part => (part.type === 'image_url'
+    ? {type: 'input_image', image_url: part.image_url.url}
+    : {type: 'input_text', text: String(part.text || '')}));
+}
+
+// The Responses API's event stream, turned into the chat completions chunks streamTurn reads, so the answer, its tool
+// calls and its reasoning are handled the same way whichever API answered. A stream that ends without its completion
+// event gives no done line, so it is taken as ended early, as a chat stream is.
+function responsesToChat(source) {
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  return new ReadableStream({
+    async start(controller) {
+      const reader = source.getReader();
+      const send = obj => controller.enqueue(enc.encode('data: ' + JSON.stringify(obj) + '\n\n'));
+      const calls = new Map();   // the id of a function call item -> its index among the tool calls
+      let buf = '';
+      let sawCall = false;
+      let finish = '';
+      const handle = ev => {
+        switch (ev.type) {
+          case 'response.output_text.delta':
+            send({choices: [{delta: {content: ev.delta}}]});
+            break;
+          case 'response.reasoning_text.delta':
+          case 'response.reasoning_summary_text.delta':
+            send({choices: [{delta: {reasoning: ev.delta}}]});
+            break;
+          case 'response.output_item.added':
+            if (ev.item && ev.item.type === 'function_call') {
+              const index = calls.size;
+              calls.set(ev.item.id, index);
+              sawCall = true;
+              send({choices: [{delta: {tool_calls: [{index, id: ev.item.call_id, type: 'function',
+                function: {name: ev.item.name, arguments: ''}}]}}]});
+            }
+            break;
+          case 'response.function_call_arguments.delta':
+            if (calls.has(ev.item_id)) {
+              send({choices: [{delta: {tool_calls: [{index: calls.get(ev.item_id), function: {arguments: ev.delta}}]}}]});
+            }
+            break;
+          case 'response.completed':
+            finish = sawCall ? 'tool_calls' : 'stop';
+            break;
+          case 'response.incomplete':
+            finish = 'length';
+            break;
+          case 'response.failed':
+          case 'error':
+            send({error: {message: (ev.response && ev.response.error && ev.response.error.message) || ev.message ||
+              'the service stopped early'}});
+            break;
+          default:
+            break;
+        }
+      };
+      try {
+        for (;;) {
+          const {value, done} = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, {stream: true});
+          let cut;
+          while ((cut = buf.indexOf('\n\n')) >= 0) {
+            const block = buf.slice(0, cut);
+            buf = buf.slice(cut + 2);
+            for (const line of block.split('\n')) {
+              if (!line.startsWith('data:')) continue;
+              const data = line.slice(5).trim();
+              if (!data || data === '[DONE]') continue;
+              let ev;
+              try { ev = JSON.parse(data); } catch (e) { continue; }
+              handle(ev);
+            }
+          }
+        }
+        if (finish) {
+          send({choices: [{delta: {}, finish_reason: finish}]});
+          controller.enqueue(enc.encode('data: [DONE]\n\n'));
+        }
+        controller.close();
+      } catch (e) {
+        controller.error(e);
+      }
+    },
+  });
+}
+
 // Whether a model listed by OpenRouter takes pictures as input.
 function modelTakesImages(m) {
   const arch = m && m.architecture || {};
@@ -358,8 +503,8 @@ function presetOf(id) {
 }
 
 // The model string of a preset: the one set in ai.env (AI_MODEL_*), or the default.
-function modelOf(preset) {
-  return process.env[PRESETS[preset].env] || PRESETS[preset].model;
+function modelOf(preset, service = serviceOf()) {
+  return process.env[service.presets[preset].env] || service.presets[preset].model;
 }
 
 // The name the page and the status show for a preset. A model set in ai.env shows its own name when the helper knows
@@ -369,18 +514,22 @@ const KNOWN_NAMES = {
   'inclusionai/ling-3.1-flash': 'Ling 3.1 Flash',
   'inclusionai/ling-3.0-flash': 'Ling 3 Flash',
   'kimi-k2.6': 'Kimi K2.6',
+  'muse-spark-1.3-contributor': 'Muse Spark 1.3',
+  'step-5-preview-free': 'Step 5 Preview',
+  'deepseek-v4.1-flash': 'DeepSeek V4.1 Flash',
   'glm-5.3': 'GLM 5.3',
   'deepseek-v4-flash': 'DeepSeek V4 Flash',
 };
-function nameOf(preset) {
-  const model = modelOf(preset);
-  if (model === PRESETS[preset].model) return PRESETS[preset].name;
+function nameOf(preset, service = serviceOf()) {
+  const model = modelOf(preset, service);
+  if (model === service.presets[preset].model) return service.presets[preset].name;
   return KNOWN_NAMES[model] || model;
 }
 
 // The provider in use: its name, its endpoint, and the name in ai.env of its key.
 function providerInfo() {
-  return {name: PROVIDER.name, url: URL_, keyVar: PROVIDER.keyVar};
+  const s = serviceOf();
+  return {name: s.name, url: s.url, keyVar: s.keyVar};
 }
 
 // The run mode of a request: a missing or unknown one means normal.
@@ -391,7 +540,6 @@ function runModeOf(id) {
 // The reasoning sent with one request: none for default, otherwise the level. A request with reasoning gets
 // REASONING_MAX_TOKENS to write in, and compaction leaves the same room (maxTokensOf).
 function reasoningOf(level) {
-  if (PROVIDER_NAME === 'opencode') return null;   // OpenCode Go takes no reasoning setting here
   return level && level !== 'default' ? {effort: level} : null;
 }
 
@@ -402,10 +550,12 @@ function maxTokensOf(level) {
 // The settings of one answer, from its stream body. Max is for the smart preset only; on any other, it is high.
 function settingsOf(data, effort) {
   const preset = presetOf(data.preset);
-  let reasoning = REASONING.indexOf(data.reasoning) >= 0 ? data.reasoning : 'default';
+  let service = serviceOf(data.provider);
+  if (!keyOf(service)) service = serviceOf();
+  let reasoning = REASONING.indexOf(data.reasoning) >= 0 && service.reasoning ? data.reasoning : 'default';
   const clamped = reasoning === 'max' && preset !== 'smart';
   if (clamped) reasoning = 'high';
-  return {effort, preset, runMode: runModeOf(data.runMode).id, reasoning, clamped};
+  return {effort, preset, provider: service.id, runMode: runModeOf(data.runMode).id, reasoning, clamped};
 }
 
 // The reasoning a streamed piece carries, as text to show: its reasoning string, or when there is none, the text of its
@@ -571,8 +721,8 @@ class Assistant {
   }
 
   // The model of each request comes from its preset, so only the key is needed here.
-  configured() {
-    return !!KEY();
+  configured(service = serviceOf()) {
+    return !!keyOf(service);
   }
 
   searchKey() {
@@ -609,19 +759,21 @@ class Assistant {
 
   // What OpenRouter says about a model: whether it takes pictures, and how many tokens it can read. Each answer is
   // kept for six hours (five minutes when the list could not be read).
-  async modelInfo(model) {
+  async modelInfo(model, service = serviceOf()) {
     const now = this.now();
-    const known = this.infoCache.get(model);
+    const cacheKey = service.id + '|' + model;
+    const known = this.infoCache.get(cacheKey);
     if (known && now < known.until) return known;
-    if (!MODELS_URL) {   // a service with no model list: the built-in sizes apply
-      const none = {vision: false, context: 0, until: now + VISION_TTL_MS};
-      this.infoCache.set(model, none);
+    const listUrl = modelsUrl(service);
+    if (!listUrl) {   // a service with no model list: its own picture setting, and the built-in context sizes
+      const none = {vision: service.vision, context: 0, until: now + VISION_TTL_MS};
+      this.infoCache.set(cacheKey, none);
       return none;
     }
     let found = null;
     let ttl = VISION_RETRY_MS;
     try {
-      const r = await this.fetch(MODELS_URL, {signal: AbortSignal.timeout(8000)});
+      const r = await this.fetch(listUrl, {signal: AbortSignal.timeout(8000)});
       if (r.ok) {
         const body = await r.json();
         const list = Array.isArray(body.data) ? body.data : [];
@@ -634,23 +786,23 @@ class Assistant {
     }
     const info = {vision: !!found && modelTakesImages(found), context: found ? Number(found.context_length) || 0 : 0,
       until: now + ttl};
-    this.infoCache.set(model, info);
+    this.infoCache.set(cacheKey, info);
     return info;
   }
 
   // Whether a model takes pictures. For the companion, AI_VISION=1 or 0 sets it; otherwise, and for subagents, the
   // model's entry in OpenRouter's list says so.
-  async takesPictures(model, companion) {
+  async takesPictures(model, companion, service = serviceOf()) {
     const set = companion ? process.env.AI_VISION : '';
     if (set === '1' || set === 'true') return true;
     if (set === '0' || set === 'false') return false;
-    if (!this.configured()) return false;
-    return (await this.modelInfo(model)).vision;
+    if (!this.configured(service)) return false;
+    return (await this.modelInfo(model, service)).vision;
   }
 
   // The room a model has for one answer's conversation, in tokens (see ai-context.js).
-  async contextWindow(model) {
-    const info = await this.modelInfo(model);
+  async contextWindow(model, service = serviceOf()) {
+    const info = await this.modelInfo(model, service);
     return compactor.contextTokens(model, info.context);
   }
 
@@ -661,24 +813,29 @@ class Assistant {
 
   // What the browser shows for the models, the run modes and the subagents (GET /collab/ai/presets).
   presetInfo() {
-    return {
-      presets: Object.keys(PRESETS).map(id => ({id, label: PRESETS[id].label, name: nameOf(id), model: modelOf(id),
-        reasoningLevels: PRESETS[id].reasoningLevels.slice()})),
+    const service = id => {
+      const s = PROVIDERS[id];
+      return {id, name: s.name, configured: this.configured(s),
+        presets: Object.keys(s.presets).map(p => ({id: p, label: s.presets[p].label, name: nameOf(p, s), model: modelOf(p, s),
+          reasoningLevels: s.presets[p].reasoningLevels.slice()})),
+        subagents: {
+          default: {name: s.subTiers.default.name, model: s.subTiers.default.model, reasoning: s.subTiers.default.reasoning},
+          smart: {name: s.subTiers.smart.name, model: s.subTiers.smart.model, reasoning: s.subTiers.smart.reasoning,
+            cooldownMinutes: SMART_COOLDOWN_MS / 60000, readyInSeconds: Math.ceil(this.smartLeft() / 1000)},
+        }};
+    };
+    const providers = Object.keys(PROVIDERS).map(service);
+    return Object.assign({providers, defaultProvider: DEFAULT_PROVIDER}, providers.find(p => p.id === DEFAULT_PROVIDER), {
       defaultPreset: DEFAULT_PRESET,
       runModes: RUN_MODES.map(m => Object.assign({}, m)),
       defaultRunMode: DEFAULT_RUN_MODE,
       defaultReasoning: 'default',
-      subagents: {
-        default: {name: SUB_TIERS.default.name, model: SUB_TIERS.default.model, reasoning: SUB_REASONING},
-        smart: {name: SUB_TIERS.smart.name, model: SUB_TIERS.smart.model, reasoning: SUB_REASONING,
-          cooldownMinutes: SMART_COOLDOWN_MS / 60000, readyInSeconds: Math.ceil(this.smartLeft() / 1000)},
-      },
-    };
+    });
   }
 
   // The notes on earlier steps, written by the model with no tools, streamed like any answer. Throws if they fail, or if
   // the deadline of a smart subagent's run (when one is given) comes first: the notes are a model call of that run too.
-  async summarizeSteps(model, text, signal, deadline = Infinity) {
+  async summarizeSteps(model, text, signal, deadline = Infinity, service = serviceOf()) {
     if (this.now() >= deadline) throw timeUpError();
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), Math.min(SUMMARY_MS, deadline - this.now()));
@@ -688,18 +845,19 @@ class Assistant {
       else signal.addEventListener('abort', stop, {once: true});
     }
     try {
-      const r = await this.fetch(URL_, {
+      const req = requestFor(service, model, {temperature: 0.2, max_tokens: SUMMARY_TOKENS, stream: true,
+        messages: [{role: 'system', content: SUMMARY_RULES}, {role: 'user', content: text}]});
+      const r = await this.fetch(req.url, {
         method: 'POST',
-        headers: {authorization: 'Bearer ' + KEY(), 'content-type': 'application/json', 'x-title': 'App Inventor Team Edition'},
-        body: JSON.stringify({model, temperature: 0.2, max_tokens: SUMMARY_TOKENS, stream: true,
-          messages: [{role: 'system', content: SUMMARY_RULES}, {role: 'user', content: text}]}),
+        headers: {authorization: 'Bearer ' + keyOf(service), 'content-type': 'application/json', 'x-title': 'App Inventor Team Edition'},
+        body: JSON.stringify(req.body),
         signal: ac.signal,
       });
       if (!r.ok) throw new Error('service answered ' + r.status);
       const state = {sawDone: false};
       let notes = '';
       let finish = '';
-      for await (const ev of tools.sseJson(r.body, state)) {
+      for await (const ev of tools.sseJson(streamOf(service, model, r.body), state)) {
         if (ev.error) throw new Error('the notes could not be written');
         const choice = ev.choices && ev.choices[0];
         if (choice && choice.finish_reason) finish = choice.finish_reason;
@@ -798,8 +956,9 @@ class Assistant {
       const pid = params.get('projectId') || '';
       const live = /^\d+$/.test(pid) ? this.activeRun(me.userId, pid) : null;
       // Whether pictures can be attached depends on the preset the browser asks about (balanced when none is named).
-      const vision = await this.takesPictures(modelOf(presetOf(params.get('preset'))), true);
-      return json(200, {configured: this.configured(), search: !!SEARCH_KEY(), vision,
+      const service = serviceOf(params.get('provider'));
+      const vision = await this.takesPictures(modelOf(presetOf(params.get('preset')), service), true, service);
+      return json(200, {configured: this.configured(service), search: !!SEARCH_KEY(), vision,
         name: me.email.split('@')[0], fullUntil: /^\d+$/.test(pid) ? this.fullUntil(me.userId, pid) : 0,
         running: !!live, question: live ? live.question : ''});
     }
@@ -1035,9 +1194,10 @@ class Assistant {
     const plan = !!ctx.plan;
     const effort = ctx.effort || 'medium';
     const stats = ctx.stats || {steps: 0, tools: 0, pictures: 0};
-    const model = modelOf(presetOf(ctx.preset));
+    const service = serviceOf(ctx.provider);
+    const model = modelOf(presetOf(ctx.preset), service);
     const level = ctx.reasoning || 'default';
-    if (!this.configured()) {
+    if (!this.configured(service)) {
       emit({type: 'text', delta: NOT_SET_UP});
       return;
     }
@@ -1049,7 +1209,7 @@ class Assistant {
     // Planning changes nothing, so it does not touch the unfinished app of full-app mode.
     const full = !plan && this.fullActive(me.userId, projectId);
     const key = me.userId + '|' + projectId;
-    const vision = await this.takesPictures(model, true);
+    const vision = await this.takesPictures(model, true, service);
     const search = !!SEARCH_KEY();
     const notes = [];
     let draft;
@@ -1077,7 +1237,7 @@ class Assistant {
     for (const n of notes) emit({type: 'status', text: n});
     // The draft-changing tools of the answer, its subagents included, take turns (lock); the subagents share the run
     // mode's slots (slots).
-    const run = {me, cookie: ctx.cookie, projectId, access, full, vision, emit, goal: !!goal, assistant: this,
+    const run = {me, cookie: ctx.cookie, projectId, access, full, vision, emit, goal: !!goal, assistant: this, provider: service.id,
       ask: this.ask, signal: ctx.signal, stats, draft, readOnly: plan, state: {proposed: false, edited: false},
       lock: registry.draftLock(), slots: new Slots(runModeOf(ctx.runMode).agents)};
     const system = [full ? SYSTEM_FULL : SYSTEM, search ? SEARCH_NOTE : '', vision ? VISION_NOTE : '',
@@ -1116,8 +1276,8 @@ class Assistant {
         }
         const tools = registry.definitions(run);
         const compacted = await compactor.compactContext(messages, {
-          window: await this.contextWindow(model), maxOutput: maxTokensOf(level), toolsTokens: compactor.tokensOfJson(tools),
-          summarize: text => this.summarizeSteps(model, text, ctx.signal),
+          window: await this.contextWindow(model, service), maxOutput: maxTokensOf(level), toolsTokens: compactor.tokensOfJson(tools),
+          summarize: text => this.summarizeSteps(model, text, ctx.signal, Infinity, service),
           notice: text => emit({type: 'status', text}),
         });
         if (compacted) this.log('the conversation of an answer was made shorter: ' + compacted.how + ' (' + compacted.steps + ' step(s))');
@@ -1127,7 +1287,7 @@ class Assistant {
         // tool_call_id sent back to the model stays the provider's own id.
         const tag = 's' + stats.steps + ':';
         emit({type: 'step'});
-        const reply = await this.streamWithRetry({model, messages, list: tools, signal: ctx.signal, emit, level, tag});
+        const reply = await this.streamWithRetry({model, messages, list: tools, signal: ctx.signal, emit, level, tag, service});
         stats.steps++;
         if (reply.truncated) {
           // The model ran out of room part way through. A half-written tool call is never run. The model is told,
@@ -1247,11 +1407,12 @@ class Assistant {
   // starts running, not when it is queued. Stop ends it at once.
   async runSubagent(task, ctx, mode) {
     const tier = mode === 'smart' ? 'smart' : 'default';
-    const info = SUB_TIERS[tier];
+    const service = serviceOf(ctx.provider);
+    const info = service.subTiers[tier];
     // The subagent's id is the call's id in the helper's answer, already tagged (see converse), so it is unique in the answer.
     const id = ctx.callId;
     const stats = ctx.stats || {steps: 0, tools: 0, pictures: 0};
-    const card = {type: 'subagent', id, tier, model: info.model, name: info.name, reasoning: SUB_REASONING,
+    const card = {type: 'subagent', id, tier, model: info.model, name: info.name, reasoning: info.reasoning,
       task: String(task).slice(0, TASK_EVENT_MAX)};
     const say = (state, extra) => ctx.emit(Object.assign({}, card, {state}, extra || {}));
     if (tier === 'smart' && this.smartLeft() > 0) return this.smartRefused(ctx);
@@ -1291,7 +1452,7 @@ class Assistant {
       const deadline = tier === 'smart' ? this.now() + SUB_MS : Infinity;
       this.log('a ' + tier + ' subagent started');
       const sub = Object.assign({}, ctx, {inSubagent: true, emit: emitSub});
-      sub.vision = await this.takesPictures(info.model, false);
+      sub.vision = await this.takesPictures(info.model, false, service);
       const rest = on => say(on ? 'resting' : 'running', {steps});   // resting while it waits to try a model call again
       const messages = [{role: 'system', content: SUBAGENT_NOTE}, {role: 'user', content: task}];
       let cutOff = 0;     // answers in a row that ran out of room
@@ -1305,8 +1466,8 @@ class Assistant {
         steps++;
         const list = registry.definitions(sub);
         const compacted = await compactor.compactContext(messages, {
-          window: await this.contextWindow(info.model), maxOutput: REASONING_MAX_TOKENS, toolsTokens: compactor.tokensOfJson(list),
-          summarize: text => this.summarizeSteps(info.model, text, ctx.signal, deadline),
+          window: await this.contextWindow(info.model, service), maxOutput: REASONING_MAX_TOKENS, toolsTokens: compactor.tokensOfJson(list),
+          summarize: text => this.summarizeSteps(info.model, text, ctx.signal, deadline, service),
           notice: text => emitSub({type: 'status', text}),
         });
         if (compacted) this.log('a subagent\'s conversation was made shorter: ' + compacted.how + ' (' + compacted.steps + ' step(s))');
@@ -1318,7 +1479,7 @@ class Assistant {
         // answer that the helper's answers have, and the deadline of its run: its answers and their retries cannot pass it,
         // and no tool call is started after it.
         const reply = await this.streamWithRetry({model: info.model, messages, list, signal: ctx.signal, emit: emitSub,
-          level: SUB_REASONING, rest, turnLimit: tier === 'smart', deadline, tag});
+          level: info.reasoning, service, rest, turnLimit: tier === 'smart', deadline, tag});
         stats.steps++;
         if (reply.truncated) {
           // As for the helper: a half-written tool call is never run, and the subagent carries on in smaller pieces.
@@ -1415,7 +1576,7 @@ class Assistant {
   // The result says whether the model ran out of room (truncated); an answer that ends without a proper
   // ending is an error that streamWithRetry tries again. A refused request carries the service's answer as detail.
   // tag starts the id of each tool event the answer shows while it is written (see converse).
-  async streamTurn({model, messages, list, signal, emit, level, turnLimit = true, deadline = Infinity, tag}) {
+  async streamTurn({model, messages, list, signal, emit, level, turnLimit = true, deadline = Infinity, tag, service = serviceOf()}) {
     if (this.now() >= deadline) throw timeUpError();
     const guard = new AbortController();
     let cutOff = '';
@@ -1433,16 +1594,17 @@ class Assistant {
       waitForData();
       const payload = Object.assign({model, messages, tools: list, temperature: 0.2, max_tokens: maxTokensOf(level), stream: true},
         reasoningOf(level) ? {reasoning: reasoningOf(level)} : {});
-      const r = await this.fetch(URL_, {
+      const req = requestFor(service, model, payload);
+      const r = await this.fetch(req.url, {
         method: 'POST',
-        headers: {authorization: 'Bearer ' + KEY(), 'content-type': 'application/json',
+        headers: {authorization: 'Bearer ' + keyOf(service), 'content-type': 'application/json',
           'x-title': 'App Inventor Team Edition'},
-        body: JSON.stringify(payload),
+        body: JSON.stringify(req.body),
         signal: guard.signal,
       });
       if (!r.ok) throw Object.assign(new Error('service answered ' + r.status), {status: r.status, detail: await errorDetail(r)});
       const reader = r.body.getReader();
-      const stream = new ReadableStream({
+      const source = new ReadableStream({
         async pull(controller) {
           waitForData();
           const {value, done} = await reader.read();
@@ -1452,6 +1614,7 @@ class Assistant {
         },
         cancel(why) { return reader.cancel(why); },
       });
+      const stream = streamOf(service, model, source);
       const acc = {content: '', tool_calls: []};
       const state = {sawDone: false};
       const shown = [];
@@ -1494,12 +1657,12 @@ class Assistant {
   // request the service refuses is sent once more with high. rest(true) and rest(false) tell a subagent when it
   // waits before a try again. A try that would start at or after the deadline of a smart subagent's run is not made,
   // and nothing is shown or waited for in its place: the run ends (see streamTurn).
-  async streamWithRetry({model, messages, list, signal, emit, level, rest, turnLimit = true, deadline = Infinity, tag}) {
+  async streamWithRetry({model, messages, list, signal, emit, level, rest, turnLimit = true, deadline = Infinity, tag, service = serviceOf()}) {
     let tries = 0;      // the tries that failed and were tried again
     let lvl = level;
     for (;;) {
       try {
-        return await this.streamTurn({model, messages, list, signal, emit, level: lvl, turnLimit, deadline, tag});
+        return await this.streamTurn({model, messages, list, signal, emit, level: lvl, turnLimit, deadline, tag, service});
       } catch (e) {
         if (signal && signal.aborted) throw e;
         if (lvl === 'max' && e.status === 400 && /effort|reasoning/i.test(String(e.detail || ''))) {
@@ -1715,5 +1878,5 @@ class Assistant {
   }
 }
 
-module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, modelTakesImages, PRESETS, RUN_MODES, nameOf, providerInfo,
+module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, modelTakesImages, PRESETS, RUN_MODES, nameOf, providerInfo, PROVIDERS, serviceOf, responsesRequest, responsesToChat,
   REASONING_MAX_TOKENS, SUB_TIERS, SMART_COOLDOWN_MS};

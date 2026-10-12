@@ -7,7 +7,7 @@
 #   sudo /opt/appinventor/set-ai.sh --search   # asks for the Brave Search key (optional web search)
 #   sudo /opt/appinventor/set-ai.sh --provider opencode     # uses OpenCode Go (opencode.ai) and asks for its key;
 #   sudo /opt/appinventor/set-ai.sh --provider openrouter   # back to OpenRouter (the default)
-#   sudo /opt/appinventor/set-ai.sh --model smart anthropic/claude-haiku-5.5   # the model of one preset
+#   sudo /opt/appinventor/set-ai.sh --model smart anthropic/claude-haiku-5.5   # the model of one preset, of the service in use
 #   sudo /opt/appinventor/set-ai.sh --model smart --reset                      # back to the built-in model
 #   sudo /opt/appinventor/set-ai.sh --status   # shows what is set
 #   sudo /opt/appinventor/set-ai.sh --off      # turns the helper off, and removes the key, the PIN and the search key
@@ -103,7 +103,7 @@ case "${1:-}" in
     # The helper's three presets give the models. An override in ai.env replaces the model of one preset; an empty
     # one is ignored, as the hub ignores it.
     overrides=""
-    for name in AI_MODEL_SMART AI_MODEL_BALANCED AI_MODEL_FAST; do
+    for name in AI_MODEL_SMART AI_MODEL_BALANCED AI_MODEL_FAST AI_OPENCODE_MODEL_SMART AI_OPENCODE_MODEL_BALANCED AI_OPENCODE_MODEL_FAST; do
       value="$(get_setting "$name")"
       if [ -n "$value" ]; then overrides="${overrides:+$overrides, }$name=$value"; fi
     done
@@ -144,13 +144,13 @@ case "${1:-}" in
     echo "Web search is on. The helper can now search the web when it needs to."
     exit 0 ;;
   --provider)
-    # Switches the service. The model overrides are removed, since they name models of the old one. The key of the new
-    # service is asked for below, as the default does.
+    # Switches the service in use, the one the default key and --model apply to. The model overrides of each service stay.
+    # The key of the new service is asked for below, as the default does.
     case "${2:-}" in
       openrouter|opencode) ;;
       *) echo "Use: set-ai.sh --provider openrouter|opencode" >&2; exit 1 ;;
     esac
-    rewrite_env '^(AI_PROVIDER|AI_MODEL_SMART|AI_MODEL_BALANCED|AI_MODEL_FAST)=' "AI_PROVIDER=$2"
+    rewrite_env '^AI_PROVIDER=' "AI_PROVIDER=$2"
     echo "The service is now $(provider_label "$2")."
     ;;
   --model)
@@ -160,7 +160,9 @@ case "${1:-}" in
       SMART|BALANCED|FAST) ;;
       *) echo "Use: set-ai.sh --model smart|balanced|fast <model name>, or --reset" >&2; exit 1 ;;
     esac
-    var="AI_MODEL_$preset"
+    prefix=AI_MODEL_
+    if [ "$(provider_of)" = opencode ]; then prefix=AI_OPENCODE_MODEL_; fi
+    var="$prefix$preset"
     if [ -z "${3:-}" ] || [ "${3:-}" = "--reset" ]; then
       rewrite_env "^$var="
       what="the built-in model again"

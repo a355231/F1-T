@@ -836,6 +836,11 @@
     {id: 'parallel', label: 'Parallel', agents: 2},
     {id: 'ultracode', label: 'Ultracode', agents: 3},
   ];
+  var pickProvider = $('pickProvider');
+  var providerList = [];       // the services the server has a key for: {id, name}
+  var presetsByProvider = {};  // each service's presets, as the server lists them
+  var subsByProvider = {};     // each service's subagents
+  var provider = 'openrouter';
   var pickModel = $('pickModel');
   var pickMode = $('pickMode');
   var pickReasoning = $('pickReasoning');
@@ -846,6 +851,7 @@
     model: keptChoice('aihelper.model', PRESET_IDS),
     mode: keptChoice('aihelper.mode', MODE_IDS),
     reasoning: keptChoice('aihelper.reasoning', REASONS),
+    provider: keptChoice('aihelper.provider', ['openrouter', 'opencode']),
   };
   var preset = 'balanced';
   var runMode = 'normal';
@@ -926,6 +932,10 @@
   }
 
   function syncPickers() {
+    fillPicker(pickProvider, providerList.map(function (p) { return {value: p.id, text: p.name}; }));
+    pickProvider.value = provider;
+    pickProvider.hidden = providerList.length < 2;
+    if (pickProvider.parentNode) pickProvider.parentNode.hidden = providerList.length < 2;
     fillPicker(pickModel, presetList.map(function (p) { return {value: p.id, text: presetText(p.id)}; }));
     fillPicker(pickMode, modeList.map(function (m) { return {value: m.id, text: modeText(m.id)}; }));
     fillPicker(pickReasoning, REASONS.map(function (r) { return {value: r, text: REASON_TEXT[r]}; }));
@@ -950,11 +960,30 @@
     kept.model = id;
     store('aihelper.model', id);
     var clamped = !reasonAllowed(reasoning);
-    if (clamped) setReasoning('high');
+    if (clamped) setReasoning(fallbackReasoning());
     else syncPickers();
     updateVision();
     loadVision();
     return clamped;
+  }
+
+  // The reasoning used when the one in use is not offered for the model: High when it is offered, Default otherwise.
+  function fallbackReasoning() {
+    return reasonAllowed('high') ? 'high' : 'default';
+  }
+
+  // Changes the service the answers come from. Its models are the ones listed for it, and the reasoning is set again
+  // when the service does not offer the one in use.
+  function setProvider(id) {
+    provider = id;
+    kept.provider = id;
+    store('aihelper.provider', id);
+    presetList = presetsByProvider[id] || presetList;
+    if (!presetOf(preset)) preset = 'balanced';
+    if (!reasonAllowed(reasoning)) setReasoning(fallbackReasoning());
+    else syncPickers();
+    updateVision();
+    loadVision();
   }
 
   function setRunMode(id) {
@@ -974,7 +1003,7 @@
     preset = chosen(kept.model, presetList.map(idOf), serverDefaults.model, 'balanced');
     runMode = chosen(kept.mode, modeList.map(idOf), serverDefaults.mode, 'normal');
     reasoning = chosen(kept.reasoning, REASONS, serverDefaults.reasoning, 'default');
-    if (!reasonAllowed(reasoning)) setReasoning('high');
+    if (!reasonAllowed(reasoning)) setReasoning(fallbackReasoning());
     else syncPickers();
   }
 
@@ -982,6 +1011,7 @@
     if (setPreset(pickModel.value)) flash('Max reasoning is only for the Smart model, so high is used.');
   };
   pickMode.onchange = function () { setRunMode(pickMode.value); };
+  pickProvider.onchange = function () { setProvider(pickProvider.value); };
   pickReasoning.onchange = function () {
     if (reasonAllowed(pickReasoning.value)) setReasoning(pickReasoning.value);
     else syncPickers();
@@ -991,24 +1021,30 @@
   // asked about (each preset has its own model), so the answers are kept by preset.
   var visionByPreset = {};
   function updateVision() {
-    visionOn = visionByPreset[preset] === true;
+    visionOn = visionByPreset[visionKey(provider, preset)] === true;
     attach.hidden = !visionOn;
   }
 
   // The status route for a preset: its picture answer is for that preset's model.
-  function statusUrl(asked) {
-    return '/collab/ai/status?projectId=' + encodeURIComponent(projectId) + '&preset=' + encodeURIComponent(asked);
+  function statusUrl(asked, askedProvider) {
+    return '/collab/ai/status?projectId=' + encodeURIComponent(projectId) + '&preset=' + encodeURIComponent(asked) +
+      '&provider=' + encodeURIComponent(askedProvider);
+  }
+
+  // A model's picture answer is kept by service and preset, since each service has its own models.
+  function visionKey(service, id) {
+    return service + '|' + id;
   }
 
   // Asks the server about the preset in use. It is asked again each time the person changes the model.
   function loadVision() {
     if (!projectId) return;
-    var asked = preset;
-    fetch(statusUrl(asked), {credentials: 'same-origin'})
+    var asked = preset, askedProvider = provider;
+    fetch(statusUrl(asked, askedProvider), {credentials: 'same-origin'})
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
         if (!s) return;
-        visionByPreset[asked] = !!s.vision;
+        visionByPreset[visionKey(askedProvider, asked)] = !!s.vision;
         updateVision();
       })
       .catch(function () {
@@ -1030,18 +1066,33 @@
   }
 
   function applyPresets(d) {
-    var before = preset;
-    presetList = d.presets.filter(hasId);
+    var before = provider + '|' + preset;
+    if (!Array.isArray(d.providers)) {   // an older server: one service, its presets at the top
+      d.providers = [{id: 'openrouter', name: 'OpenRouter', configured: true, presets: d.presets, subagents: d.subagents}];
+      d.defaultProvider = 'openrouter';
+    }
+    providerList = d.providers.filter(function (p) { return hasId(p) && p.configured; })
+      .map(function (p) { return {id: p.id, name: p.name}; });
+    presetsByProvider = {};
+    subsByProvider = {};
+    d.providers.forEach(function (p) {
+      if (!hasId(p)) return;
+      presetsByProvider[p.id] = (Array.isArray(p.presets) ? p.presets : []).filter(hasId);
+      subsByProvider[p.id] = p.subagents;
+    });
+    provider = chosen(kept.provider, providerList.map(idOf), d.defaultProvider,
+      providerList.length ? providerList[0].id : 'openrouter');
+    presetList = presetsByProvider[provider] || presetList;
     if (Array.isArray(d.runModes) && d.runModes.filter(hasId).length) modeList = d.runModes.filter(hasId);
     serverDefaults = {model: d.defaultPreset, mode: d.defaultRunMode, reasoning: d.defaultReasoning};
-    var sm = d.subagents && d.subagents.smart;
+    var sm = subsByProvider[provider] && subsByProvider[provider].smart;
     if (sm) {
       smartReadyAt = Date.now() + Math.max(0, Number(sm.readyInSeconds) || 0) * 1000;
       smartLine.title = 'A smart subagent runs once every ' + (Number(sm.cooldownMinutes) || 45) +
         ' minutes, for the whole team server.';
     }
     refreshChoices();
-    if (preset !== before) loadVision();   // the server's default changed the model in use
+    if (provider + '|' + preset !== before) loadVision();   // the server's default changed the service or the model
     updateVision();
     showSmart();
   }
@@ -1227,7 +1278,7 @@
     autosize();
     var api = newAssistant();
     if (isGoal) startGoal(text.replace(/^\/goal\s*/i, ''));
-    var body = {projectId: projectId, effort: effort, preset: preset, runMode: runMode, reasoning: reasoning,
+    var body = {projectId: projectId, effort: effort, preset: preset, runMode: runMode, reasoning: reasoning, provider: provider,
       messages: isOverride ? [{role: 'user', content: text}] : history.slice(-20)};
     if (images.length) body.images = images.map(function (p) { return {name: p.name, mime: p.mime, data: p.data}; });
     runStream(api, body, {goal: isGoal, override: isOverride, row: row});
@@ -1530,8 +1581,8 @@
       $('sub').textContent = 'Open a project in App Inventor first';
       return;
     }
-    var asked = preset;
-    fetch(statusUrl(asked), {credentials: 'same-origin'})
+    var asked = preset, askedProvider = provider;
+    fetch(statusUrl(asked, askedProvider), {credentials: 'same-origin'})
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
         if (!s) {
@@ -1539,7 +1590,7 @@
           return;
         }
         fullUntil = s.fullUntil || 0;
-        visionByPreset[asked] = !!s.vision;
+        visionByPreset[visionKey(askedProvider, asked)] = !!s.vision;
         updateVision();
         showMode();
         $('sub').textContent = 'Signed in as ' + s.name + (s.search ? ' · web search on' : '');
@@ -1565,6 +1616,6 @@
   // for the tests
   window.__aiHelper = {
     send: send,
-    choices: function () { return {preset: preset, runMode: runMode, reasoning: reasoning}; },
+    choices: function () { return {provider: provider, preset: preset, runMode: runMode, reasoning: reasoning}; },
   };
 })();

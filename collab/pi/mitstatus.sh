@@ -23,7 +23,9 @@ setting() {
 # has no preset table (a hub from before it).
 presets() {
   AI_MODEL_SMART="$(setting AI_MODEL_SMART)" AI_MODEL_BALANCED="$(setting AI_MODEL_BALANCED)" \
-  AI_MODEL_FAST="$(setting AI_MODEL_FAST)" AI_PROVIDER="$(setting AI_PROVIDER)" node -e '
+  AI_MODEL_FAST="$(setting AI_MODEL_FAST)" AI_PROVIDER="$(setting AI_PROVIDER)" \
+  AI_OPENCODE_MODEL_SMART="$(setting AI_OPENCODE_MODEL_SMART)" AI_OPENCODE_MODEL_BALANCED="$(setting AI_OPENCODE_MODEL_BALANCED)" \
+  AI_OPENCODE_MODEL_FAST="$(setting AI_OPENCODE_MODEL_FAST)" node -e '
     const {PRESETS, nameOf} = require(process.argv[1]);
     for (const id of ["smart", "balanced", "fast"]) {
       const p = PRESETS[id], over = process.env[p.env];
