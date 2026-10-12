@@ -18,30 +18,40 @@ setting() {
   { grep "^$1=" "$BASE/ai.env" 2>/dev/null || true; } | tail -n 1 | cut -d= -f2-
 }
 
-# The three presets as the hub folder given ($1) has them, with the overrides from ai.env applied the way the hub applies
-# them. One line per preset: id, label, name, model, and where the model comes from. Nothing is printed when that folder
-# has no preset table (a hub from before it).
+# The service in use, as the hub reads AI_PROVIDER: openrouter (the default) or opencode (OpenCode Go).
+in_use_service() {
+  [ "$(setting AI_PROVIDER)" = opencode ] && echo opencode || echo openrouter
+}
+
+# The name of a service as the person sees it, and whether its key is set (the key itself is never shown).
+service_label() { [ "$1" = opencode ] && echo "OpenCode Go" || echo "OpenRouter"; }
+key_state() { [ -n "$(setting "$1")" ] && echo set || echo "not set"; }
+
+# The three presets of one service ($2: openrouter or opencode) as the hub folder given ($1) has them, with the overrides
+# from ai.env applied the way the hub applies them. One line per preset: id, label, name, model, and where the model comes
+# from. Nothing is printed when that folder has no preset table for the service (a hub from before it).
 presets() {
   AI_MODEL_SMART="$(setting AI_MODEL_SMART)" AI_MODEL_BALANCED="$(setting AI_MODEL_BALANCED)" \
   AI_MODEL_FAST="$(setting AI_MODEL_FAST)" AI_PROVIDER="$(setting AI_PROVIDER)" \
   AI_OPENCODE_MODEL_SMART="$(setting AI_OPENCODE_MODEL_SMART)" AI_OPENCODE_MODEL_BALANCED="$(setting AI_OPENCODE_MODEL_BALANCED)" \
   AI_OPENCODE_MODEL_FAST="$(setting AI_OPENCODE_MODEL_FAST)" node -e '
-    const {PRESETS, nameOf} = require(process.argv[1]);
+    const {PROVIDERS, nameOf} = require(process.argv[1]);
+    const service = PROVIDERS[process.argv[2]];
     for (const id of ["smart", "balanced", "fast"]) {
-      const p = PRESETS[id], over = process.env[p.env];
-      console.log([id, p.label, nameOf(id), over || p.model, over ? "set in ai.env" : "built in"].join("\t"));
-    }' "$1/ai.js" 2>/dev/null
+      const p = service.presets[id], over = process.env[p.env];
+      console.log([id, p.label, nameOf(id, service), over || p.model, over ? "set in ai.env" : "built in"].join("\t"));
+    }' "$1/ai.js" "$2" 2>/dev/null
 }
 
-# The model list. The hub that runs is read first. A Pi whose hub was installed before the preset table has none, so the
-# copy in the project folder ($BASE/repo) is read instead. show_status says so, because those models take effect only
-# once the hub is updated.
+# The model list of one service. The hub that runs is read first. A Pi whose hub was installed before the preset table has
+# none, so the copy in the project folder ($BASE/repo) is read instead. show_status says so, because those models take
+# effect only once the hub is updated.
 model_rows() {
-  local rows repo
-  rows="$(presets "$HUB")"
+  local service=$1 rows repo
+  rows="$(presets "$HUB" "$service")"
   if [ -z "$rows" ]; then
     repo="$(cat "$BASE/repo" 2>/dev/null || true)"
-    [ -n "$repo" ] && rows="$(presets "$repo/collab/server")"
+    [ -n "$repo" ] && rows="$(presets "$repo/collab/server" "$service")"
   fi
   echo "$rows"
 }
@@ -99,29 +109,31 @@ link_lines() {
 }
 
 show_status() {
-  local code pin rows id label name model source
+  local code pin rows id label name model source service
   code="$(cat "$BASE/teamcode" 2>/dev/null || true)"
   code="${code//[$'\r\n']/}"
   if [ -s "$BASE/overridepin" ]; then pin="$(head -n 1 "$BASE/overridepin")"; else pin="$(setting AI_OVERRIDE_PIN)"; fi
+  service="$(in_use_service)"
   echo
   echo "  App Inventor Team Edition"
   echo "  -------------------------"
   link_lines
   echo "  Access code:        ${code:-not set}"
   echo "  Override code:      ${pin:-not set}"
-  case "$(setting AI_PROVIDER)" in
-    opencode) echo "  AI provider:        OpenCode Go" ;;
+  case "$service" in
+    opencode) echo "  AI provider:        OpenCode Go (in the companion its models need /beta; OpenRouter is used until then)" ;;
     *) echo "  AI provider:        OpenRouter" ;;
   esac
-  rows="$(model_rows)"
+  echo "  AI keys:            OpenRouter $(key_state OPENROUTER_API_KEY), OpenCode Go $(key_state OPENCODE_API_KEY)"
+  rows="$(model_rows "$service")"
   if [ -z "$rows" ]; then
-    echo "  AI models:          not found (the hub and the project folder have no model list)"
+    echo "  AI models:          not found (the hub and the project folder have no $(service_label "$service") model list)"
   else
-    echo "  AI models:"
+    echo "  AI models ($(service_label "$service")):"
     while IFS=$'\t' read -r id label name model source; do
       printf '    %-9s %-18s %-38s (%s)\n' "$label" "$name" "$model" "$source"
     done <<< "$rows"
-    if [ -z "$(presets "$HUB")" ]; then
+    if [ -z "$(presets "$HUB" "$service")" ]; then
       echo "    The hub that is running is older and does not use these yet. They take effect when it is updated."
     fi
   fi
@@ -132,17 +144,23 @@ pause() {
   read -r -p "  Press Enter to go back to the menu. " _ || true
 }
 
-# 1. The model of one preset: a model name from OpenRouter, or 'default' to put the built-in one back.
+# One line of the menu. The numbers are right-aligned, so 10 lines up with the others.
+option() {
+  printf '%3s. %s\n' "$1" "$2"
+}
+
+# 1 and 8. The model of one preset of one service: the service in use (1), or OpenCode Go (8), whichever is in use. $1 is
+# the service. 'default' puts the built-in model back. set-ai.sh writes it to ai.env and restarts the hub.
 change_models() {
-  local rows choice id label name model model_name
-  rows="$(model_rows)"
+  local service=$1 rows choice id label name model model_name hint
+  rows="$(model_rows "$service")"
   if [ -z "$rows" ]; then
-    echo "  Neither the hub nor the project folder has a model list, so there is nothing to choose from."
+    echo "  The hub and the project folder have no $(service_label "$service") model list, so there is nothing to choose from."
     echo "  Run the update first: sudo $BASE/update.sh --now"
     return
   fi
   echo
-  echo "  Which model should change?"
+  echo "  Which $(service_label "$service") model should change?"
   local n=0
   while IFS=$'\t' read -r id label name model source; do
     n=$((n + 1))
@@ -157,14 +175,19 @@ change_models() {
     *) return ;;
   esac
   model_name="$(awk -F'\t' -v id="$id" '$1 == id {print $3}' <<< "$rows")"
-  echo "  Type a model name from https://openrouter.ai/models (for example anthropic/claude-haiku-5.5),"
+  if [ "$service" = opencode ]; then
+    hint="Type the model name as OpenCode Go lists it (for example deepseek-v4.1-flash),"
+  else
+    hint="Type a model name from https://openrouter.ai/models (for example anthropic/claude-haiku-5.5),"
+  fi
+  echo "  $hint"
   echo "  or 'default' to use the built-in model again ($model_name). Enter alone cancels."
   read -r -p "  Model: " model || return
   [ -n "$model" ] || return
   if [ "$model" = default ]; then
-    "$BASE/set-ai.sh" --model "$id" --reset
+    "$BASE/set-ai.sh" --model "$id" --service "$service" --reset
   else
-    "$BASE/set-ai.sh" --model "$id" "$model"
+    "$BASE/set-ai.sh" --model "$id" --service "$service" "$model"
   fi
 }
 
@@ -249,32 +272,37 @@ update_app() {
 }
 
 main_menu() {
-  local choice
+  local choice service
   while true; do
     show_status
-    echo "  1. Change AI models"
-    echo "  2. New link"
-    echo "  3. Restart"
-    echo "  4. Change access code"
-    echo "  5. Change override code"
-    echo "  6. Update"
-    echo "  7. Change API key"
-    echo "  8. Exit"
+    service="$(in_use_service)"
+    option 1 "Change AI models ($(service_label "$service"))"
+    option 2 "New link"
+    option 3 "Restart"
+    option 4 "Change access code"
+    option 5 "Change override code"
+    option 6 "Update"
+    option 7 "Change API key ($(service_label "$service"))"
+    option 8 "Change OpenCode Go models"
+    option 9 "Change OpenCode Go API key"
+    option 10 "Exit"
     echo
-    if ! read -r -p "  Choose 1-8: " choice; then
+    if ! read -r -p "  Choose 1-10: " choice; then
       echo
       exit 0
     fi
     case "$choice" in
-      1) change_models; pause ;;
+      1) change_models "$service"; pause ;;
       2) new_link; pause ;;
       3) restart_app; pause ;;
       4) "$BASE/set-team-code.sh"; pause ;;
       5) "$BASE/set-ai.sh" --pin; pause ;;
       6) update_app; pause ;;
       7) "$BASE/set-ai.sh"; pause ;;
-      8|q|Q) exit 0 ;;
-      *) echo "  Type a number from 1 to 8." ;;
+      8) change_models opencode; pause ;;
+      9) "$BASE/set-ai.sh" --key opencode; pause ;;
+      10|q|Q) exit 0 ;;
+      *) echo "  Type a number from 1 to 10." ;;
     esac
   done
 }

@@ -100,14 +100,18 @@ To see the link and the team code again at any time, and check that everything i
 /opt/appinventor/show-info.sh
 ```
 
-**`MITSTATUS`** does the same and then offers the common jobs in one menu: change the AI models (each preset, or back
-to the built-in one), get a new Cloudflare link (the old address stops working), restart App Inventor and the hub (the
-link stays), change the access code, change the override code, update the app (it checks GitHub and asks before the update starts; the update keeps running if
-the window is closed), change the OpenRouter API key (the same prompt as `set-ai.sh`), or exit. It is `/usr/local/bin/MITSTATUS`, installed by
-the install and the update from `collab/pi/mitstatus.sh`. Its model list is read from the hub's own preset table, so it
-shows the models the hub is running with. On a Pi whose hub is older than that table, it reads the project folder's copy
-and says the models take effect once the hub is updated. `set-ai.sh --model smart|balanced|fast <name>` (or `--reset`) is what
-it uses for the models, and `collab/pi/test/mitstatus-test.sh` tests it, in a folder of its own.
+**`MITSTATUS`** does the same and then offers the common jobs in one menu: change the AI models of the service in use
+(each preset, or back to the built-in one), get a new Cloudflare link (the old address stops working), restart App
+Inventor and the hub (the link stays), change the access code, change the override code, update the app (it checks GitHub
+and asks before the update starts; the update keeps running if the window is closed), change the API key of the service
+in use (the same prompt as `set-ai.sh`), change the **OpenCode Go** models, change the **OpenCode Go** API key, or exit.
+The OpenCode Go options work whichever service is in use. The status shows the service in use, whether each service's key
+is set (never the keys), and, for OpenCode Go, that its models are offered in the companion only after `/beta`. It is
+`/usr/local/bin/MITSTATUS`, installed by the install and the update from `collab/pi/mitstatus.sh`. Its model lists are read
+from the hub's own preset tables, so it shows the models the hub is running with. On a Pi whose hub is older than those
+tables, it reads the project folder's copy and says the models take effect once the hub is updated.
+`set-ai.sh --model smart|balanced|fast [<name> | --reset] [--service openrouter|opencode]` is what it uses for the models,
+and `set-ai.sh --key openrouter|opencode` for the keys. `collab/pi/test/mitstatus-test.sh` tests them, in a folder of its own.
 
 ### Permanent address
 
@@ -529,6 +533,9 @@ names, not whether the blocks do what you intended; App Inventor still reports b
 
 Set it up on the Pi:
 * `sudo /opt/appinventor/set-ai.sh` asks for the key of the service in use (OpenRouter, unless you switch).
+* `sudo /opt/appinventor/set-ai.sh --key opencode` asks for the **OpenCode Go** key only, whichever service is in use,
+  and `--key openrouter` for the OpenRouter key. `sudo /opt/appinventor/set-ai.sh --model smart kimi-k2.6 --service opencode`
+  sets one OpenCode Go model without changing the service in use. MITSTATUS does the same with its options 8 and 9.
 * `sudo /opt/appinventor/set-ai.sh --provider opencode` makes **OpenCode Go** (opencode.ai) the default service, and asks
   for its key. Its models are still offered only after `/beta` (see above), so until someone types it the companion uses
   OpenRouter. In the companion, the **Service** list picks either service for each question, and only the services that

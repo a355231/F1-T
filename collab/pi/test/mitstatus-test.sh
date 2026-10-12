@@ -46,16 +46,16 @@ check "status shows the Fast override from ai.env" "printf '%s' \"\$out\" | grep
 
 # 2. Without a model list anywhere (no preset table in the hub, no project folder), the status still works and says so
 out2="$(MIT_HUB="$T/no-hub" bash "$MS" --show 2>&1)"
-check "status without a model list says so" "printf '%s' \"\$out2\" | grep -q 'have no model list'"
+check "status without a model list says so" "printf '%s' \"\$out2\" | grep -q 'have no OpenRouter model list'"
 
 # 3. The menu lists the six options; a wrong choice is refused; 6 exits
-out3="$(printf 'x\n8\n' | bash "$MS" 2>&1)"; rc3=$?
-check "menu lists the options" "printf '%s' \"\$out3\" | grep -q '1. Change AI models' && printf '%s' \"\$out3\" | grep -q '6. Update' && printf '%s' \"\$out3\" | grep -q '7. Change API key' && printf '%s' \"\$out3\" | grep -q '8. Exit'"
-check "a wrong choice is refused" "printf '%s' \"\$out3\" | grep -q 'Type a number from 1 to 8.'"
-check "8 exits with 0" "[ \$rc3 -eq 0 ]"
+out3="$(printf 'x\n10\n' | bash "$MS" 2>&1)"; rc3=$?
+check "menu lists the options" "printf '%s' \"\$out3\" | grep -q '1. Change AI models' && printf '%s' \"\$out3\" | grep -q '6. Update' && printf '%s' \"\$out3\" | grep -q '7. Change API key' && printf '%s' \"\$out3\" | grep -q '10. Exit'"
+check "a wrong choice is refused" "printf '%s' \"\$out3\" | grep -q 'Type a number from 1 to 10.'"
+check "10 exits with 0" "[ \$rc3 -eq 0 ]"
 
 # 4. Change AI models: Balanced to a new name
-printf '1\n2\nanthropic/claude-haiku-5.5\n\n8\n' | bash "$MS" > "$T/out4" 2>&1
+printf '1\n2\nanthropic/claude-haiku-5.5\n\n10\n' | bash "$MS" > "$T/out4" 2>&1
 check "Balanced is set in ai.env" "grep -q '^AI_MODEL_BALANCED=anthropic/claude-haiku-5.5$' '$T/base/ai.env'"
 check "the other override is kept" "grep -q '^AI_MODEL_FAST=mistralai/example-model$' '$T/base/ai.env'"
 check "the key is kept" "grep -q '^OPENROUTER_API_KEY=sk-test-123$' '$T/base/ai.env'"
@@ -63,16 +63,16 @@ check "ai.env stays mode 600" "[ \"\$(stat -c %a '$T/base/ai.env')\" = 600 ]"
 check "the hub restarts after a model change" "grep -q 'restart collab-hub' '$T/systemctl.log'"
 
 # 5. Change AI models: back to the built-in model
-printf '1\n3\ndefault\n\n8\n' | bash "$MS" > "$T/out5" 2>&1
+printf '1\n3\ndefault\n\n10\n' | bash "$MS" > "$T/out5" 2>&1
 check "default removes the Fast override" "! grep -q '^AI_MODEL_FAST=' '$T/base/ai.env'"
 
 # 6. New link: the quick tunnel restarts and the new address is shown
-printf '2\n\n8\n' | bash "$MS" > "$T/out6" 2>&1
+printf '2\n\n10\n' | bash "$MS" > "$T/out6" 2>&1
 check "new link restarts the quick tunnel" "grep -q 'restart cloudflared-quick' '$T/systemctl.log'"
 check "new link shows the new address" "grep -q 'New link: https://gen2.trycloudflare.com' '$T/out6'"
 
 # 7. Restart: App Inventor and the hub, not the tunnel
-printf '3\n\n8\n' | bash "$MS" > "$T/out7" 2>&1
+printf '3\n\n10\n' | bash "$MS" > "$T/out7" 2>&1
 check "restart restarts App Inventor and the hub" "grep -q 'restart appinventor collab-hub' '$T/systemctl.log'"
 check "restart does not restart the tunnel again" "[ \"\$(grep -c 'restart cloudflared-quick' '$T/systemctl.log')\" = 1 ]"
 check "restart reports App Inventor running" "grep -q 'App Inventor is running again' '$T/out7'"
@@ -80,10 +80,10 @@ check "restart reports App Inventor running" "grep -q 'App Inventor is running a
 # 8. Access code and override code run their own scripts (stand-ins here)
 printf '#!/usr/bin/env bash\necho "set-team-code called"\n' > "$T/base/set-team-code.sh"
 chmod +x "$T/base/set-team-code.sh"
-printf '4\n\n8\n' | bash "$MS" > "$T/out8" 2>&1
+printf '4\n\n10\n' | bash "$MS" > "$T/out8" 2>&1
 check "change access code runs set-team-code.sh" "grep -q 'set-team-code called' '$T/out8'"
 cp "$HERE/set-ai.sh" "$T/base/set-ai.sh"
-printf '5\n\n8\n' | bash "$MS" > "$T/out8b" 2>&1
+printf '5\n\n10\n' | bash "$MS" > "$T/out8b" 2>&1
 check "change override code runs set-ai.sh --pin" "grep -q 'Full-app PIN' '$T/out8b' || grep -q 'Full-app PIN saved' '$T/out8b' || grep -q 'The PIN must be' '$T/out8b'"
 
 # 9. set-ai.sh --model: rules and results
@@ -145,22 +145,22 @@ fi
 exit 0
 EOF
 chmod +x "$T/base/update.sh"
-printf '6\n\n8\n' | bash "$MS" > "$T/out13a" 2>&1
+printf '6\n\n10\n' | bash "$MS" > "$T/out13a" 2>&1
 check "an up-to-date app says so" "grep -q 'Up to date (test)' '$T/out13a'"
 check "an up-to-date app asks nothing" "! grep -q 'Update to' '$T/out13a'"
 touch "$T/base/newer"
-printf '6\nn\n\n8\n' | bash "$MS" > "$T/out13b" 2>&1
+printf '6\nn\n\n10\n' | bash "$MS" > "$T/out13b" 2>&1
 check "a newer version is offered by name" "grep -q 'Update to abc1234 Test change?' '$T/out13b'"
 check "declining starts nothing" "grep -q 'Not updated.' '$T/out13b' && [ ! -e '$T/systemd-run.log' ]"
-printf '6\ny\n\n8\n' | bash "$MS" > "$T/out13c" 2>&1
+printf '6\ny\n\n10\n' | bash "$MS" > "$T/out13c" 2>&1
 check "accepting starts update.sh --now as a unit of its own" "grep -q -- '--unit=collab-update-now' '$T/systemd-run.log' && grep -q 'update.sh --now' '$T/systemd-run.log'"
 check "accepting says the update runs in the background" "grep -q 'running in the background' '$T/out13c'"
 exec 8>"$T/update.lock"; flock -x 8
-printf '6\n\n8\n' | bash "$MS" > "$T/out13d" 2>&1
+printf '6\n\n10\n' | bash "$MS" > "$T/out13d" 2>&1
 exec 8>&-
 check "an update already running is reported, not started again" "grep -q 'An update is already running' '$T/out13d' && [ \"\$(grep -c -- '--unit=collab-update-now' '$T/systemd-run.log')\" = 1 ]"
 touch "$T/base/check-fails"
-printf '6\n\n8\n' | bash "$MS" > "$T/out13e" 2>&1
+printf '6\n\n10\n' | bash "$MS" > "$T/out13e" 2>&1
 check "a failed check says so" "grep -q 'Could not check' '$T/out13e'"
 rm -f "$T/base/newer" "$T/base/check-fails"
 
@@ -174,8 +174,8 @@ check "an older hub still shows the models, from the project folder" "printf '%s
 check "an older hub says the models take effect once it is updated" "printf '%s' \"\$out14\" | grep -q 'is older and does not use these yet'"
 out15="$(MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1)"
 check "a current hub gets no older note" "! printf '%s' \"\$out15\" | grep -q 'is older'"
-printf '1\n\n\n8\n' | MIT_HUB="$T/old-hub" bash "$MS" > "$T/out16" 2>&1
-check "Change AI models works from the project folder's list" "grep -q 'Which model should change' '$T/out16' && grep -q 'Smart' '$T/out16'"
+printf '1\n\n\n10\n' | MIT_HUB="$T/old-hub" bash "$MS" > "$T/out16" 2>&1
+check "Change AI models works from the project folder's list" "grep -q 'Which OpenRouter model should change' '$T/out16' && grep -q 'Smart' '$T/out16'"
 rm -f "$T/base/repo"
 
 # 15. A dashboard tunnel keeps its hostname in the dashboard, so the install command writes it to $BASE/cloudflare-hostname
@@ -186,7 +186,7 @@ check "a dashboard tunnel's hostname is shown as the permanent link" "printf '%s
 rm -f "$T/cf-active" "$T/base/cloudflare-hostname"
 
 # 16. Change API key (option 7) runs set-ai.sh, which asks for the key, saves it, and restarts the hub
-out16b="$(printf '7\nsk-new-test-key-123\n\n8\n' | MIT_HUB="$REPO/collab/server" bash "$MS" 2>&1)"
+out16b="$(printf '7\nsk-new-test-key-123\n\n10\n' | MIT_HUB="$REPO/collab/server" bash "$MS" 2>&1)"
 check "option 7 runs the key setup and says the helper is on" "printf '%s' \"\$out16b\" | grep -q 'The AI helper is on'"
 check "the new key is saved in ai.env" "grep -q '^OPENROUTER_API_KEY=sk-new-test-key-123$' '$T/base/ai.env'"
 check "the key is saved once, and the other settings are kept" "[ \"\$(grep -c '^OPENROUTER_API_KEY=' '$T/base/ai.env')\" = 1 ] && grep -q '^AI_DAILY_LIMIT=' '$T/base/ai.env'"
@@ -212,6 +212,69 @@ check "--model takes a model name without a slash, for the service in use" "bash
 bash "$T/base/set-ai.sh" --model fast --reset >/dev/null 2>&1
 printf 'sk-new-test-key-123\n' | bash "$T/base/set-ai.sh" --provider openrouter > "$T/out18c" 2>&1
 check "--provider openrouter goes back" "grep -qx 'AI_PROVIDER=openrouter' '$T/base/ai.env'"
+
+# 19. OpenCode Go in MITSTATUS, whichever service is in use: its own key (option 9) and its own models (option 8). With
+# OpenRouter in use here, the OpenCode Go options must not change the service in use, nor the OpenRouter settings.
+out19="$(printf '9\nsk-opencode-new-789\n\n10\n' | bash "$MS" 2>&1)"
+check "option 9 asks for the OpenCode Go key and says it is saved" "printf '%s' \"\$out19\" | grep -q 'OpenCode Go key is saved'"
+check "option 9 saves the new OpenCode Go key, once" "grep -qx 'OPENCODE_API_KEY=sk-opencode-new-789' '$T/base/ai.env' && [ \"\$(grep -c '^OPENCODE_API_KEY=' '$T/base/ai.env')\" = 1 ]"
+check "option 9 keeps the OpenRouter key and the service in use" "grep -qx 'OPENROUTER_API_KEY=sk-new-test-key-123' '$T/base/ai.env' && grep -qx 'AI_PROVIDER=openrouter' '$T/base/ai.env'"
+check "option 9 says the OpenCode Go models wait for /beta" "printf '%s' \"\$out19\" | grep -q 'only after someone types /beta'"
+
+out19b="$(printf '8\n1\nkimi-k2.6\n\n10\n' | bash "$MS" 2>&1)"
+check "option 8 lists the OpenCode Go models" "printf '%s' \"\$out19b\" | grep -q 'Which OpenCode Go model should change' && printf '%s' \"\$out19b\" | grep -q 'Muse Spark 1.3'"
+check "option 8 sets the OpenCode Go model of the preset" "grep -qx 'AI_OPENCODE_MODEL_SMART=kimi-k2.6' '$T/base/ai.env'"
+check "option 8 leaves the OpenRouter model of that preset alone" "! grep -q '^AI_MODEL_SMART=' '$T/base/ai.env'"
+printf '8\n1\ndefault\n\n10\n' | bash "$MS" > "$T/out19c" 2>&1
+check "option 8 with default puts the built-in OpenCode Go model back" "! grep -q '^AI_OPENCODE_MODEL_SMART=' '$T/base/ai.env'"
+
+printf '1\n1\nanthropic/claude-haiku-5.5\n\n10\n' | bash "$MS" > "$T/out19d" 2>&1
+check "option 1 changes the OpenRouter model while OpenRouter is in use" "grep -qx 'AI_MODEL_SMART=anthropic/claude-haiku-5.5' '$T/base/ai.env'"
+check "option 1 says which service its list is for" "grep -q 'Which OpenRouter model should change' '$T/out19d'"
+
+out19e="$(printf '10\n' | bash "$MS" 2>&1)"
+check "the menu names the service in use on options 1 and 7" "printf '%s' \"\$out19e\" | grep -q '1. Change AI models (OpenRouter)' && printf '%s' \"\$out19e\" | grep -q '7. Change API key (OpenRouter)'"
+check "the menu offers the OpenCode Go model and key options" "printf '%s' \"\$out19e\" | grep -q '8. Change OpenCode Go models' && printf '%s' \"\$out19e\" | grep -q '9. Change OpenCode Go API key'"
+check "the status shows whether each key is set, never the keys" "printf '%s' \"\$out19e\" | grep -q 'AI keys:            OpenRouter set, OpenCode Go set' && ! printf '%s' \"\$out19e\" | grep -q 'sk-'"
+
+bash "$T/base/set-ai.sh" --key gemini > /dev/null 2>&1; rc=$?
+check "--key takes openrouter or opencode only" "[ $rc -eq 1 ]"
+printf '\n' | bash "$T/base/set-ai.sh" --key opencode > /dev/null 2>&1; rc=$?
+check "an empty OpenCode Go key is refused, and the saved one stays" "[ $rc -eq 1 ] && grep -qx 'OPENCODE_API_KEY=sk-opencode-new-789' '$T/base/ai.env'"
+bash "$T/base/set-ai.sh" --model fast kimi-k2.6 --service nonsense > /dev/null 2>&1; rc=$?
+check "--service takes openrouter or opencode only" "[ $rc -eq 1 ]"
+bash "$T/base/set-ai.sh" --model fast kimi-k2.6 --service > /dev/null 2>&1; rc=$?
+check "--service needs a service name" "[ $rc -eq 1 ]"
+bash "$T/base/set-ai.sh" --model fast two names > /dev/null 2>&1; rc=$?
+check "--model takes one model name" "[ $rc -eq 1 ]"
+bash "$T/base/set-ai.sh" --model fast kimi-k2.6 --service opencode > /dev/null 2>&1
+check "--service opencode sets that service's model, while OpenRouter is in use" "grep -qx 'AI_OPENCODE_MODEL_FAST=kimi-k2.6' '$T/base/ai.env' && ! grep -q '^AI_MODEL_FAST=' '$T/base/ai.env'"
+bash "$T/base/set-ai.sh" --model fast --service opencode --reset > /dev/null 2>&1
+check "--service with --reset puts that service's model back" "! grep -q '^AI_OPENCODE_MODEL_FAST=' '$T/base/ai.env'"
+bash "$T/base/set-ai.sh" --status > "$T/out19s" 2>&1
+check "--status shows each key as set or not set, never a key" "grep -q 'Keys: OpenRouter key set, OpenCode Go key set' '$T/out19s' && ! grep -q 'sk-' '$T/out19s'"
+
+# With OpenCode Go in use: its key and models are the ones the status and option 1 show; option 8 still shows them too.
+printf 'sk-opencode-new-789\n' | bash "$T/base/set-ai.sh" --provider opencode > /dev/null 2>&1
+out19f="$(MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1)"
+check "with OpenCode Go in use, the status says its models need /beta" "printf '%s' \"\$out19f\" | grep -q 'OpenCode Go (in the companion its models need /beta'"
+check "with OpenCode Go in use, the status lists its models" "printf '%s' \"\$out19f\" | grep -q 'AI models (OpenCode Go):' && printf '%s' \"\$out19f\" | grep -q 'Balanced  *Step 5 Preview'"
+printf '1\n1\nglm-5.3\n\n10\n' | MIT_HUB="$REPO/collab/server" bash "$MS" > "$T/out19g" 2>&1
+check "with OpenCode Go in use, option 1 changes its model and is labelled so" "grep -qx 'AI_OPENCODE_MODEL_SMART=glm-5.3' '$T/base/ai.env' && grep -q '1. Change AI models (OpenCode Go)' '$T/out19g'"
+out19h="$(MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1)"
+check "a changed OpenCode Go model shows its own name" "printf '%s' \"\$out19h\" | grep -q 'Smart *GLM 5.3'"
+printf '8\n\n\n10\n' | MIT_HUB="$REPO/collab/server" bash "$MS" > "$T/out19i" 2>&1
+check "option 8 with OpenCode Go in use still lists its models" "grep -q 'Which OpenCode Go model should change' '$T/out19i'"
+
+# Back to OpenRouter in use, and the hub with no OpenCode Go list at all
+printf 'sk-new-test-key-123\n' | bash "$T/base/set-ai.sh" --provider openrouter > /dev/null 2>&1
+check "--provider openrouter brings OpenRouter back as the service in use" "grep -qx 'AI_PROVIDER=openrouter' '$T/base/ai.env'"
+out19j="$(printf '8\n\n10\n' | MIT_HUB="$T/no-hub" bash "$MS" 2>&1)"
+check "option 8 says so when there is no OpenCode Go list anywhere" "printf '%s' \"\$out19j\" | grep -q 'have no OpenCode Go model list'"
+printf '%s\n' "$REPO" > "$T/base/repo"
+printf '8\n\n\n10\n' | MIT_HUB="$T/old-hub" bash "$MS" > "$T/out19k" 2>&1
+check "an older hub gets the OpenCode Go list from the project folder" "grep -q 'Which OpenCode Go model should change' '$T/out19k'"
+rm -f "$T/base/repo"
 
 # 10. The changed scripts parse
 for f in "$HERE/mitstatus.sh" "$HERE/set-ai.sh" "$HERE/stable-link.sh" "$HERE/build-on-pi.sh" "$HERE/install.sh"; do
