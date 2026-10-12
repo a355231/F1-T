@@ -122,16 +122,17 @@ const OPENCODE_SUB_TIERS = {
 // The services the companion can use. OpenRouter is the default unless AI_PROVIDER names another, and a person can pick
 // either in the companion (the server only offers the ones that have a key). OpenCode Go (opencode.ai) has its own key,
 // an OpenAI-style chat completions endpoint, and a Responses endpoint for the models that need it. It has no model list,
-// so pictures follow its own setting and the built-in context sizes apply.
+// so pictures follow its own setting and the built-in context sizes apply. A beta service is open to a person only while
+// they have typed /beta and the PIN (see Assistant.beta).
 const PROVIDERS = {
   openrouter: {id: 'openrouter', name: 'OpenRouter', keyVar: 'OPENROUTER_API_KEY',
     url: process.env.OPENROUTER_URL || 'https://openrouter.ai/api/v1/chat/completions', modelList: true, vision: false,
-    reasoning: true, responseModels: [], presets: OPENROUTER_PRESETS, subTiers: OPENROUTER_SUB_TIERS},
+    reasoning: true, responseModels: [], presets: OPENROUTER_PRESETS, subTiers: OPENROUTER_SUB_TIERS, beta: false},
   opencode: {id: 'opencode', name: 'OpenCode Go', keyVar: 'OPENCODE_API_KEY',
     url: 'https://opencode.ai/zen/go/v1/chat/completions', responsesUrl: 'https://opencode.ai/zen/go/v1/responses',
     modelList: false, vision: true, reasoning: false,
     responseModels: ['muse-spark-1.3-contributor', 'muse-spark-1.2-contributor'],
-    presets: OPENCODE_PRESETS, subTiers: OPENCODE_SUB_TIERS},
+    presets: OPENCODE_PRESETS, subTiers: OPENCODE_SUB_TIERS, beta: true},
 };
 const DEFAULT_PROVIDER = Object.hasOwn(PROVIDERS, process.env.AI_PROVIDER || '') ? process.env.AI_PROVIDER : 'openrouter';
 // The service a name stands for: the default one when the name is unknown.
@@ -139,6 +140,13 @@ function serviceOf(name) {
   return Object.hasOwn(PROVIDERS, name) ? PROVIDERS[name] : PROVIDERS[DEFAULT_PROVIDER];
 }
 const keyOf = service => process.env[service.keyVar] || '';
+// The service a request uses. It is the one it names when the person may use it (a beta service only with /beta) and it
+// has a key; otherwise the default, when that may be used; otherwise OpenRouter, which is never a beta service.
+function usableServiceOf(name, beta) {
+  const open = s => !s.beta || beta;
+  const choices = [serviceOf(name), serviceOf()].filter(open);
+  return choices.find(s => keyOf(s)) || choices[0] || PROVIDERS.openrouter;
+}
 // The model list of a service with one, for pictures and context sizes; null for a service without one.
 function modelsUrl(service) {
   return service.modelList ? service.url.replace(/\/chat\/completions$/, '/models') : null;
@@ -206,7 +214,13 @@ const TOO_LONG_TEXT_NOTE = 'Your last message was cut off because it was too lon
   'step using the tools, one small piece per call, and keep what you write in words short.';
 const CUT_OFF_MAX = 4;              // this many cut-offs in a row and the helper pauses, and asks to be told to carry on
 const PAUSED_LONG = 'The helper paused, because its answers kept running past their length. Send a message to carry on.';
-const COMMAND = /^\s*\/(override|goal|plan|discard)\b/i;
+const COMMAND = /^\s*\/(override|goal|plan|discard|smart|beta)\b/i;
+// What a command says when it has no text after it.
+const NEEDS_TEXT = {
+  goal: 'Tell me the goal after /goal, for example: /goal make a quiz app with a score screen.',
+  plan: 'Tell me what to plan after /plan, for example: /plan add a high score screen.',
+  smart: 'Tell me the task after /smart, for example: /smart check every screen for a label with no text.',
+};
 // How hard the helper works, from the slider. It changes how much it reads and checks, not the model's own
 // reasoning: reasoning counts against the length of an answer, and that is what cut answers off.
 const EFFORTS = ['low', 'medium', 'high'];
@@ -547,11 +561,11 @@ function maxTokensOf(level) {
   return reasoningOf(level) ? REASONING_MAX_TOKENS : MAX_TOKENS();
 }
 
-// The settings of one answer, from its stream body. Max is for the smart preset only; on any other, it is high.
-function settingsOf(data, effort) {
+// The settings of one answer, from its stream body. Max is for the smart preset only; on any other, it is high. beta says
+// whether the person has turned the beta services on with /beta.
+function settingsOf(data, effort, beta = false) {
   const preset = presetOf(data.preset);
-  let service = serviceOf(data.provider);
-  if (!keyOf(service)) service = serviceOf();
+  const service = usableServiceOf(data.provider, beta);
   let reasoning = REASONING.indexOf(data.reasoning) >= 0 && service.reasoning ? data.reasoning : 'default';
   const clamped = reasoning === 'max' && preset !== 'smart';
   if (clamped) reasoning = 'high';
@@ -716,6 +730,7 @@ class Assistant {
     this.full = new Map();            // "user|project" -> time full-app mode ends
     this.pinWrong = [];               // times of recent wrong PINs, team-wide
     this.pinLockedUntil = 0;
+    this.betaUntil = new Map();       // user id -> time the beta services (OpenCode Go) end for them, see /beta
     this.infoCache = new Map();       // model -> {vision, context, until}
     this.smartUntil = 0;              // the smart subagent is usable again from this time, for the whole hub
   }
@@ -811,11 +826,18 @@ class Assistant {
     return Math.max(0, this.smartUntil - this.now());
   }
 
-  // What the browser shows for the models, the run modes and the subagents (GET /collab/ai/presets).
-  presetInfo() {
+  // Whether this person has turned the beta services on with /beta.
+  betaOn(userId) {
+    return this.now() < (this.betaUntil.get(userId) || 0);
+  }
+
+  // What the browser shows for the models, the run modes and the subagents (GET /collab/ai/presets). A beta service is
+  // listed as locked for a person who has not typed /beta.
+  presetInfo(me) {
+    const beta = this.betaOn(me.userId);
     const service = id => {
       const s = PROVIDERS[id];
-      return {id, name: s.name, configured: this.configured(s),
+      return {id, name: s.name, configured: this.configured(s), locked: !!s.beta && !beta,
         presets: Object.keys(s.presets).map(p => ({id: p, label: s.presets[p].label, name: nameOf(p, s), model: modelOf(p, s),
           reasoningLevels: s.presets[p].reasoningLevels.slice()})),
         subagents: {
@@ -825,7 +847,8 @@ class Assistant {
         }};
     };
     const providers = Object.keys(PROVIDERS).map(service);
-    return Object.assign({providers, defaultProvider: DEFAULT_PROVIDER}, providers.find(p => p.id === DEFAULT_PROVIDER), {
+    const top = usableServiceOf('', beta).id;
+    return Object.assign({providers, defaultProvider: top}, providers.find(p => p.id === top), {
       defaultPreset: DEFAULT_PRESET,
       runModes: RUN_MODES.map(m => Object.assign({}, m)),
       defaultRunMode: DEFAULT_RUN_MODE,
@@ -950,13 +973,13 @@ class Assistant {
         'x-frame-options': 'SAMEORIGIN', 'x-content-type-options': 'nosniff'});
       return res.end(html);
     }
-    if (path_ === '/collab/ai/presets' && req.method === 'GET') return json(200, this.presetInfo());
+    if (path_ === '/collab/ai/presets' && req.method === 'GET') return json(200, this.presetInfo(me));
     if (path_ === '/collab/ai/status') {
       const params = new URL(req.url, 'http://x').searchParams;
       const pid = params.get('projectId') || '';
       const live = /^\d+$/.test(pid) ? this.activeRun(me.userId, pid) : null;
       // Whether pictures can be attached depends on the preset the browser asks about (balanced when none is named).
-      const service = serviceOf(params.get('provider'));
+      const service = usableServiceOf(params.get('provider'), this.betaOn(me.userId));
       const vision = await this.takesPictures(modelOf(presetOf(params.get('preset')), service), true, service);
       return json(200, {configured: this.configured(service), search: !!SEARCH_KEY(), vision,
         name: me.email.split('@')[0], fullUntil: /^\d+$/.test(pid) ? this.fullUntil(me.userId, pid) : 0,
@@ -1039,7 +1062,8 @@ class Assistant {
         'Wait for it to finish, or press Stop.'}));
     }
     const effort = EFFORTS.indexOf(data.effort) >= 0 ? data.effort : 'medium';
-    const run = this.startRun(me, cookie, projectId, access, history, attached.images, settingsOf(data, effort));
+    const run = this.startRun(me, cookie, projectId, access, history, attached.images,
+      settingsOf(data, effort, this.betaOn(me.userId)));
     return this.attach(run, res, 0);
   }
 
@@ -1059,10 +1083,12 @@ class Assistant {
     const old = this.runs.get(key);
     if (old) clearTimeout(old.keepTimer);
     const question = history[history.length - 1].content.trim();
+    // A PIN typed after /override or /beta is never kept: only the command is.
+    const secret = /^\s*\/(override|beta)\b/i.exec(question);
     const run = {key, userId: me.userId, projectId, by: me.email.split('@')[0], events: [], seq: 0, done: false,
       watchers: new Map(), controller: new AbortController(), orphanTimer: null, keepTimer: null,
       startedAt: Date.now(), stats: {steps: 0, tools: 0, pictures: 0}, settings,
-      question: /^\s*\/override\b/i.test(question) ? '/override' : question.slice(0, 6000)};
+      question: secret ? '/' + secret[1].toLowerCase() : question.slice(0, 6000)};
     this.runs.set(key, run);
     this.work(run, {me, cookie, projectId, access, history, images});
     return run;
@@ -1083,18 +1109,19 @@ class Assistant {
       const name = command ? command[1].toLowerCase() : '';
       if (name === 'override') {
         emit({type: 'text', delta: this.override(me, projectId, history[history.length - 1].content.trim())});
+      } else if (name === 'beta') {
+        emit({type: 'text', delta: this.beta(me, history[history.length - 1].content.trim())});
       } else if (name === 'discard') {
         emit({type: 'text', delta: this.discard(me, projectId)});
       } else if (name) {
-        // /goal and /plan: the rest of the message is the goal, or the idea to plan.
+        // /goal, /plan and /smart: the rest of the message is the goal, the idea to plan, or the task.
         const rest = history[history.length - 1].content.trim().replace(COMMAND, '').trim();
         if (!rest) {
-          emit({type: 'text', delta: name === 'goal'
-            ? 'Tell me the goal after /goal, for example: /goal make a quiz app with a score screen.'
-            : 'Tell me what to plan after /plan, for example: /plan add a high score screen.'});
+          emit({type: 'text', delta: NEEDS_TEXT[name]});
         } else {
           const asked = history.slice(0, -1).concat([{role: 'user', content: rest}]).filter(m => !COMMAND.test(m.content));
-          await this.converse(Object.assign(ctx, {history: asked, goal: name === 'goal' ? rest : null, plan: name === 'plan'}));
+          await this.converse(Object.assign(ctx, {history: asked, goal: name === 'goal' ? rest : null, plan: name === 'plan',
+            smart: name === 'smart' ? rest : ''}));
         }
       } else {
         // Commands are never shown to the model, even if an older message in the list has one.
@@ -1201,6 +1228,11 @@ class Assistant {
       emit({type: 'text', delta: NOT_SET_UP});
       return;
     }
+    if (ctx.smart && this.smartLeft() > 0) {
+      emit({type: 'cooldown', smartReadyInSeconds: Math.ceil(this.smartLeft() / 1000)});
+      emit({type: 'text', delta: this.smartBusyText()});
+      return;
+    }
     if (!this.allow(me.userId, goal ? GOAL_COST : 1)) {
       emit({type: 'error', message: 'Too many questions for now. Wait a minute and try again.'});
       return;
@@ -1268,6 +1300,23 @@ class Assistant {
     let lastStep = '';
     let sameStep = 0;         // how many steps in a row were exactly the same tool calls
     try {
+      if (ctx.smart) {
+        // /smart: the smart subagent does the task first, as if the helper had handed it over. Its report is the answer,
+        // unless it changed the draft: then the helper carries on from the report, and proposes the change.
+        const call = {id: 'smart-task', type: 'function', function: {name: 'subagent',
+          arguments: JSON.stringify({task: ctx.smart, mode: 'smart'})}};
+        stats.tools++;
+        const began = this.now();
+        const [out] = await this.runCalls([call], run, 's' + stats.steps + ':');
+        // As for any subagent, its time does not use up this answer's time.
+        deadline += this.now() - began;
+        if (!run.state.edited) {
+          emit({type: 'text', delta: String(out.text)});
+          return;
+        }
+        messages.push({role: 'assistant', content: null, tool_calls: [call]});
+        messages.push({role: 'tool', tool_call_id: call.id, content: String(out.text).slice(0, MAX_TOOL_RESULT)});
+      }
       for (let step = 0; step < limit; step++) {
         if (ctx.signal && ctx.signal.aborted) throw stoppedError();
         if (this.now() > deadline) {
@@ -1391,6 +1440,14 @@ class Assistant {
     return {text: 'The smart subagent cannot be used for another ' + minutes + ' minute' + (minutes === 1 ? '' : 's') +
       ': it can be used once every ' + SMART_COOLDOWN_MS / 60000 + ' minutes, for the whole team. Use mode default for this ' +
       'piece, or do the piece yourself.', detail: 'smart in ' + minutes + ' min'};
+  }
+
+  // What /smart says while the smart subagent is resting: when it may run again, for the whole team.
+  smartBusyText() {
+    const minutes = Math.ceil(this.smartLeft() / 60000);
+    return 'The smart subagent is resting. It can be used once every ' + SMART_COOLDOWN_MS / 60000 + ' minutes, for the ' +
+      'whole team, and again in ' + minutes + ' minute' + (minutes === 1 ? '' : 's') + '. Ask again then, or send the task ' +
+      'without /smart.';
   }
 
   // The subagent: a piece of the job the helper hands over. It runs on the model of its tier (SUB_TIERS), with high
@@ -1728,8 +1785,12 @@ class Assistant {
       return json(500, {error: 'The new PIN could not be saved, so nothing has changed.'});
     }
     this.pinWrong = [];
+    // "Turn it off for everyone" ends the PIN-gated modes too: full-app mode and the OpenCode Go models of /beta.
     const endFull = data.endFull === true;
-    if (endFull) this.full.clear();
+    if (endFull) {
+      this.full.clear();
+      this.betaUntil.clear();
+    }
     this.log(me.email.split('@')[0] + ' changed the full-app PIN' +
       (endFull ? ' and turned full-app mode off for everyone' : ''));
     return json(200, {ok: true, endedFull: endFull});
@@ -1760,16 +1821,49 @@ class Assistant {
       return 'Full-app mode is off. The helper is back to small fixes and additions.' +
         (discarded ? ' The unfinished app draft was discarded.' : '');
     }
-    if (!PIN()) {
-      return 'Full-app mode is not set up on this server. Whoever runs the Raspberry Pi can set the PIN with: ' +
-        'sudo /opt/appinventor/set-ai.sh --pin';
+    const refused = this.pinCheck(arg, 'Full-app mode is not set up on this server. Whoever runs the Raspberry Pi can set ' +
+      'the PIN with: sudo /opt/appinventor/set-ai.sh --pin');
+    if (refused) return refused;
+    this.full.set(key, now + FULL_TTL_MS);
+    return 'Full-app mode is on in this project until ' + clock(now + FULL_TTL_MS) +
+      '. You can now ask for a complete small app. Type /override off to turn it off.';
+  }
+
+  // /beta shows whether OpenCode Go's models are on for this person, /beta off turns them off, and /beta <PIN> turns them on
+  // for an hour. It takes the PIN of /override, and shares its lock. The PIN is checked here and never sent to the model.
+  beta(me, text) {
+    const arg = text.split(/\s+/)[1] || '';
+    const key = me.userId;
+    if (arg === '') {
+      return this.betaOn(key)
+        ? 'OpenCode Go models are on for you until ' + clock(this.betaUntil.get(key)) + '. Type /beta off to turn them off.'
+        : 'OpenCode Go models are off. Type /beta and the PIN to turn them on for an hour.';
     }
+    if (arg.toLowerCase() === 'off') {
+      this.betaUntil.delete(key);
+      return 'OpenCode Go models are off.';
+    }
+    const refused = this.pinCheck(arg, 'OpenCode Go models cannot be turned on: no PIN is set on this server. Whoever ' +
+      'runs the Raspberry Pi can set the PIN with: sudo /opt/appinventor/set-ai.sh --pin');
+    if (refused) return refused;
+    const until = this.now() + FULL_TTL_MS;
+    this.betaUntil.set(key, until);
+    const keyless = Object.values(PROVIDERS).some(s => s.beta && !keyOf(s));
+    return 'OpenCode Go models are on for you until ' + clock(until) + '. Choose OpenCode Go under Service in the ' +
+      'companion.' + (keyless ? ' OpenCode Go has no key on this server yet, so its models cannot be used.' : '') +
+      ' Type /beta off to turn them off.';
+  }
+
+  // Checks a PIN for /override and /beta. It returns '' when the PIN is right, and otherwise what to tell the person. Five
+  // wrong PINs from anyone in PIN_WINDOW_MS stop every attempt for PIN_LOCK_MS.
+  pinCheck(given, unset) {
+    if (!PIN()) return unset;
+    const now = this.now();
     this.pinWrong = this.pinWrong.filter(t => now - t < PIN_WINDOW_MS);
     if (now < this.pinLockedUntil) {
-      return 'Too many wrong PINs. Wait ' + Math.ceil((this.pinLockedUntil - now) / 60000) +
-        ' minutes, then try again.';
+      return 'Too many wrong PINs. Wait ' + Math.ceil((this.pinLockedUntil - now) / 60000) + ' minutes, then try again.';
     }
-    if (!this.pinMatches(arg)) {
+    if (!this.pinMatches(given)) {
       this.pinWrong.push(now);
       if (this.pinWrong.length >= PIN_MAX_WRONG) {
         this.pinLockedUntil = now + PIN_LOCK_MS;
@@ -1778,9 +1872,7 @@ class Assistant {
       return 'Wrong PIN.';
     }
     this.pinWrong = [];
-    this.full.set(key, now + FULL_TTL_MS);
-    return 'Full-app mode is on in this project until ' + clock(now + FULL_TTL_MS) +
-      '. You can now ask for a complete small app. Type /override off to turn it off.';
+    return '';
   }
 
   // Checks a change, keeps it until Apply, and returns what the person will see. Throws with a plain reason

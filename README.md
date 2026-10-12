@@ -88,6 +88,8 @@ components and documentation, draw pictures, and ask you a question when it need
 | `/effort` | Sets how hard the helper works: low, medium or high (the slider does the same) |
 | `/override <PIN>` | Turns on full-app mode for an hour, so the helper can build a small app |
 | `/override off` | Turns full-app mode off |
+| `/beta <PIN>` | Turns on the OpenCode Go models for an hour, with the same PIN; `/beta off` turns them off |
+| `/smart <task>` | Gives the task to the smart subagent now (once every 45 minutes for the team); the Smart button does the same |
 | `/discard` | Throws away an unfinished full app |
 | `/new` (or `/clear`) | Starts a new conversation |
 | `/help` | Lists the commands |

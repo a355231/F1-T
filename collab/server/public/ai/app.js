@@ -40,6 +40,8 @@
     {cmd: '/mode', help: 'Subagents at once: normal, parallel or ultracode'},
     {cmd: '/reasoning', help: 'How hard the model thinks: default to max'},
     {cmd: '/override', help: 'Full-app mode, with the PIN'},
+    {cmd: '/beta', help: 'OpenCode Go models, with the same PIN'},
+    {cmd: '/smart', help: 'Give a task to the smart subagent now'},
     {cmd: '/discard', help: 'Throw away an unfinished full app'},
     {cmd: '/new', help: 'Start a new conversation'},
     {cmd: '/help', help: 'List the commands'},
@@ -702,6 +704,7 @@
     sendBtn.setAttribute('aria-label', on ? 'Stop' : 'Send');
     sendBtn.disabled = false;
     $('gstop').hidden = !on;
+    updateSmartBtn();
   }
 
   // ---- /goal progress ----
@@ -845,6 +848,7 @@
   var pickMode = $('pickMode');
   var pickReasoning = $('pickReasoning');
   var smartLine = $('smartLine');
+  var smartBtn = $('smartBtn');
   var smartReadyAt = 0;      // when a smart subagent may run again (ms since the epoch); 0 when it may now
   var serverDefaults = {};   // the defaults GET /collab/ai/presets gives
   var kept = {               // what this computer remembers; null where nothing valid is kept
@@ -1058,6 +1062,16 @@
     var left = smartReadyAt - Date.now();
     smartLine.textContent = left > 0 ? 'Smart subagent: available in ' + Math.ceil(left / 60000) + ' min'
       : 'Smart subagent: ready';
+    updateSmartBtn();
+  }
+
+  // The Smart button is off while an answer is being written, and while the smart subagent is resting.
+  function updateSmartBtn() {
+    var left = smartReadyAt - Date.now();
+    smartBtn.disabled = !!controller || left > 0;
+    smartBtn.textContent = left > 0 ? 'Smart · ' + Math.ceil(left / 60000) + ' min' : 'Smart';
+    smartBtn.title = left > 0 ? 'The smart subagent is resting. It can be used once every 45 minutes, for the whole team.'
+      : 'Give the task you typed to the smart subagent. It can be used once every 45 minutes, for the whole team.';
   }
 
   function smartTimer(secs) {
@@ -1071,7 +1085,7 @@
       d.providers = [{id: 'openrouter', name: 'OpenRouter', configured: true, presets: d.presets, subagents: d.subagents}];
       d.defaultProvider = 'openrouter';
     }
-    providerList = d.providers.filter(function (p) { return hasId(p) && p.configured; })
+    providerList = d.providers.filter(function (p) { return hasId(p) && p.configured && !p.locked; })
       .map(function (p) { return {id: p.id, name: p.name}; });
     presetsByProvider = {};
     subsByProvider = {};
@@ -1125,6 +1139,8 @@
     '- `/mode normal`, `parallel` or `ultracode`: how many subagents may work at once in one answer',
     '- `/reasoning default`, `low`, `medium`, `high` or `max`: how hard the model thinks (max is only for Smart)',
     '- `/override <PIN>`: full-app mode for an hour; `/override off` turns it off',
+    '- `/beta <PIN>`: the OpenCode Go models for an hour, with the same PIN; `/beta off` turns them off',
+    '- `/smart <task>`: give the task to the smart subagent now (once every 45 minutes for the team)',
     '- `/discard`: throw away an unfinished full app',
     '- `/new`: start a new conversation (also `/clear`)',
     '- `/help`: this list',
@@ -1257,21 +1273,21 @@
       question = 'Make a small fix in the open project for this: ' + arg + '. Make the smallest change that fixes it, ' +
         'check it, and propose it.';
     }
-    var isOverride = name === 'override';
+    var hidesPin = name === 'override' || name === 'beta';
     var isGoal = name === 'goal';
-    var images = isOverride ? [] : pending.slice();
+    var images = hidesPin ? [] : pending.slice();
     if (!text && images.length) {
       text = images.length > 1 ? 'What is in these pictures?' : 'What is in this picture?';
       question = text;
     }
     if (!text || controller || !projectId) return;
     var shown = text;
-    if (isOverride) {
-      shown = /^\/override\s+off\b/i.test(text) ? '/override off'
-        : /^\/override\s+\S/.test(text) ? '/override (PIN hidden)' : '/override';
+    if (hidesPin) {
+      shown = /^\/(override|beta)\s+off\b/i.test(text) ? '/' + name + ' off'
+        : /^\/(override|beta)\s+\S/.test(text) ? '/' + name + ' (PIN hidden)' : '/' + name;
     }
     var row = addUser(shown, images);
-    if (!isOverride) history.push({role: 'user', content: question});
+    if (!hidesPin) history.push({role: 'user', content: question});
     input.value = '';
     pending = [];
     renderThumbs();
@@ -1279,9 +1295,9 @@
     var api = newAssistant();
     if (isGoal) startGoal(text.replace(/^\/goal\s*/i, ''));
     var body = {projectId: projectId, effort: effort, preset: preset, runMode: runMode, reasoning: reasoning, provider: provider,
-      messages: isOverride ? [{role: 'user', content: text}] : history.slice(-20)};
+      messages: hidesPin ? [{role: 'user', content: text}] : history.slice(-20)};
     if (images.length) body.images = images.map(function (p) { return {name: p.name, mime: p.mime, data: p.data}; });
-    runStream(api, body, {goal: isGoal, override: isOverride, row: row});
+    runStream(api, body, {goal: isGoal, secret: hidesPin, row: row});
   }
 
   // Shows an answer as its events arrive, and keeps the window busy until the answer is over. With no body,
@@ -1304,7 +1320,7 @@
       linkChanged('back');
       api.finish();
       if (opts.goal) finishGoal();
-      if (!opts.override && api.full) {
+      if (!opts.secret && api.full) {
         history.push({role: 'assistant', content: api.full});
         api.row.dataset.text = api.full;
         if (opts.row) {
@@ -1346,7 +1362,7 @@
     }
     var api = newAssistant();
     notice(api, 'Reconnected to the answer that was still being written.', false);
-    runStream(api, null, {goal: false, override: false, row: row});
+    runStream(api, null, {goal: false, secret: false, row: row});
   }
 
   // "Try again": drop the last exchange and ask again.
@@ -1368,6 +1384,15 @@
     }
   });
   $('gstop').onclick = function () { if (controller) controller.abort(); };
+  smartBtn.onclick = function () {
+    var task = input.value.trim();
+    if (!task) {
+      flash('Type the task in the box, then press Smart.');
+      input.focus();
+      return;
+    }
+    send('/smart ' + task);
+  };
 
   // ---- the composer ----
 

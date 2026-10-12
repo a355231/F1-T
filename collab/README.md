@@ -414,6 +414,7 @@ App Inventor tab that opened it as well, in case that tab's connection to the te
     to ask again with a smaller piece. The default subagent has no time cap. The smart subagent can be used once every
     45 minutes, for the whole team: a smart request inside that time is refused at once, and the helper is told to use
     default or do the piece itself. The timer starts when a smart subagent starts running, not when it is queued.
+    `/smart <task>` and the **Smart** button give a task straight to the smart subagent (see below).
 * **Run modes.** How many subagents may run at once in one answer: **Normal** (one), **Parallel** (two) or
   **Ultracode** (three). The rest wait in the order they were asked for, and their cards show them as queued. Their
   time does not count against the answer's own time limit.
@@ -439,6 +440,11 @@ App Inventor tab that opened it as well, in case that tab's connection to the te
   stops the goal.
 * **`/plan <idea>`** plans a change and says what it would do. It can read and check the project, look
   things up and ask questions, but it cannot change anything or propose a change, even if the model tries.
+* **`/smart <task>`** gives the task to the smart subagent now, without waiting for the helper to choose it. The
+  **Smart** button beside the box does the same with the text in the box. If the subagent changed nothing, its
+  report is the answer. If it changed the draft, the helper carries on from the report and proposes the change. The
+  smart subagent can be used once every 45 minutes for the whole team, so the button and the command wait until it is
+  ready, and the button shows the minutes.
 * **`/check [focus]`**, **`/explain [focus]`** and **`/fix <problem>`** ask the model to check the project,
   explain it, or make the smallest change that fixes one problem. You see the command; the model gets the question.
 * **`/discard`** throws away an unfinished full app. **`/new`** (also `/clear`) starts a new conversation.
@@ -458,6 +464,12 @@ change, including up to 4 new screens (each a designer file and a blocks file). 
 project's existing screens, so for a new app start from an empty project. `/override` alone shows
 whether the mode is on, and `/override off` ends it early. Restarting the hub also ends it. Full-app mode
 has no step or time limit: the helper goes on until the app is complete, or until you press Stop.
+
+**OpenCode Go models (beta).** The **Service** list offers OpenCode Go only to a person who has typed `/beta` and
+the PIN. `/beta <PIN>` turns its models on for that person for an hour, in any project; `/beta off` turns them off,
+and `/beta` alone shows whether they are on. It uses the PIN and the lock of `/override`, and the PIN never reaches
+the model. Without `/beta`, a request for OpenCode Go uses the default service instead, which is OpenRouter unless
+`AI_PROVIDER` says otherwise. **Also turn full-app mode off for everyone** turns these off for everyone too.
 
 The app can be built over as many messages as it takes: the helper keeps the unfinished app between them,
 for an hour after the last message. **Apply appears only once the whole app is built and `check_project`
@@ -517,9 +529,10 @@ names, not whether the blocks do what you intended; App Inventor still reports b
 
 Set it up on the Pi:
 * `sudo /opt/appinventor/set-ai.sh` asks for the key of the service in use (OpenRouter, unless you switch).
-* `sudo /opt/appinventor/set-ai.sh --provider opencode` makes **OpenCode Go** (opencode.ai) the service in use, and asks
-  for its key. In the companion, the **Service** list picks either service for each question, and only the services that
-  have a key are offered. The built-in models for OpenCode Go are Muse Spark 1.3 (Smart), Step 5 Preview (Balanced) and
+* `sudo /opt/appinventor/set-ai.sh --provider opencode` makes **OpenCode Go** (opencode.ai) the default service, and asks
+  for its key. Its models are still offered only after `/beta` (see above), so until someone types it the companion uses
+  OpenRouter. In the companion, the **Service** list picks either service for each question, and only the services that
+  have a key are offered, and OpenCode Go only after `/beta`. The built-in models for OpenCode Go are Muse Spark 1.3 (Smart), Step 5 Preview (Balanced) and
   DeepSeek V4.1 Flash (Fast). `--model` changes them, and `AI_OPENCODE_MODEL_*` in ai.env does the same by hand. Pictures
   are on for OpenCode Go, and it takes no reasoning setting. Muse Spark answers on OpenCode's Responses API, which the hub
   converts to the same stream; check that with a real key before relying on Smart. `--provider openrouter` switches the

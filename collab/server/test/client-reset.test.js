@@ -534,3 +534,49 @@ test('(i) a step running when a subagent model call begins is not taken back by 
   await answer.end();
   assert.deepStrictEqual(cardSteps(subCard(page, 'Check Screen2')), ['Read Screen2 (done)']);
 });
+
+test('(j) /beta: its PIN is hidden on screen, and kept out of the conversation the window sends next, like /override', async () => {
+  const page = openPage();
+  const answer = startAnswer(page, '/beta 12345');
+  await answer.push({type: 'text', delta: 'OpenCode Go models are on for you until 10:00.'});
+  await answer.end();
+  assert.deepStrictEqual(page.sent[0].messages, [{role: 'user', content: '/beta 12345'}], 'the server gets the command itself');
+  const rows = page.document.getElementById('messages').querySelectorAll('.msg.user');
+  assert.strictEqual(rows[rows.length - 1].querySelector('.bubble').textContent, '/beta (PIN hidden)');
+  const next = startAnswer(page, 'hi');
+  await next.push({type: 'text', delta: 'Hello.'});
+  await next.end();
+  assert.deepStrictEqual(page.sent[1].messages, [{role: 'user', content: 'hi'}], 'the PIN is not in the history');
+});
+
+test('(k) the Smart button sends the task in the box as /smart, and is off while an answer is written or the smart subagent rests', async () => {
+  const page = openPage();
+  const button = page.document.getElementById('smartBtn');
+  page.document.getElementById('input').value = '';   // an empty box, as a real textarea has
+  button.onclick();
+  assert.strictEqual(page.sent.length, 0, 'there is no task to send');
+  assert.match(page.document.getElementById('hint').textContent, /Type the task/);
+  page.document.getElementById('input').value = 'check every label';
+  let controller = null;
+  let n = 0;
+  page.answers.push({ok: true, status: 200, body: new ReadableStream({start(c) { controller = c; }})});
+  button.onclick();
+  assert.deepStrictEqual(page.sent[0].messages, [{role: 'user', content: '/smart check every label'}]);
+  assert.strictEqual(page.document.getElementById('input').value, '', 'the box is cleared');
+  assert.strictEqual(button.disabled, true, 'off while the answer is written');
+  const put = ev => controller.enqueue(new TextEncoder().encode('id: ' + ++n + '\ndata: ' + JSON.stringify(ev) + '\n\n'));
+  put({type: 'cooldown', smartReadyInSeconds: 600});
+  await flush();
+  assert.strictEqual(button.textContent, 'Smart · 10 min', 'the minutes are shown');
+  put({type: 'done'});
+  controller.close();
+  for (let i = 0; i < 200 && sendLabel(page) !== 'Send'; i++) await flush();
+  assert.strictEqual(button.disabled, true, 'still off while the smart subagent rests');
+});
+
+test('(l) the Smart button is on when the smart subagent is ready', async () => {
+  const page = openPage();
+  const button = page.document.getElementById('smartBtn');
+  assert.strictEqual(button.disabled, false);
+  assert.strictEqual(button.textContent, 'Smart');
+});

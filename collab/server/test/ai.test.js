@@ -171,7 +171,9 @@ function setup(script, options = {}) {
   };
   const calls = [];
   const fetchImpl = async (url, opts) => {
-    if (url !== 'https://openrouter.ai/api/v1/chat/completions' && !url.startsWith('http://127.0.0.1')) {
+    const modelCall = Object.values(PROVIDERS).some(s => s.url === url || s.responsesUrl === url) ||
+      url.startsWith('http://127.0.0.1');
+    if (!modelCall) {
       // The model list, for the vision check.
       return {ok: true, json: async () => ({data: modelList})};
     }
@@ -393,6 +395,128 @@ test('after a few wrong PINs from anyone, nobody can try for 15 minutes', async 
   assert.match(texts(await say(t.ai, 'fay', '/override ' + PIN_VALUE)), /Too many wrong PINs/);
   t.advance(16 * 60 * 1000);
   assert.match(texts(await say(t.ai, 'fay', '/override ' + PIN_VALUE)), /Full-app mode is on/);
+});
+
+// The OpenCode Go key is set for a test that needs it, and taken away again after it.
+async function withOpenCodeKey(key, fn) {
+  const before = process.env.OPENCODE_API_KEY;
+  if (key === null) delete process.env.OPENCODE_API_KEY;
+  else process.env.OPENCODE_API_KEY = key;
+  try {
+    return await fn();
+  } finally {
+    if (before === undefined) delete process.env.OPENCODE_API_KEY;
+    else process.env.OPENCODE_API_KEY = before;
+  }
+}
+const providerNamed = (body, id) => JSON.parse(body).providers.find(p => p.id === id);
+
+test('/beta: OpenCode Go is locked until a person types /beta and the PIN; it is theirs alone, and lasts an hour', async () => {
+  await withOpenCodeKey('oc-test', async () => {
+    const t = setup([textTurn('one'), textTurn('two'), textTurn('three')]);
+    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'opencode').locked, true);
+    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'openrouter').locked, false);
+    assert.match(texts(await say(t.ai, 'ann', '/beta')), /OpenCode Go models are off/);
+    assert.match(texts(await say(t.ai, 'ann', '/beta 00000')), /^Wrong PIN\.$/);
+    assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)), /OpenCode Go models are on for you until/);
+    assert.match(texts(await say(t.ai, 'ann', '/beta')), /on for you until/, 'the status says so');
+    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'opencode').locked, false);
+    assert.strictEqual(providerNamed((await getJson(t.ai, 'bob', '/collab/ai/presets')).body, 'opencode').locked, true, 'bob did not type it');
+    await sayTuned(t.ai, 'ann', 'hi', {provider: 'opencode'});
+    assert.strictEqual(t.calls[0].url, PROVIDERS.opencode.url, 'ann gets OpenCode Go');
+    await sayTuned(t.ai, 'bob', 'hi', {provider: 'opencode'});
+    assert.strictEqual(t.calls[1].url, PROVIDERS.openrouter.url, 'bob falls back to OpenRouter');
+    assert.doesNotMatch(JSON.stringify(t.calls), new RegExp(PIN_VALUE), 'the PIN never reaches the model');
+    t.advance(HOUR + 60000);
+    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'opencode').locked, true, 'the hour is over');
+    assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)), /on for you until/);
+    assert.match(texts(await say(t.ai, 'ann', '/beta off')), /^OpenCode Go models are off\.$/);
+    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'opencode').locked, true, '/beta off ends it');
+    await sayTuned(t.ai, 'ann', 'again', {provider: 'opencode'});
+    assert.strictEqual(t.calls[2].url, PROVIDERS.openrouter.url, 'with /beta off the request uses OpenRouter');
+  });
+});
+
+test('/beta uses the PIN of /override and its lock, and a PIN changed with "turn off for everyone" ends it', async () => {
+  await withOpenCodeKey('oc-test', async () => {
+    const t = setup([textTurn('one')]);
+    for (const who of ['ann', 'bob', 'cal', 'dee', 'eve']) {
+      assert.strictEqual(texts(await say(t.ai, who, '/beta 00000')), 'Wrong PIN.');
+    }
+    assert.match(texts(await say(t.ai, 'fay', '/override ' + PIN_VALUE)), /Too many wrong PINs/, '/override is locked too');
+    assert.match(texts(await say(t.ai, 'fay', '/beta ' + PIN_VALUE)), /Too many wrong PINs/);
+    t.advance(16 * 60 * 1000);
+    assert.match(texts(await say(t.ai, 'fay', '/beta ' + PIN_VALUE)), /on for you until/);
+    const done = await changePin(t.ai, 'fay', {current: PIN_VALUE, new: 'Fresh2026', endFull: true});
+    assert.strictEqual(done.status, 200);
+    assert.strictEqual(providerNamed((await getJson(t.ai, 'fay', '/collab/ai/presets')).body, 'opencode').locked, true,
+      'turning it off for everyone ends /beta too');
+    assert.match(texts(await say(t.ai, 'fay', '/beta Fresh2026')), /on for you until/, 'the new PIN works');
+  });
+});
+
+test('/beta with no OpenCode Go key says so, and OpenCode Go stays out of the list', async () => {
+  await withOpenCodeKey(null, async () => {
+    const t = setup([]);
+    assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)), /has no key on this server yet/);
+    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'opencode').configured, false);
+    assert.strictEqual(t.calls.length, 0);
+  });
+});
+
+test('commands with a PIN, /beta included, never reach the model, even when they are in the earlier messages', async () => {
+  const t = setup([textTurn('ok')]);
+  const res = fakeRes();
+  await t.ai.handle(fakeReq('/collab/ai/stream', 'POST', {projectId: '5', messages: [
+    {role: 'user', content: '/beta ' + PIN_VALUE},
+    {role: 'assistant', content: 'OpenCode Go models are on for you.'},
+    {role: 'user', content: 'hi'},
+  ]}), res);
+  assert.doesNotMatch(JSON.stringify(t.calls), new RegExp(PIN_VALUE));
+  assert.ok(!t.calls[0].payload.messages.some(m => /^\/beta/.test(m.content || '')));
+});
+
+test('/smart: the smart subagent does the task, and its report is the answer when nothing changed; the helper makes no call of its own', async () => {
+  const t = setup([textTurn('Report: every label has text.')]);
+  const evs = await say(t.ai, 'ann', '/smart check every label');
+  assert.strictEqual(t.calls.length, 1, 'only the subagent calls the model');
+  assert.ok(isSub(t.calls[0].payload), 'it is a subagent');
+  assert.strictEqual(t.calls[0].payload.model, 'anthropic/claude-haiku-5.5', 'the smart tier');
+  assert.match(t.calls[0].payload.messages[1].content, /check every label/, 'it is given the task');
+  assert.strictEqual(texts(evs), 'Report: every label has text.');
+  assert.deepStrictEqual(evs.filter(e => e.type === 'cooldown'), [{type: 'cooldown', smartReadyInSeconds: 2700}], 'the timer starts');
+  assert.strictEqual(evs[evs.length - 1].type, 'done');
+});
+
+test('/smart: when the subagent changes the draft, the helper carries on from its report and answers with the change', async () => {
+  const t = setup([
+    toolTurn('scm_set_property', {screen: 'Screen1', component: 'Label1', property: 'Text', value: 'Hello'}, 'c1'),
+    textTurn('Report: the label now says Hello.'),
+    textTurn('I changed the label to Hello.'),
+  ]);
+  const evs = await say(t.ai, 'ann', '/smart change the label to Hello');
+  assert.strictEqual(t.calls.length, 3);
+  assert.ok(isSub(t.calls[0].payload) && isSub(t.calls[1].payload), 'the first two calls are the subagent\'s');
+  assert.ok(!isSub(t.calls[2].payload), 'the third is the helper, with the report as the result of the subagent call');
+  assert.strictEqual(toolMessages(t.calls[2].payload).find(m => m.tool_call_id === 'smart-task').content,
+    'Report: the label now says Hello.');
+  assert.match(texts(evs), /I changed the label to Hello\./);
+});
+
+test('/smart inside the cooldown says when it can be used again, and calls no model', async () => {
+  const t = setup([textTurn('Report one.')]);
+  await say(t.ai, 'ann', '/smart check every label');
+  t.advance(10 * 60 * 1000);
+  const evs = await say(t.ai, 'bob', '/smart check the colours');
+  assert.strictEqual(t.calls.length, 1, 'the refused request calls no model');
+  assert.match(texts(evs), /is resting.*again in 35 minutes/s);
+  assert.deepStrictEqual(evs.filter(e => e.type === 'cooldown'), [{type: 'cooldown', smartReadyInSeconds: 2100}]);
+});
+
+test('/smart with no task asks for one, and calls no model', async () => {
+  const t = setup([]);
+  assert.match(texts(await say(t.ai, 'ann', '/smart')), /^Tell me the task after \/smart/);
+  assert.strictEqual(t.calls.length, 0);
 });
 
 test('commands never reach the model, even when they are in the earlier messages', async () => {

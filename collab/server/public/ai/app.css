@@ -240,6 +240,14 @@ textarea::placeholder { color: var(--muted); }
   cursor: pointer; flex: none; transition: transform .15s var(--ease), background .25s, opacity .2s;
 }
 .send:disabled { opacity: .3; cursor: default; }
+/* the Smart button: the task in the box goes to the smart subagent now */
+.smartbtn {
+  height: 36px; align-self: flex-end; flex: none; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--text); font-size: 12.5px; white-space: nowrap; cursor: pointer;
+  transition: background .25s var(--ease), opacity .2s;
+}
+.smartbtn:hover:not(:disabled) { background: var(--user); }
+.smartbtn:disabled { opacity: .45; cursor: default; }
 .send:active { transform: scale(.9); }
 .send .i-stop { display: none; }
 .send.stop { background: var(--danger); color: #fff; }
