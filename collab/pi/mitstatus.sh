@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# MITSTATUS: shows the link, the access code, the override code and the AI models of App Inventor Team Edition, and
-# gives the options that change them. The install puts it in /usr/local/bin, so it is run as just MITSTATUS.
+# MITSTATUS: shows the link, the access code, the override code, the AI models and the update of App Inventor Team
+# Edition, and gives the options that change them (including going back to the version before the last update). The
+# install puts it in /usr/local/bin, so it is run as just MITSTATUS.
 #   MITSTATUS          shows the status and the menu
 #   MITSTATUS --show   shows the status only
 # MIT_BASE, MIT_HUB and AI_LOCK point it at other folders and files, for tests.
@@ -9,6 +10,7 @@ set -uo pipefail
 BASE="${MIT_BASE:-/opt/appinventor}"
 HUB="${MIT_HUB:-$BASE/hub}"
 LOCK="${AI_LOCK:-/run/collab-update.lock}"
+NOTICE="$BASE/update-failed"
 
 [ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
 
@@ -108,6 +110,101 @@ link_lines() {
   echo "  Link (home Wi-Fi):  http://${ip:-<pi-address>}:8080"
 }
 
+# The update, which update.sh keeps in files of its own: update-state (how long the last build took, when the last change
+# was, and the version taken back by hand), update-progress (what a running update is doing) and update-failed (the notice
+# of a failure). A running update holds the lock, which is how update_running tells that one is going.
+update_value() { sed -n "s/^$1=//p" "$BASE/update-state" 2>/dev/null | tail -n 1; }
+progress_value() { sed -n "s/^$1=//p" "$BASE/update-progress" 2>/dev/null | tail -n 1; }
+update_running() { [ -e "$LOCK" ] && ! flock -n "$LOCK" true; }
+
+# Minutes, rounded up, and the time so far in words. Until a build has finished on this Pi, it is estimated at 45 minutes:
+# the middle of the 30 to 60 minutes that build-on-pi.sh gives.
+minutes_of() { echo $(( ($1 + 59) / 60 )); }
+so_far() { if [ "$1" -lt 60 ]; then echo "under a minute"; else echo "$(( $1 / 60 )) min"; fi; }
+build_minutes() {
+  local s
+  s="$(update_value build_seconds)"
+  if [ -n "$s" ]; then minutes_of "$s"; else echo 45; fi
+}
+build_basis() {
+  local s
+  s="$(update_value build_seconds)"
+  if [ -n "$s" ]; then echo "the last build here took $(minutes_of "$s") min"; else echo "a first build takes 30 to 60 min"; fi
+}
+
+# One row of the status block: a label and its text. A row with no label continues the one above.
+update_row() { printf '  %-20s%s\n' "$1" "$2"; }
+
+# What the nightly update does, by its mode (update-mode).
+next_step() {
+  case "$1" in
+    notify) echo "The nightly update only reports it; option 6 installs it." ;;
+    off) echo "Nightly updates are off; option 6 installs it." ;;
+    *) echo "The nightly update installs it at 3 AM, or option 6 installs it now." ;;
+  esac
+}
+
+# There is an earlier version to go back to: one saved before the last update, and not the version running now.
+can_revert() {
+  local back now
+  [ -s "$BASE/rollback/commit" ] || return 1
+  back="$(cat "$BASE/rollback/version" 2>/dev/null || true)"
+  now="$(cat "$BASE/version" 2>/dev/null || true)"
+  [ -n "$back" ] && [ "$back" != "$now" ]
+}
+
+# The update, in the status block: what it is doing and how long it has left, or how the last one went; and the version
+# that option 10 goes back to.
+update_lines() {
+  local mode stage version started elapsed left avail changed back
+  mode="$(cat "$BASE/update-mode" 2>/dev/null || echo install)"
+  update_row "Nightly updates:" "$mode"
+  if update_running; then
+    stage="$(progress_value stage)"
+    version="$(progress_value version)"
+    started="$(progress_value stage_started)"
+    elapsed=$(( $(date +%s) - ${started:-$(date +%s)} ))
+    case "$stage" in
+      compile)
+        left=$(( $(build_minutes) * 60 - elapsed ))
+        if [ "$left" -gt 0 ]; then
+          update_row "Update:" "building $version now, $(so_far "$elapsed") in. About $(minutes_of "$left") min left."
+          update_row "" "Estimate: $(build_minutes) min, because $(build_basis)."
+        else
+          update_row "Update:" "building $version now, $(so_far "$elapsed") in: longer than the $(build_minutes) min estimate."
+        fi ;;
+      start)
+        left=$(( 600 - elapsed ))
+        if [ "$left" -gt 0 ]; then
+          update_row "Update:" "starting $version. About $(minutes_of "$left") min left for it to answer."
+        else
+          update_row "Update:" "starting $version. It is taking longer than the 10 min it has to answer."
+        fi ;;
+      restoring) update_row "Update:" "the new version failed, so the previous one is being put back." ;;
+      preparing) update_row "Update:" "getting $version ready (the running version is saved first)." ;;
+      *) update_row "Update:" "an update is running." ;;
+    esac
+    update_row "" "Follow it with: tail -f $BASE/update.log"
+    return 0
+  fi
+  if [ -s "$NOTICE" ]; then
+    update_row "Update:" "FAILED. $(cat "$NOTICE")"
+  fi
+  avail="$(head -n 1 "$BASE/update-available" 2>/dev/null || true)"
+  if [ -n "$avail" ] && [ -n "$(update_value held_short)" ] && [ "${avail%% *}" = "$(update_value held_short)" ]; then
+    update_row "Update:" "$(update_value held_short) was taken back by hand, so the nightly update leaves it alone. Option 6 installs it."
+  elif [ -n "$avail" ]; then
+    update_row "Update:" "newer version available: $avail. $(next_step "$mode")"
+  elif [ ! -s "$NOTICE" ]; then
+    changed="$(update_value changed_at)"
+    update_row "Update:" "up to date ($(cat "$BASE/version" 2>/dev/null || echo unknown))${changed:+, changed $changed}"
+  fi
+  if can_revert; then
+    back="$(cat "$BASE/rollback/version" 2>/dev/null || echo unknown)"
+    update_row "Previous version:" "$back (option 10 goes back to it)"
+  fi
+}
+
 show_status() {
   local code pin rows id label name model source service
   code="$(cat "$BASE/teamcode" 2>/dev/null || true)"
@@ -117,6 +214,8 @@ show_status() {
   echo
   echo "  App Inventor Team Edition"
   echo "  -------------------------"
+  update_lines
+  echo
   link_lines
   echo "  Access code:        ${code:-not set}"
   echo "  Override code:      ${pin:-not set}"
@@ -266,8 +365,40 @@ update_app() {
     return
   fi
   sleep 3
-  echo "  The update is running in the background. Building the new version can take about an hour on the Pi."
-  echo "  Follow it with: tail -f $BASE/update.log"
+  echo "  The update is running in the background. Building the new version is estimated to take about $(build_minutes) min."
+  echo "  The status shows the time left. Follow it with: tail -f $BASE/update.log"
+  tail -n 3 "$BASE/update.log" 2>/dev/null | sed 's/^/    /'
+}
+
+# 10. Goes back to the version from before the last update. update.sh --rollback runs as a unit of its own, like the update
+# (option 6). The version it takes back is held: the nightly update leaves it alone until a newer version is published.
+revert_app() {
+  local answer back now
+  if update_running; then
+    echo "  An update is running. Go back once it has finished."
+    return
+  fi
+  if ! can_revert; then
+    echo "  There is no earlier version saved to go back to. An update has to finish first."
+    return
+  fi
+  back="$(cat "$BASE/rollback/version" 2>/dev/null || echo unknown)"
+  now="$(cat "$BASE/version" 2>/dev/null || echo unknown)"
+  echo
+  echo "  Go back from $now to $back, the version before the last update?"
+  echo "  App Inventor restarts, which disconnects anyone using it. Projects, backups, the team code and settings are kept."
+  echo "  The nightly update will not install $now again. Option 6 does, when you choose it."
+  read -r -p "  Go back now? (y/N): " answer || return
+  case "$answer" in
+    y|Y|yes|YES) ;;
+    *) echo "  Not changed."; return ;;
+  esac
+  if ! systemd-run --unit=collab-revert-now --collect --property=Nice=10 "$BASE/update.sh" --rollback > /dev/null; then
+    echo "  Could not start the revert. Look at it with: systemctl status collab-revert-now"
+    return
+  fi
+  sleep 3
+  echo "  Going back in the background. It takes a few minutes. Follow it with: tail -f $BASE/update.log"
   tail -n 3 "$BASE/update.log" 2>/dev/null | sed 's/^/    /'
 }
 
@@ -285,9 +416,10 @@ main_menu() {
     option 7 "Change API key ($(service_label "$service"))"
     option 8 "Change OpenCode Go models"
     option 9 "Change OpenCode Go API key"
-    option 10 "Exit"
+    option 10 "Go back to the previous version"
+    option 11 "Exit"
     echo
-    if ! read -r -p "  Choose 1-10: " choice; then
+    if ! read -r -p "  Choose 1-11: " choice; then
       echo
       exit 0
     fi
@@ -301,8 +433,9 @@ main_menu() {
       7) "$BASE/set-ai.sh"; pause ;;
       8) change_models opencode; pause ;;
       9) "$BASE/set-ai.sh" --key opencode; pause ;;
-      10|q|Q) exit 0 ;;
-      *) echo "  Type a number from 1 to 10." ;;
+      10) revert_app; pause ;;
+      11|q|Q) exit 0 ;;
+      *) echo "  Type a number from 1 to 11." ;;
     esac
   done
 }

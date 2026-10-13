@@ -5,7 +5,7 @@
 #   sudo /opt/appinventor/update.sh                    # what the timer runs
 #   sudo /opt/appinventor/update.sh --now              # update now, even if people are online
 #   sudo /opt/appinventor/update.sh --check            # only say whether a newer version exists
-#   sudo /opt/appinventor/update.sh --rollback         # put back the version from before the last update
+#   sudo /opt/appinventor/update.sh --rollback         # put back the version from before the last update (the nightly update does not install it again)
 #   sudo /opt/appinventor/update.sh --mode install|notify|off
 #   sudo /opt/appinventor/update.sh --now --simulate-failure=compile|start   # try the way back
 #
@@ -35,6 +35,9 @@ STATE="$BASE/update-state"
 NOTICE="$BASE/update-failed"
 LOG="$BASE/update.log"
 MODE_FILE="$BASE/update-mode"
+PROGRESS="$BASE/update-progress"
+BUILD_LOG="$BASE/build.log"
+WHO="The automatic update"
 REPO=""
 OWNER=""
 OLD=""
@@ -52,6 +55,11 @@ state_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -n 1; }
 
 state_set() {
   { grep -v "^$1=" "$STATE" 2>/dev/null; echo "$1=$2"; } > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+}
+
+# What the update is doing now, for MITSTATUS: the stage, the version it is going to, and when the stage began.
+progress() {  # stage, version
+  printf 'stage=%s\nversion=%s\nstage_started=%s\n' "$1" "$2" "$(date +%s)" > "$PROGRESS.tmp" && mv "$PROGRESS.tmp" "$PROGRESS"
 }
 
 as_owner() {
@@ -125,6 +133,12 @@ notice() { printf '%s\n' "$1" > "$NOTICE"; }
 # The update did not work: put the old version back, and tell everybody who opens the link.
 fail() {  # stage, reason
   log "The update failed at $1: $2"
+  # The build's own output is not in this log (it goes to the journal), so its last lines are copied here.
+  if [ "$1" = compile ] && [ -s "$BUILD_LOG" ]; then
+    log "The end of the build's output:"
+    tail -n 25 "$BUILD_LOG" | sed 's/^/    /' >> "$LOG"
+  fi
+  progress restoring "$(cat "$ROLL/version" 2>/dev/null || echo unknown)"
   restore_previous
   local back
   if healthy "$(cat "$ROLL/version" 2>/dev/null)"; then
@@ -132,7 +146,8 @@ fail() {  # stage, reason
   else
     back="The previous version did not start either, so App Inventor may be down. Please ask whoever runs the Raspberry Pi."
   fi
-  notice "The automatic update to $NEW_SHORT failed at $1 ($2). $back Projects and backups were not changed. For details, run: sudo tail -n 60 $LOG"
+  notice "$WHO to $NEW_SHORT failed at $1 ($2). $back Projects and backups were not changed. For details, run: sudo tail -n 60 $LOG"
+  rm -f "$PROGRESS"
   log "Back on $(cat "$BASE/version" 2>/dev/null)."
   exit 1
 }
@@ -181,11 +196,23 @@ main() {
   OWNER="$(stat -c %U "$REPO")"
 
   if [ "$rollback" = 1 ]; then
-    restore_previous || exit 1
+    local from
+    from="$(as_owner git -C "$REPO" rev-parse HEAD)"
+    progress restoring "$(cat "$ROLL/version" 2>/dev/null || echo unknown)"
+    if ! restore_previous; then rm -f "$PROGRESS"; exit 1; fi
     if healthy "$(cat "$ROLL/version" 2>/dev/null)"; then
+      # The version taken back is held: the nightly update leaves it alone until a newer version is published. --now still
+      # installs it. Going back also clears the notice of the failure that came before.
+      if [ "$(cat "$ROLL/commit")" != "$from" ]; then
+        state_set held "$from"
+        state_set held_short "$(as_owner git -C "$REPO" rev-parse --short "$from")"
+      fi
+      state_set changed_at "$(date '+%F %R')"
+      rm -f "$NOTICE" "$PROGRESS"
       log "Back on $(cat "$BASE/version")."
       exit 0
     fi
+    rm -f "$PROGRESS"
     log "The restored version did not answer; check the log."
     exit 1
   fi
@@ -221,6 +248,11 @@ main() {
     log "$WHY; nightly updates are set to notify only."
     exit 0
   fi
+  # A version taken back by hand (MITSTATUS option 10, or --rollback) is not installed again by the nightly update.
+  if [ "$now" = 0 ] && [ -n "$(state_get held)" ] && [ "$NEW" = "$(state_get held)" ]; then
+    log "Not installing $NEW_SHORT: it was taken back by hand. To install it, run: sudo $BASE/update.sh --now"
+    exit 0
+  fi
   if [ "$now" = 0 ] && [ "$(state_get last_day)" = "$(date +%F)" ]; then exit 0; fi
   if [ "$now" = 0 ] && people_online; then
     log "People are online; I will try again at the next half hour."
@@ -235,31 +267,44 @@ main() {
     exit 1
   fi
 
+  [ "$now" = 1 ] && WHO="The update"
   state_set last_day "$(date +%F)"
   log "Updating from $(cat "$BASE/version" 2>/dev/null || echo unknown) to $NEW_SHORT."
+  progress preparing "$NEW_SHORT"
   if ! snapshot; then
+    rm -f "$PROGRESS"
     log "Could not save the current version, so nothing was changed."
     exit 1
   fi
   if ! as_owner git -C "$REPO" merge -q --ff-only "origin/$branch"; then
+    rm -f "$PROGRESS"
     log "Could not fast-forward the downloaded copy, so nothing was changed."
     exit 1
   fi
 
   # Compile: the build runs while the current version keeps serving. Nothing is installed until
-  # the build has succeeded.
+  # the build has succeeded. Its output is kept in build.log, and fail copies the end of it into this log.
+  rm -f "$BUILD_LOG"
   if [ "$sim" = compile ]; then fail compile "a failure was simulated for testing"; fi
-  if ! SUDO_USER="$OWNER" DEBIAN_FRONTEND=noninteractive "$REPO/collab/pi/install.sh" --build-here; then
+  compile_started="$(date +%s)"
+  progress compile "$NEW_SHORT"
+  if ! SUDO_USER="$OWNER" DEBIAN_FRONTEND=noninteractive "$REPO/collab/pi/install.sh" --build-here 2>&1 | tee "$BUILD_LOG"; then
     fail compile "the build or the install step returned an error"
   fi
+  # How long the build took is the estimate for the next one, which MITSTATUS shows as the time left.
+  state_set build_seconds "$(( $(date +%s) - compile_started ))"
 
   # Start: the new version must answer, and keep answering, within 10 minutes.
+  progress start "$NEW_SHORT"
   if [ "$sim" = start ]; then fail start "a failure was simulated for testing"; fi
   if ! healthy "$NEW_SHORT"; then
     fail start "App Inventor or the team hub did not answer as the new version within 10 minutes"
   fi
 
-  rm -f "$NOTICE" "$BASE/update-available"
+  rm -f "$NOTICE" "$BASE/update-available" "$PROGRESS"
+  state_set held ""
+  state_set held_short ""
+  state_set changed_at "$(date '+%F %R')"
   log "Updated. Now running $NEW_SHORT. The version before it is kept for --rollback."
   exit 0
 }

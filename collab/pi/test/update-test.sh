@@ -56,6 +56,8 @@ mkdir -p "$AI_BASE/war"
 cp "$root/marker.txt" "$AI_BASE/war/marker.tmp" && mv "$AI_BASE/war/marker.tmp" "$AI_BASE/war/marker.txt"
 git -C "$root" rev-parse --short HEAD > "$AI_BASE/version.tmp" && mv "$AI_BASE/version.tmp" "$AI_BASE/version"
 echo "installed $(cat "$root/marker.txt")" >> "$AI_BASE/calls.log"
+echo "progress: $(grep '^stage=' "$AI_BASE/update-progress" 2>/dev/null)" >> "$AI_BASE/calls.log"
+[ "${FAKE_INSTALL_RC:-0}" = 0 ] || echo "BUILD FAILED: a test error"
 exit "${FAKE_INSTALL_RC:-0}"
 INSTALL
 chmod +x "$T/author/collab/pi/install.sh"
@@ -102,6 +104,7 @@ check "a good update succeeds" [ "$rc" = 0 ]
 check "the new version is running" grep -qx two "$AI_BASE/war/marker.txt"
 check "the version file shows the new version" [ "$(cat "$AI_BASE/version")" = "$V2" ]
 check "no notice is left" [ ! -e "$AI_BASE/update-failed" ]
+check "the build reported its progress as it started" grep -q 'progress: stage=compile' "$AI_BASE/calls.log"
 check "the old version is kept for rollback" [ "$(cat "$AI_BASE/rollback/commit")" = "$V1FULL" ]
 check "the old files are kept for rollback" grep -qx one "$AI_BASE/rollback/war/marker.txt"
 
@@ -123,6 +126,9 @@ check "the version file is the old one" [ "$(cat "$AI_BASE/version")" = "$V2" ]
 check "the repository is back on the old commit" [ "$(git -C "$REPO" rev-parse HEAD)" = "$V2FULL" ]
 check "everybody is told it failed at compile" grep -q "failed at compile" "$AI_BASE/update-failed"
 check "the notice says the previous version runs" grep -q "running again" "$AI_BASE/update-failed"
+check "the end of the build's output is copied into the log" grep -q 'BUILD FAILED: a test error' "$AI_BASE/update.log"
+check "a failure started by hand is called the update, not the automatic one" grep -q '^The update to ' "$AI_BASE/update-failed"
+check "the progress file is gone after a failure" [ ! -e "$AI_BASE/update-progress" ]
 
 # 4. A new version that does not answer is put back too.
 publish four
@@ -196,6 +202,40 @@ check "a nightly run installs a stale copy too" [ "$rc" = 0 ]
 check "the nightly run builds once" [ "$(installs)" = "$((before + 1))" ]
 run
 check "and after that the copy is up to date" grep -q "Up to date" "$T/out"
+
+# 11. A version taken back by hand is held: the nightly update leaves it alone, and --now installs it. Going back clears the
+# notice of the failure before it. The length of the build is recorded, and the progress file is gone once an update is done.
+# (last_day is removed before each nightly run, so that the run is not skipped as the one of the day.)
+publish eighth
+V8FULL="$(git -C "$T/author" rev-parse HEAD)"
+sed -i '/^last_day=/d' "$AI_BASE/update-state"
+run; rc=$?
+check "the nightly run installs eighth" [ "$rc" = 0 ] && grep -qx eighth "$AI_BASE/war/marker.txt"
+check "the length of the build is recorded" grep -Eq '^build_seconds=[0-9]+$' "$AI_BASE/update-state"
+check "the progress file is gone once the update is done" [ ! -e "$AI_BASE/update-progress" ]
+printf 'stale notice\n' > "$AI_BASE/update-failed"
+run --rollback; rc=$?
+check "going back by hand succeeds" [ "$rc" = 0 ]
+check "going back puts back the version before eighth" grep -qx seven "$AI_BASE/war/marker.txt"
+check "going back clears the notice of the failure before it" [ ! -e "$AI_BASE/update-failed" ]
+check "the version taken back is held" [ "$(sed -n 's/^held=//p' "$AI_BASE/update-state" | tail -n 1)" = "$V8FULL" ]
+check "its short name is recorded for the status" grep -q '^held_short=' "$AI_BASE/update-state"
+sed -i '/^last_day=/d' "$AI_BASE/update-state"
+before="$(installs)"
+run; rc=$?
+check "the nightly run leaves the held version alone" [ "$rc" = 0 ] && [ "$(installs)" = "$before" ]
+check "the nightly run says why" grep -q 'taken back by hand' "$T/out"
+publish nine
+sed -i '/^last_day=/d' "$AI_BASE/update-state"
+run; rc=$?
+check "the nightly run installs a newer version than the held one" [ "$rc" = 0 ] && grep -qx nine "$AI_BASE/war/marker.txt"
+check "installing a newer version clears the hold" [ -z "$(sed -n 's/^held=//p' "$AI_BASE/update-state" | tail -n 1)" ]
+run --rollback; rc=$?
+check "going back from nine puts back the version before it" [ "$rc" = 0 ] && grep -qx seven "$AI_BASE/war/marker.txt"
+check "nine is held after going back from it" [ "$(sed -n 's/^held=//p' "$AI_BASE/update-state" | tail -n 1)" = "$(git -C "$T/author" rev-parse HEAD)" ]
+run --now; rc=$?
+check "--now installs the held version by hand" [ "$rc" = 0 ] && grep -qx nine "$AI_BASE/war/marker.txt"
+check "and that clears the hold" [ -z "$(sed -n 's/^held=//p' "$AI_BASE/update-state" | tail -n 1)" ]
 
 echo "$pass passed, $failed failed"
 [ "$failed" = 0 ]

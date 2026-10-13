@@ -104,7 +104,10 @@ To see the link and the team code again at any time, and check that everything i
 (each preset, or back to the built-in one), get a new Cloudflare link (the old address stops working), restart App
 Inventor and the hub (the link stays), change the access code, change the override code, update the app (it checks GitHub
 and asks before the update starts; the update keeps running if the window is closed), change the API key of the service
-in use (the same prompt as `set-ai.sh`), change the **OpenCode Go** models, change the **OpenCode Go** API key, or exit.
+in use (the same prompt as `set-ai.sh`), change the **OpenCode Go** models, change the **OpenCode Go** API key, go back to the previous version (option 10), or exit.
+The status shows what an update is doing and how long it has left: while a build runs, the time left comes from how long
+the last build on this Pi took (45 minutes until one has finished). It also shows how the last update went if it failed,
+a newer version that is waiting, and the previous version that option 10 goes back to.
 The OpenCode Go options work whichever service is in use. The status shows the service in use, whether each service's key
 is set (never the keys), and, for OpenCode Go, that its models are offered in the companion only after `/beta`. It is
 `/usr/local/bin/MITSTATUS`, installed by the install and the update from `collab/pi/mitstatus.sh`. Its model lists are read
@@ -339,10 +342,13 @@ interrupts a session. Your projects, backups, team code and OpenRouter settings 
 within 10 minutes, puts the previous version back automatically. Everyone who opens the link then
 sees a red notice at the top of the page, saying which step failed and that the previous version
 is running again. The notice goes away after the next update that works. The log is
-`/opt/appinventor/update.log` (`sudo tail -n 60 /opt/appinventor/update.log`).
+`/opt/appinventor/update.log` (`sudo tail -n 60 /opt/appinventor/update.log`). When a build fails, the end of its output
+is copied into that log too; the whole output is in `/opt/appinventor/build.log`.
 
 The previous version is kept in `/opt/appinventor/rollback`, so you can go back by hand with
-`sudo /opt/appinventor/update.sh --rollback`. Commands:
+`sudo /opt/appinventor/update.sh --rollback` (MITSTATUS option 10 does the same). The version it takes back is held: the
+nightly update does not install it again, but `--now` does (and MITSTATUS option 6). A newer version published later is
+installed as usual. Commands:
 * `--check` says whether a newer version exists, without installing it.
 * `--now` updates right away, even if people are online.
 * `--mode install|notify|off` chooses what the nightly run does: install (the default), only

@@ -49,13 +49,13 @@ out2="$(MIT_HUB="$T/no-hub" bash "$MS" --show 2>&1)"
 check "status without a model list says so" "printf '%s' \"\$out2\" | grep -q 'have no OpenRouter model list'"
 
 # 3. The menu lists the six options; a wrong choice is refused; 6 exits
-out3="$(printf 'x\n10\n' | bash "$MS" 2>&1)"; rc3=$?
-check "menu lists the options" "printf '%s' \"\$out3\" | grep -q '1. Change AI models' && printf '%s' \"\$out3\" | grep -q '6. Update' && printf '%s' \"\$out3\" | grep -q '7. Change API key' && printf '%s' \"\$out3\" | grep -q '10. Exit'"
-check "a wrong choice is refused" "printf '%s' \"\$out3\" | grep -q 'Type a number from 1 to 10.'"
-check "10 exits with 0" "[ \$rc3 -eq 0 ]"
+out3="$(printf 'x\n11\n' | bash "$MS" 2>&1)"; rc3=$?
+check "menu lists the options" "printf '%s' \"\$out3\" | grep -q '1. Change AI models' && printf '%s' \"\$out3\" | grep -q '6. Update' && printf '%s' \"\$out3\" | grep -q '7. Change API key' && printf '%s' \"\$out3\" | grep -q '11. Exit'"
+check "a wrong choice is refused" "printf '%s' \"\$out3\" | grep -q 'Type a number from 1 to 11.'"
+check "11 exits with 0" "[ \$rc3 -eq 0 ]"
 
 # 4. Change AI models: Balanced to a new name
-printf '1\n2\nanthropic/claude-haiku-5.5\n\n10\n' | bash "$MS" > "$T/out4" 2>&1
+printf '1\n2\nanthropic/claude-haiku-5.5\n\n11\n' | bash "$MS" > "$T/out4" 2>&1
 check "Balanced is set in ai.env" "grep -q '^AI_MODEL_BALANCED=anthropic/claude-haiku-5.5$' '$T/base/ai.env'"
 check "the other override is kept" "grep -q '^AI_MODEL_FAST=mistralai/example-model$' '$T/base/ai.env'"
 check "the key is kept" "grep -q '^OPENROUTER_API_KEY=sk-test-123$' '$T/base/ai.env'"
@@ -63,16 +63,16 @@ check "ai.env stays mode 600" "[ \"\$(stat -c %a '$T/base/ai.env')\" = 600 ]"
 check "the hub restarts after a model change" "grep -q 'restart collab-hub' '$T/systemctl.log'"
 
 # 5. Change AI models: back to the built-in model
-printf '1\n3\ndefault\n\n10\n' | bash "$MS" > "$T/out5" 2>&1
+printf '1\n3\ndefault\n\n11\n' | bash "$MS" > "$T/out5" 2>&1
 check "default removes the Fast override" "! grep -q '^AI_MODEL_FAST=' '$T/base/ai.env'"
 
 # 6. New link: the quick tunnel restarts and the new address is shown
-printf '2\n\n10\n' | bash "$MS" > "$T/out6" 2>&1
+printf '2\n\n11\n' | bash "$MS" > "$T/out6" 2>&1
 check "new link restarts the quick tunnel" "grep -q 'restart cloudflared-quick' '$T/systemctl.log'"
 check "new link shows the new address" "grep -q 'New link: https://gen2.trycloudflare.com' '$T/out6'"
 
 # 7. Restart: App Inventor and the hub, not the tunnel
-printf '3\n\n10\n' | bash "$MS" > "$T/out7" 2>&1
+printf '3\n\n11\n' | bash "$MS" > "$T/out7" 2>&1
 check "restart restarts App Inventor and the hub" "grep -q 'restart appinventor collab-hub' '$T/systemctl.log'"
 check "restart does not restart the tunnel again" "[ \"\$(grep -c 'restart cloudflared-quick' '$T/systemctl.log')\" = 1 ]"
 check "restart reports App Inventor running" "grep -q 'App Inventor is running again' '$T/out7'"
@@ -80,10 +80,10 @@ check "restart reports App Inventor running" "grep -q 'App Inventor is running a
 # 8. Access code and override code run their own scripts (stand-ins here)
 printf '#!/usr/bin/env bash\necho "set-team-code called"\n' > "$T/base/set-team-code.sh"
 chmod +x "$T/base/set-team-code.sh"
-printf '4\n\n10\n' | bash "$MS" > "$T/out8" 2>&1
+printf '4\n\n11\n' | bash "$MS" > "$T/out8" 2>&1
 check "change access code runs set-team-code.sh" "grep -q 'set-team-code called' '$T/out8'"
 cp "$HERE/set-ai.sh" "$T/base/set-ai.sh"
-printf '5\n\n10\n' | bash "$MS" > "$T/out8b" 2>&1
+printf '5\n\n11\n' | bash "$MS" > "$T/out8b" 2>&1
 check "change override code runs set-ai.sh --pin" "grep -q 'Full-app PIN' '$T/out8b' || grep -q 'Full-app PIN saved' '$T/out8b' || grep -q 'The PIN must be' '$T/out8b'"
 
 # 9. set-ai.sh --model: rules and results
@@ -145,22 +145,22 @@ fi
 exit 0
 EOF
 chmod +x "$T/base/update.sh"
-printf '6\n\n10\n' | bash "$MS" > "$T/out13a" 2>&1
+printf '6\n\n11\n' | bash "$MS" > "$T/out13a" 2>&1
 check "an up-to-date app says so" "grep -q 'Up to date (test)' '$T/out13a'"
 check "an up-to-date app asks nothing" "! grep -q 'Update to' '$T/out13a'"
 touch "$T/base/newer"
-printf '6\nn\n\n10\n' | bash "$MS" > "$T/out13b" 2>&1
+printf '6\nn\n\n11\n' | bash "$MS" > "$T/out13b" 2>&1
 check "a newer version is offered by name" "grep -q 'Update to abc1234 Test change?' '$T/out13b'"
 check "declining starts nothing" "grep -q 'Not updated.' '$T/out13b' && [ ! -e '$T/systemd-run.log' ]"
-printf '6\ny\n\n10\n' | bash "$MS" > "$T/out13c" 2>&1
+printf '6\ny\n\n11\n' | bash "$MS" > "$T/out13c" 2>&1
 check "accepting starts update.sh --now as a unit of its own" "grep -q -- '--unit=collab-update-now' '$T/systemd-run.log' && grep -q 'update.sh --now' '$T/systemd-run.log'"
 check "accepting says the update runs in the background" "grep -q 'running in the background' '$T/out13c'"
 exec 8>"$T/update.lock"; flock -x 8
-printf '6\n\n10\n' | bash "$MS" > "$T/out13d" 2>&1
+printf '6\n\n11\n' | bash "$MS" > "$T/out13d" 2>&1
 exec 8>&-
 check "an update already running is reported, not started again" "grep -q 'An update is already running' '$T/out13d' && [ \"\$(grep -c -- '--unit=collab-update-now' '$T/systemd-run.log')\" = 1 ]"
 touch "$T/base/check-fails"
-printf '6\n\n10\n' | bash "$MS" > "$T/out13e" 2>&1
+printf '6\n\n11\n' | bash "$MS" > "$T/out13e" 2>&1
 check "a failed check says so" "grep -q 'Could not check' '$T/out13e'"
 rm -f "$T/base/newer" "$T/base/check-fails"
 
@@ -174,7 +174,7 @@ check "an older hub still shows the models, from the project folder" "printf '%s
 check "an older hub says the models take effect once it is updated" "printf '%s' \"\$out14\" | grep -q 'is older and does not use these yet'"
 out15="$(MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1)"
 check "a current hub gets no older note" "! printf '%s' \"\$out15\" | grep -q 'is older'"
-printf '1\n\n\n10\n' | MIT_HUB="$T/old-hub" bash "$MS" > "$T/out16" 2>&1
+printf '1\n\n\n11\n' | MIT_HUB="$T/old-hub" bash "$MS" > "$T/out16" 2>&1
 check "Change AI models works from the project folder's list" "grep -q 'Which OpenRouter model should change' '$T/out16' && grep -q 'Smart' '$T/out16'"
 rm -f "$T/base/repo"
 
@@ -186,7 +186,7 @@ check "a dashboard tunnel's hostname is shown as the permanent link" "printf '%s
 rm -f "$T/cf-active" "$T/base/cloudflare-hostname"
 
 # 16. Change API key (option 7) runs set-ai.sh, which asks for the key, saves it, and restarts the hub
-out16b="$(printf '7\nsk-new-test-key-123\n\n10\n' | MIT_HUB="$REPO/collab/server" bash "$MS" 2>&1)"
+out16b="$(printf '7\nsk-new-test-key-123\n\n11\n' | MIT_HUB="$REPO/collab/server" bash "$MS" 2>&1)"
 check "option 7 runs the key setup and says the helper is on" "printf '%s' \"\$out16b\" | grep -q 'The AI helper is on'"
 check "the new key is saved in ai.env" "grep -q '^OPENROUTER_API_KEY=sk-new-test-key-123$' '$T/base/ai.env'"
 check "the key is saved once, and the other settings are kept" "[ \"\$(grep -c '^OPENROUTER_API_KEY=' '$T/base/ai.env')\" = 1 ] && grep -q '^AI_DAILY_LIMIT=' '$T/base/ai.env'"
@@ -215,24 +215,24 @@ check "--provider openrouter goes back" "grep -qx 'AI_PROVIDER=openrouter' '$T/b
 
 # 19. OpenCode Go in MITSTATUS, whichever service is in use: its own key (option 9) and its own models (option 8). With
 # OpenRouter in use here, the OpenCode Go options must not change the service in use, nor the OpenRouter settings.
-out19="$(printf '9\nsk-opencode-new-789\n\n10\n' | bash "$MS" 2>&1)"
+out19="$(printf '9\nsk-opencode-new-789\n\n11\n' | bash "$MS" 2>&1)"
 check "option 9 asks for the OpenCode Go key and says it is saved" "printf '%s' \"\$out19\" | grep -q 'OpenCode Go key is saved'"
 check "option 9 saves the new OpenCode Go key, once" "grep -qx 'OPENCODE_API_KEY=sk-opencode-new-789' '$T/base/ai.env' && [ \"\$(grep -c '^OPENCODE_API_KEY=' '$T/base/ai.env')\" = 1 ]"
 check "option 9 keeps the OpenRouter key and the service in use" "grep -qx 'OPENROUTER_API_KEY=sk-new-test-key-123' '$T/base/ai.env' && grep -qx 'AI_PROVIDER=openrouter' '$T/base/ai.env'"
 check "option 9 says the OpenCode Go models wait for /beta" "printf '%s' \"\$out19\" | grep -q 'only after someone types /beta'"
 
-out19b="$(printf '8\n1\nkimi-k2.6\n\n10\n' | bash "$MS" 2>&1)"
+out19b="$(printf '8\n1\nkimi-k2.6\n\n11\n' | bash "$MS" 2>&1)"
 check "option 8 lists the OpenCode Go models" "printf '%s' \"\$out19b\" | grep -q 'Which OpenCode Go model should change' && printf '%s' \"\$out19b\" | grep -q 'Muse Spark 1.3'"
 check "option 8 sets the OpenCode Go model of the preset" "grep -qx 'AI_OPENCODE_MODEL_SMART=kimi-k2.6' '$T/base/ai.env'"
 check "option 8 leaves the OpenRouter model of that preset alone" "! grep -q '^AI_MODEL_SMART=' '$T/base/ai.env'"
-printf '8\n1\ndefault\n\n10\n' | bash "$MS" > "$T/out19c" 2>&1
+printf '8\n1\ndefault\n\n11\n' | bash "$MS" > "$T/out19c" 2>&1
 check "option 8 with default puts the built-in OpenCode Go model back" "! grep -q '^AI_OPENCODE_MODEL_SMART=' '$T/base/ai.env'"
 
-printf '1\n1\nanthropic/claude-haiku-5.5\n\n10\n' | bash "$MS" > "$T/out19d" 2>&1
+printf '1\n1\nanthropic/claude-haiku-5.5\n\n11\n' | bash "$MS" > "$T/out19d" 2>&1
 check "option 1 changes the OpenRouter model while OpenRouter is in use" "grep -qx 'AI_MODEL_SMART=anthropic/claude-haiku-5.5' '$T/base/ai.env'"
 check "option 1 says which service its list is for" "grep -q 'Which OpenRouter model should change' '$T/out19d'"
 
-out19e="$(printf '10\n' | bash "$MS" 2>&1)"
+out19e="$(printf '11\n' | bash "$MS" 2>&1)"
 check "the menu names the service in use on options 1 and 7" "printf '%s' \"\$out19e\" | grep -q '1. Change AI models (OpenRouter)' && printf '%s' \"\$out19e\" | grep -q '7. Change API key (OpenRouter)'"
 check "the menu offers the OpenCode Go model and key options" "printf '%s' \"\$out19e\" | grep -q '8. Change OpenCode Go models' && printf '%s' \"\$out19e\" | grep -q '9. Change OpenCode Go API key'"
 check "the status shows whether each key is set, never the keys" "printf '%s' \"\$out19e\" | grep -q 'AI keys:            OpenRouter set, OpenCode Go set' && ! printf '%s' \"\$out19e\" | grep -q 'sk-'"
@@ -259,22 +259,130 @@ printf 'sk-opencode-new-789\n' | bash "$T/base/set-ai.sh" --provider opencode > 
 out19f="$(MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1)"
 check "with OpenCode Go in use, the status says its models need /beta" "printf '%s' \"\$out19f\" | grep -q 'OpenCode Go (in the companion its models need /beta'"
 check "with OpenCode Go in use, the status lists its models" "printf '%s' \"\$out19f\" | grep -q 'AI models (OpenCode Go):' && printf '%s' \"\$out19f\" | grep -q 'Balanced  *Step 5 Preview'"
-printf '1\n1\nglm-5.3\n\n10\n' | MIT_HUB="$REPO/collab/server" bash "$MS" > "$T/out19g" 2>&1
+printf '1\n1\nglm-5.3\n\n11\n' | MIT_HUB="$REPO/collab/server" bash "$MS" > "$T/out19g" 2>&1
 check "with OpenCode Go in use, option 1 changes its model and is labelled so" "grep -qx 'AI_OPENCODE_MODEL_SMART=glm-5.3' '$T/base/ai.env' && grep -q '1. Change AI models (OpenCode Go)' '$T/out19g'"
 out19h="$(MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1)"
 check "a changed OpenCode Go model shows its own name" "printf '%s' \"\$out19h\" | grep -q 'Smart *GLM 5.3'"
-printf '8\n\n\n10\n' | MIT_HUB="$REPO/collab/server" bash "$MS" > "$T/out19i" 2>&1
+printf '8\n\n\n11\n' | MIT_HUB="$REPO/collab/server" bash "$MS" > "$T/out19i" 2>&1
 check "option 8 with OpenCode Go in use still lists its models" "grep -q 'Which OpenCode Go model should change' '$T/out19i'"
 
 # Back to OpenRouter in use, and the hub with no OpenCode Go list at all
 printf 'sk-new-test-key-123\n' | bash "$T/base/set-ai.sh" --provider openrouter > /dev/null 2>&1
 check "--provider openrouter brings OpenRouter back as the service in use" "grep -qx 'AI_PROVIDER=openrouter' '$T/base/ai.env'"
-out19j="$(printf '8\n\n10\n' | MIT_HUB="$T/no-hub" bash "$MS" 2>&1)"
+out19j="$(printf '8\n\n11\n' | MIT_HUB="$T/no-hub" bash "$MS" 2>&1)"
 check "option 8 says so when there is no OpenCode Go list anywhere" "printf '%s' \"\$out19j\" | grep -q 'have no OpenCode Go model list'"
 printf '%s\n' "$REPO" > "$T/base/repo"
-printf '8\n\n\n10\n' | MIT_HUB="$T/old-hub" bash "$MS" > "$T/out19k" 2>&1
+printf '8\n\n\n11\n' | MIT_HUB="$T/old-hub" bash "$MS" > "$T/out19k" 2>&1
 check "an older hub gets the OpenCode Go list from the project folder" "grep -q 'Which OpenCode Go model should change' '$T/out19k'"
 rm -f "$T/base/repo"
+
+# 20. The update in the status block: what it is doing and the time left, how the last one went, the version that option 10
+# goes back to, and the revert itself. update.sh keeps its state in these files; the test writes them, and holds the update
+# lock where a build or a revert is running.
+hold_lock() { exec 8>"$T/update.lock"; flock -x 8; }
+release_lock() { exec 8>&-; }
+row() { printf '  %-20s%s' "$1" "$2"; }
+show20() { MIT_HUB="$REPO/collab/server" bash "$MS" --show 2>&1; }
+rm -rf "$T/base/rollback"
+rm -f "$T/base/update-failed" "$T/base/update-available" "$T/base/update-progress" "$T/base/update-state" "$T/base/update-mode"
+printf 'abc1234\n' > "$T/base/version"
+out20a="$(show20)"
+want="$(row 'Update:' 'up to date (abc1234)')"
+check "a finished update says it is up to date, with its version" "printf '%s' \"\$out20a\" | grep -qF \"\$want\""
+want="$(row 'Nightly updates:' 'install')"
+check "the status shows the nightly update mode, install by default" "printf '%s' \"\$out20a\" | grep -qF \"\$want\""
+check "with no earlier version saved, nothing is offered to go back to" "! printf '%s' \"\$out20a\" | grep -q 'Previous version'"
+printf 'notify\n' > "$T/base/update-mode"
+want="$(row 'Nightly updates:' 'notify')"
+out20b="$(show20)"
+check "the nightly update mode shows when it is changed" "printf '%s' \"\$out20b\" | grep -qF \"\$want\""
+rm -f "$T/base/update-mode"
+
+# An earlier version is saved: it is offered, unless it is the version running now
+mkdir -p "$T/base/rollback"
+printf 'def5678\n' > "$T/base/rollback/version"
+printf '0123456789abcdef0123456789abcdef01234567\n' > "$T/base/rollback/commit"
+out20c="$(show20)"
+want="$(row 'Previous version:' 'def5678 (option 10 goes back to it)')"
+check "the version before the last update is offered, with option 10" "printf '%s' \"\$out20c\" | grep -qF \"\$want\""
+printf 'def5678\n' > "$T/base/version"
+out20d="$(show20)"
+check "when the saved version is the one running, nothing is offered" "! printf '%s' \"\$out20d\" | grep -q 'Previous version'"
+printf 'abc1234\n' > "$T/base/version"
+
+# A build that is running: the time left comes from how long the last build took, or from 45 minutes for a first build
+now="$(date +%s)"
+printf 'build_seconds=2700\n' > "$T/base/update-state"
+printf 'stage=compile\nversion=fed9876\nstage_started=%s\n' "$((now - 600))" > "$T/base/update-progress"
+hold_lock; out20e="$(show20)"; release_lock
+want="$(row 'Update:' 'building fed9876 now, 10 min in. About 35 min left.')"
+check "a running build names its version and the time left" "printf '%s' \"\$out20e\" | grep -qF \"\$want\""
+check "the estimate says what it is based on" "printf '%s' \"\$out20e\" | grep -q 'Estimate: 45 min, because the last build here took 45 min.'"
+printf 'stage=compile\nversion=fed9876\nstage_started=%s\n' "$((now - 3000))" > "$T/base/update-progress"
+hold_lock; out20f="$(show20)"; release_lock
+check "a build longer than its estimate says so" "printf '%s' \"\$out20f\" | grep -q 'longer than the 45 min estimate'"
+rm -f "$T/base/update-state"
+printf 'stage=compile\nversion=fed9876\nstage_started=%s\n' "$((now - 600))" > "$T/base/update-progress"
+hold_lock; out20g="$(show20)"; release_lock
+check "a first build is estimated at 45 minutes, and the status says so" "printf '%s' \"\$out20g\" | grep -q 'Estimate: 45 min, because a first build takes 30 to 60 min.'"
+check "the time left for a first build is worked out from that" "printf '%s' \"\$out20g\" | grep -q 'About 35 min left.'"
+printf 'stage=restoring\nversion=fed9876\nstage_started=%s\n' "$now" > "$T/base/update-progress"
+hold_lock; out20h="$(show20)"; release_lock
+check "a failed update says the previous version is being put back" "printf '%s' \"\$out20h\" | grep -q 'the new version failed, so the previous one is being put back.'"
+printf 'stage=start\nversion=fed9876\nstage_started=%s\n' "$((now - 60))" > "$T/base/update-progress"
+hold_lock; out20i="$(show20)"; release_lock
+check "a version that is starting says how long it has to answer" "printf '%s' \"\$out20i\" | grep -q 'starting fed9876. About 9 min left for it to answer.'"
+rm -f "$T/base/update-progress"
+hold_lock; out20j="$(show20)"; release_lock
+check "a running update with no progress file still says it is running" "printf '%s' \"\$out20j\" | grep -q 'an update is running.'"
+
+# How the last update went: a failure's notice, a newer version, and a version taken back by hand
+printf 'The automatic update to fed9876 failed at compile (the build or the install step returned an error). The previous version is running again.\n' > "$T/base/update-failed"
+out20k="$(show20)"
+want="$(row 'Update:' 'FAILED. The automatic update to fed9876 failed at compile')"
+check "a failed update shows its notice in the status" "printf '%s' \"\$out20k\" | grep -qF \"\$want\""
+rm -f "$T/base/update-failed"
+printf 'abc9999 A newer change\n' > "$T/base/update-available"
+out20l="$(show20)"
+check "a newer version is named, with what the nightly update does" "printf '%s' \"\$out20l\" | grep -q 'newer version available: abc9999 A newer change. The nightly update installs it at 3 AM'"
+printf 'held_short=abc9999\n' >> "$T/base/update-state"
+out20m="$(show20)"
+check "a version taken back by hand is shown as held" "printf '%s' \"\$out20m\" | grep -q 'abc9999 was taken back by hand, so the nightly update leaves it alone.'"
+rm -f "$T/base/update-available" "$T/base/update-state"
+
+# Starting an update says how long the build is estimated to take (the stand-in update.sh of section 13 reports a newer version)
+touch "$T/base/newer"
+printf 'build_seconds=1500\n' > "$T/base/update-state"
+rm -f "$T/systemd-run.log"
+out20s="$(printf '6\ny\n\n11\n' | MIT_HUB="$REPO/collab/server" bash "$MS" 2>&1)"
+rm -f "$T/base/newer" "$T/base/update-state"
+check "starting an update says how long the build is estimated to take" "printf '%s' \"\$out20s\" | grep -q 'estimated to take about 25 min'"
+
+# Option 10: a revert needs an earlier version and no running update. It asks first, then runs update.sh --rollback as a unit.
+mkdir -p "$T/base/rollback"
+printf 'def5678\n' > "$T/base/rollback/version"
+printf '0123456789abcdef0123456789abcdef01234567\n' > "$T/base/rollback/commit"
+printf 'abc1234\n' > "$T/base/version"
+rm -f "$T/systemd-run.log"
+out20n="$(printf '10\nn\n\n11\n' | MIT_HUB="$REPO/collab/server" bash "$MS" 2>&1)"
+check "declining the revert changes nothing" "printf '%s' \"\$out20n\" | grep -q 'Not changed.' && [ ! -e '$T/systemd-run.log' ]"
+out20o="$(printf '10\ny\n\n11\n' | MIT_HUB="$REPO/collab/server" bash "$MS" 2>&1)"
+check "the revert says which version it goes back from and to" "printf '%s' \"\$out20o\" | grep -q 'Go back from abc1234 to def5678'"
+check "accepting the revert starts update.sh --rollback as a unit of its own" "grep -q -- '--unit=collab-revert-now' '$T/systemd-run.log' && grep -q -- 'update.sh --rollback' '$T/systemd-run.log'"
+check "accepting the revert says it runs in the background" "printf '%s' \"\$out20o\" | grep -q 'Going back in the background'"
+rm -rf "$T/base/rollback"
+out20p="$(printf '10\n\n11\n' | MIT_HUB="$REPO/collab/server" bash "$MS" 2>&1)"
+check "with no earlier version, option 10 says so and starts nothing" "printf '%s' \"\$out20p\" | grep -q 'There is no earlier version saved' && [ \"\$(grep -c 'collab-revert-now' '$T/systemd-run.log')\" = 1 ]"
+mkdir -p "$T/base/rollback"
+printf 'def5678\n' > "$T/base/rollback/version"
+printf '0123456789abcdef0123456789abcdef01234567\n' > "$T/base/rollback/commit"
+hold_lock
+out20q="$(printf '10\n\n11\n' | MIT_HUB="$REPO/collab/server" bash "$MS" 2>&1)"
+release_lock
+check "a revert is refused while an update is running" "printf '%s' \"\$out20q\" | grep -q 'An update is running. Go back once it has finished.' && [ \"\$(grep -c 'collab-revert-now' '$T/systemd-run.log')\" = 1 ]"
+out20r="$(printf '11\n' | MIT_HUB="$REPO/collab/server" bash "$MS" 2>&1)"
+check "the menu lists going back as option 10, and Exit as 11" "printf '%s' \"\$out20r\" | grep -q '10. Go back to the previous version' && printf '%s' \"\$out20r\" | grep -q '11. Exit'"
+rm -rf "$T/base/rollback"
 
 # 10. The changed scripts parse
 for f in "$HERE/mitstatus.sh" "$HERE/set-ai.sh" "$HERE/stable-link.sh" "$HERE/build-on-pi.sh" "$HERE/install.sh"; do
