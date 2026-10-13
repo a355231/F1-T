@@ -1554,7 +1554,13 @@ public class ObjectifyStorageIo implements StorageIo {
             fd.userId = userId;
           }
           datastore.put(fd);
-          memcache.put(key.getString(), fd); // Store the updated data in memcache
+          if (force) {
+            // A forced write (an AI change) empties the cache, so the next read comes from the datastore, which
+            // holds the new bytes, rather than from a copy that might be old.
+            memcache.delete(key.getString());
+          } else {
+            memcache.put(key.getString(), fd); // Store the updated data in memcache
+          }
           modTime.t = updateProjectModDate(datastore, projectId);
         }
       }, false); // Use transaction for blobstore, otherwise we don't need one

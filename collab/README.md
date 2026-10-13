@@ -100,18 +100,17 @@ To see the link and the team code again at any time, and check that everything i
 /opt/appinventor/show-info.sh
 ```
 
-**`MITSTATUS`** does the same and then offers the common jobs in one menu: change the AI models of the service in use
-(each preset, or back to the built-in one), get a new Cloudflare link (the old address stops working), restart App
-Inventor and the hub (the link stays), change the access code, change the override code, update the app (it checks GitHub
-and asks before the update starts; the update keeps running if the window is closed), change the API key of the service
-in use (the same prompt as `set-ai.sh`), change the **OpenCode Go** models, change the **OpenCode Go** API key, or exit.
-The OpenCode Go options work whichever service is in use. The status shows the service in use, whether each service's key
-is set (never the keys), and, for OpenCode Go, that its models are offered in the companion only after `/beta`. It is
-`/usr/local/bin/MITSTATUS`, installed by the install and the update from `collab/pi/mitstatus.sh`. Its model lists are read
-from the hub's own preset tables, so it shows the models the hub is running with. On a Pi whose hub is older than those
-tables, it reads the project folder's copy and says the models take effect once the hub is updated.
-`set-ai.sh --model smart|balanced|fast [<name> | --reset] [--service openrouter|opencode]` is what it uses for the models,
-and `set-ai.sh --key openrouter|opencode` for the keys. `collab/pi/test/mitstatus-test.sh` tests them, in a folder of its own.
+**`MITSTATUS`** does the same and then offers the common jobs in one menu, numbered 1 to 10: change the **OpenRouter**
+models (balanced or fast, or back to the built-in one), get a new Cloudflare link (the old address stops working), restart
+App Inventor and the hub (the link stays), change the access code, change the override code, update the app (it checks
+GitHub and asks before the update starts; the update keeps running if the window is closed), change the **OpenRouter** API
+key (the same prompt as `set-ai.sh --key openrouter`), change the **OpenCode Go** models, change the **OpenCode Go** API
+key, or exit. The status shows whether each service's key is set (never the keys), and the balanced and fast models of each
+service. It is `/usr/local/bin/MITSTATUS`, installed by the install and the update from `collab/pi/mitstatus.sh`. Its model
+lists are read from the hub's own preset tables, so it shows the models the hub is running with. On a Pi whose hub is older
+than those tables, it reads the project folder's copy and says the models take effect once the hub is updated.
+`set-ai.sh --model balanced|fast [<name> | --reset] [--service openrouter|opencode]` is what it uses for the models, and
+`set-ai.sh --key openrouter|opencode` for the keys. `collab/pi/test/mitstatus-test.sh` tests them, in a folder of its own.
 
 ### Permanent address
 
@@ -379,7 +378,10 @@ Press **Ctrl+I+M** (hold Ctrl and I, then M), or click **AI helper** in the Team
 its own window. It works on the project that is open, and its answers stream in as they are written,
 like a chat app. The helper works on a draft copy of the project. A change reaches the project only when
 someone presses **Apply**. Then the project is backed up, every open App Inventor tab saves what it has, the
-change goes in, and the tabs reload by themselves: nobody needs to reload by hand. The helper's window tells the
+change goes in, and the tabs reload by themselves: nobody needs to reload by hand. Apply says the change is done only
+when the project holds every changed file when it is read back, exactly as proposed. A proposal that would change no
+file is refused before Apply is shown, and the helper is told to make a real change. If a file has changed since the
+proposal was made, Apply refuses the change and asks for it again. The helper's window tells the
 App Inventor tab that opened it as well, in case that tab's connection to the team server missed the message.
 
 **What it can do**
@@ -404,30 +406,22 @@ App Inventor tab that opened it as well, in case that tab's connection to the te
   property, method or event the component does not have, a block that names the wrong component type, and a global
   variable or procedure used but never defined. In full-app mode such a problem keeps the Apply button back until it
   is fixed. Yes/no and colour values are stored the way App Inventor writes them (`True`, `&HFFFF0000`).
-* **Subagents.** The helper can hand one self-contained part of a job to a subagent (the `subagent` tool), in one of
-  two modes. Both use **high reasoning**, the project tools and the same draft. A subagent cannot talk to the person,
-  propose changes, ask a question or start another subagent. The person sees its steps and its reasoning, not its
-  words: its report goes back to the helper, and its card shows the start of it. A subagent that cannot finish (the
-  service still failing after retries, too many answers cut off, or a smart one that reaches its limits below) is
-  reported to the helper, and the answer goes on. Stop ends it at once, and a step repeated eight times in a row stops it.
-  * **default** (Ling 3.1 Flash) is for most pieces. It has no limit on steps, on time, or on how often it is used.
-  * **smart** (Claude Haiku 5.5) is for a hard piece. Its whole run has at most 12 model answers, and 4 minutes for the
-    whole run, counted from when it starts running. The time is checked before each model answer and before each tool
-    call. An answer still running at the deadline is cut off. A tool call that started before the deadline runs to its
-    end; one that would start at or after it is not run. When the run reaches a limit, it stops, and the helper is told
-    to ask again with a smaller piece. The default subagent has no time cap. The smart subagent can be used once every
-    45 minutes, for the whole team: a smart request inside that time is refused at once, and the helper is told to use
-    default or do the piece itself. The timer starts when a smart subagent starts running, not when it is queued.
-    `/smart <task>` and the **Smart** button give a task straight to the smart subagent (see below).
-* **Run modes.** How many subagents may run at once in one answer: **Normal** (one), **Parallel** (two) or
-  **Ultracode** (three). The rest wait in the order they were asked for, and their cards show them as queued. Their
-  time does not count against the answer's own time limit.
-* **Models and reasoning.** The helper answers with one of three models, chosen in the window: **Smart** (Claude Haiku
-  5.5), **Balanced** (Ling 3.1 Flash, the default) or **Fast** (Ling 3 Flash). **Reasoning** (Default, Low, Medium,
-  High or Max) sets how hard the model thinks before it answers. Max is only for Smart; on the other models it is High,
-  and the window says so. A reasoning answer has room for 32,000 tokens. If the service refuses Max, the question is
-  sent again with High, and the window says so. A model's reasoning is shown as "Thinking", and it is kept and sent back
-  with the tool calls it belongs to, so a thinking model keeps working across the steps of an answer.
+* **Subagents.** The helper can hand one self-contained part of a job to a subagent (the `subagent` tool). Subagents run
+  one at a time, in the order the helper asked for them. Each uses the project tools and the same draft, with **high
+  reasoning** where the service offers it. A subagent cannot talk to the person, propose changes, ask a question or start
+  another subagent. The person sees its steps and its reasoning, not its words: its report goes back to the helper, and
+  its card shows the start of it. A subagent has no limit on its steps or its time. Stop ends it at once, and a step
+  repeated eight times in a row stops it. A subagent that cannot finish (the service still failing after retries, or too
+  many answers cut off) is reported to the helper, and the answer goes on.
+  * **Fast model as a subagent.** The checkbox under the box (remembered on this computer, unchecked by default). Unchecked,
+    a subagent uses the **Balanced** model, the same as the answers. Checked, it uses the **Fast** model of the service the
+    answers use: Ling 3 Flash on OpenRouter, or DeepSeek V4.1 Flash on OpenCode Go while `/beta` is on. Its tooltip names
+    the model.
+* **Models and reasoning.** The helper answers with its **Balanced** model: Ling 3.1 Flash on OpenRouter, or Step 5
+  Preview on OpenCode Go while `/beta` is on. **Reasoning effort** (under the box, remembered on this computer) sets how
+  hard the model thinks before it answers: Default, Low, Medium or High. OpenCode Go has no reasoning setting, so it is
+  always Default. A reasoning answer has room for 32,000 tokens. A model's reasoning is shown as "Thinking", and it is kept
+  and sent back with the tool calls it belongs to, so a thinking model keeps working across the steps of an answer.
 * **Context compactor.** One answer's conversation is kept within the model's room. The known rooms are **1M tokens**
   for the Claude 5 models and **256K** (262,144 tokens) for the Ling 3 and 3.1 Flash models, and they are a ceiling:
   `AI_CONTEXT_TOKENS` in `ai.env` may lower any room, but it cannot raise a known one. Any other model has **256K**, or
@@ -444,19 +438,12 @@ App Inventor tab that opened it as well, in case that tab's connection to the te
   stops the goal.
 * **`/plan <idea>`** plans a change and says what it would do. It can read and check the project, look
   things up and ask questions, but it cannot change anything or propose a change, even if the model tries.
-* **`/smart <task>`** gives the task to the smart subagent now, without waiting for the helper to choose it. The
-  **Smart** button beside the box does the same with the text in the box. If the subagent changed nothing, its
-  report is the answer. If it changed the draft, the helper carries on from the report and proposes the change. The
-  smart subagent can be used once every 45 minutes for the whole team, so the button and the command wait until it is
-  ready, and the button shows the minutes.
 * **`/check [focus]`**, **`/explain [focus]`** and **`/fix <problem>`** ask the model to check the project,
   explain it, or make the smallest change that fixes one problem. You see the command; the model gets the question.
+* **`/reasoning default`, `low`, `medium` or `high`** sets how hard the model thinks, the same as the Reasoning effort list
+  under the box.
 * **`/discard`** throws away an unfinished full app. **`/new`** (also `/clear`) starts a new conversation.
-  **`/help`** lists the commands. `/effort low|medium|high` sets the effort, like the slider.
-* **Effort** (the slider under the box, remembered on this computer): how hard the helper works. Low makes
-  the change and checks it once; High reads the parts it touches, checks after each change and reviews the
-  whole result before it proposes. It changes how much the helper checks, not the model's own reasoning,
-  because reasoning counts against the length of an answer.
+  **`/help`** lists the commands.
 * **A step that keeps repeating** (the same tool calls, eight times in a row) stops the helper, and says so.
 
 **Small mode (the default).** Small fixes and additions: up to 3 existing screen or blocks files, none
@@ -469,11 +456,12 @@ project's existing screens, so for a new app start from an empty project. `/over
 whether the mode is on, and `/override off` ends it early. Restarting the hub also ends it. Full-app mode
 has no step or time limit: the helper goes on until the app is complete, or until you press Stop.
 
-**OpenCode Go models (beta).** The **Service** list offers OpenCode Go only to a person who has typed `/beta` and
-the PIN. `/beta <PIN>` turns its models on for that person for an hour, in any project; `/beta off` turns them off,
-and `/beta` alone shows whether they are on. It uses the PIN and the lock of `/override`, and the PIN never reaches
-the model. Without `/beta`, a request for OpenCode Go uses the default service instead, which is OpenRouter unless
-`AI_PROVIDER` says otherwise. **Also turn full-app mode off for everyone** turns these off for everyone too.
+**OpenCode Go (beta).** A person's answers use OpenCode Go instead of OpenRouter while they have typed `/beta` and the
+PIN, and OpenCode Go has a key on the Pi. `/beta <PIN>` turns it on for that person for an hour, in any project. `/beta off`
+sends their answers back to OpenRouter, and `/beta` alone says which service they use (and until when, while it is on). Everyone else
+answers with OpenRouter. There is no service list in the companion. Without a key, `/beta` says so, and the answers stay on
+OpenRouter. It uses the PIN and the lock of `/override`, and the PIN never reaches the model. **Also turn full-app mode off
+for everyone** turns these off for everyone too. The hub sends what the service needs, so there is nothing else to set up.
 
 The app can be built over as many messages as it takes: the helper keeps the unfinished app between them,
 for an hour after the last message. **Apply appears only once the whole app is built and `check_project`
@@ -483,10 +471,10 @@ unfinished, it is asked to carry on, up to three times in a row; if it still sto
 working on, the helper's change to that file is dropped, and the helper says so. `/override off` throws
 away the unfinished app.
 
-**Pictures and the model.** Looking at pictures needs a model that accepts image input. The helper asks
-OpenRouter's list of models whether the model in use does (each of the three, and each subagent's), and remembers the
-answer for six hours. To set it by hand for the helper's own model, add `AI_VISION=1` (or `AI_VISION=0`) to
-`/opt/appinventor/ai.env`. Subagents always go by OpenRouter's list.
+**Pictures and the model.** Looking at pictures needs a model that accepts image input. For the companion, the helper
+asks OpenRouter's list of models whether the Balanced model does, and remembers the answer for six hours. OpenCode Go has
+no list, so pictures are on for it. To set it by hand for the companion, add `AI_VISION=1` (or `AI_VISION=0`) to
+`/opt/appinventor/ai.env`. A subagent checks its own model the same way, and `AI_VISION` does not change it.
 
 **In the window:** Enter sends, Shift+Enter starts a new line, Esc or the square button stops, `/`
 lists the commands, Copy works on answers and code blocks, and Try again redoes the last question.
@@ -506,9 +494,8 @@ big), the window says "Still working…", and a long tool call shows how much ha
 * `tool`: a tool step, `running` and then `done` or `error`. Its `id` is unique in the answer: `s`, the number of
   model calls before the call that asked for it, `:`, then the provider's call id. A subagent's step is the
   subagent's id, `:`, its model call's number, `:`, then the provider's call id. `subagent`: a subagent's card,
-  `queued`, `running`, `resting`, `done` or `failed`. Its `id` is the `sub` of its steps, and its words are not sent.
-* `status`: a note. `reset`: a try that failed is taken back, so it is not shown twice. `cooldown`: how long until the
-  smart subagent can be used.
+  `running`, `resting`, `done` or `failed`. Its `id` is the `sub` of its steps, and its words are not sent.
+* `status`: a note. `reset`: a try that failed is taken back, so it is not shown twice.
 * `question`: a question for the person (`ask_user`). `plan`: the steps the helper planned (`update_plan`).
   `proposal`: a change ready for Apply. `artifact`: a picture the helper drew or showed.
 * `error`: a problem the person is told about. `done`: the last event of every answer. `ping`: keeps a quiet connection
@@ -524,7 +511,8 @@ happens four times in a row does the helper pause and ask to be told to carry on
 
 To see what the helper did when something goes wrong, run
 `sudo journalctl -u collab-hub --since "1 hour ago" | grep "\[ai\]"`. It lists who asked, retries, stops and
-how each answer ended, but never the questions, the answers or the keys.
+how each answer ended. When the service refuses a request, it adds the start of the service's own error message (up to
+200 characters). It never lists the questions, the answers or the keys.
 
 **Not included:** running the app or the emulator, seeing how a screen looks, arbitrary web pages (only
 the documentation sites above), changing anything outside the open project, the server's settings or
@@ -532,18 +520,16 @@ other projects, and files other than screens and PNG or JPG pictures. The helper
 names, not whether the blocks do what you intended; App Inventor still reports block errors when it opens.
 
 Set it up on the Pi:
-* `sudo /opt/appinventor/set-ai.sh` asks for the key of the service in use (OpenRouter, unless you switch).
-* `sudo /opt/appinventor/set-ai.sh --key opencode` asks for the **OpenCode Go** key only, whichever service is in use,
-  and `--key openrouter` for the OpenRouter key. `sudo /opt/appinventor/set-ai.sh --model smart kimi-k2.6 --service opencode`
-  sets one OpenCode Go model without changing the service in use. MITSTATUS does the same with its options 8 and 9.
-* `sudo /opt/appinventor/set-ai.sh --provider opencode` makes **OpenCode Go** (opencode.ai) the default service, and asks
-  for its key. Its models are still offered only after `/beta` (see above), so until someone types it the companion uses
-  OpenRouter. In the companion, the **Service** list picks either service for each question, and only the services that
-  have a key are offered, and OpenCode Go only after `/beta`. The built-in models for OpenCode Go are Muse Spark 1.3 (Smart), Step 5 Preview (Balanced) and
-  DeepSeek V4.1 Flash (Fast). `--model` changes them, and `AI_OPENCODE_MODEL_*` in ai.env does the same by hand. Pictures
-  are on for OpenCode Go, and it takes no reasoning setting. Muse Spark answers on OpenCode's Responses API, which the hub
-  converts to the same stream; check that with a real key before relying on Smart. `--provider openrouter` switches the
-  default back.
+* `sudo /opt/appinventor/set-ai.sh` asks for the OpenRouter key.
+* `sudo /opt/appinventor/set-ai.sh --key opencode` asks for the **OpenCode Go** key, and `--key openrouter` for the
+  OpenRouter key. Each one saves only its own key. `sudo /opt/appinventor/set-ai.sh --model fast kimi-k2.6 --service opencode`
+  sets the fast model of OpenCode Go, and `--model balanced` sets the balanced one. Without `--service`, `--model` changes
+  OpenRouter's model, and `--model balanced --reset` puts the built-in model back. MITSTATUS does the same with its
+  options 1, 7, 8 and 9.
+* The built-in models are Ling 3.1 Flash (Balanced) and Ling 3 Flash (Fast) on OpenRouter, and Step 5 Preview (Balanced)
+  and DeepSeek V4.1 Flash (Fast) on OpenCode Go. `AI_OPENCODE_MODEL_*` in ai.env does the same as `--model` by hand.
+  Pictures are on for OpenCode Go, and it takes no reasoning setting. OpenCode Go answers only for people who have typed
+  `/beta` and the PIN (see above), so no setting makes it the default.
 * `sudo /opt/appinventor/set-ai.sh --pin` asks for the full-app PIN (typing is hidden). Anyone in the Team
   panel can change it too: **Change override PIN…** asks for the current PIN, then the new one (or makes one
   up), and the new PIN works at once. Wrong guesses share the lock that `/override` has. **Also turn full-app
@@ -560,14 +546,15 @@ can change it without a restart (an older PIN in `ai.env` is used only until one
 per person and 300 a day for the team (a goal counts as five); subagents do not count against these limits. Anyone
 with the team code can use the helper; the PIN is what unlocks full-app mode.
 
-The three models of the presets are set in `ai.env` by `AI_MODEL_SMART`, `AI_MODEL_BALANCED` and `AI_MODEL_FAST`.
-Each changes only the model name of its preset: the labels, the names shown and the reasoning levels stay the same, and
-without them the defaults above are used. `OPENROUTER_MODEL` is no longer read for the helper, so an old line in
-`ai.env` does nothing. The subagent models are fixed.
+The presets' models are set in `ai.env` by `AI_MODEL_BALANCED` and `AI_MODEL_FAST`, and for OpenCode Go by
+`AI_OPENCODE_MODEL_BALANCED` and `AI_OPENCODE_MODEL_FAST`. Each changes only the model name of its preset: the labels, the
+names shown and the reasoning levels stay the same, and without them the built-in models (listed above) are used.
+`OPENROUTER_MODEL` is no longer read for the helper, so an old line in `ai.env` does nothing.
 
-Privacy and safety: the project's screen files and your questions are sent to OpenRouter's model when
-you ask, and so are any pictures you attach or the helper looks at. Web and documentation results are read as data, never as
-instructions. The helper cannot open arbitrary pages: documentation is read only from the sites listed
+Privacy and safety: the project's screen files and your questions are sent to the model service that answers you
+when you ask (OpenRouter, or OpenCode Go while `/beta` is on), and so are any pictures you attach or the helper looks
+at. Web and documentation results are read as data, never as instructions. The helper cannot open arbitrary pages:
+documentation is read only from the sites listed
 above, over https, and only when they resolve to public addresses, with no redirects followed. Pictures
 made here are checked before they are drawn: no scripts, no embedded pages or images, and no links to
 other files. Pictures made here can be seen only by the person who made them.

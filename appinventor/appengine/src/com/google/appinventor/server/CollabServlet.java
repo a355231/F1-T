@@ -388,7 +388,7 @@ public class CollabServlet extends OdeServlet {
    * 3 at once, and a file may not grow by more than half (plus 4 KB). In full-app mode (the
    * AI_MODE_HEADER) up to 12 files may change, and up to 4 new screens may be added, each as a
    * .scm and a .bky file in the folder of the existing screens. A backup is made first, so that
-   * it can be undone.
+   * it can be undone. Each file is read back before the change is reported as done.
    */
   private void writeFiles(String userId, long projectId, HttpServletRequest req,
       HttpServletResponse resp) throws IOException {
@@ -433,11 +433,34 @@ public class CollabServlet extends OdeServlet {
       storageIo.addSourceFilesToProject(userId, projectId, true, created.toArray(new String[0]));
     }
     for (String path : paths) {
-      storageIo.uploadFileForce(projectId, path, userId, files.getString(path), "UTF-8");
+      if (!writeAndCheck(userId, projectId, path, files.getString(path))) {
+        LOG.warning("AI change to project " + projectId + " did not hold in " + path + " when read back");
+        send(resp, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            error("the change did not hold when it was read back"));
+        return;
+      }
     }
     LOG.info((full ? "Full-app AI change" : "AI change") + " applied to project " + projectId
         + " by " + userInfoProvider.getUserEmail());
     send(resp, 200, new JSONObject().put("ok", true).put("files", paths.size()));
+  }
+
+  /**
+   * Stores one file, then reads it back the way a reloaded tab reads it. If the text read back is not exactly
+   * what was stored, the file is stored once more. Returns false if it still does not hold the text.
+   */
+  private boolean writeAndCheck(String userId, long projectId, String path, String text) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+      storageIo.uploadFileForce(projectId, path, userId, text, "UTF-8");
+      try {
+        if (text.equals(storageIo.downloadFile(userId, projectId, path, "UTF-8"))) {
+          return true;
+        }
+      } catch (RuntimeException e) {
+        // Could not be read back: treated like a file that does not hold the text.
+      }
+    }
+    return false;
   }
 
   /** Why these changes are not allowed, or null if they are. */

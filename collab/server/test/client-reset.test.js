@@ -36,7 +36,6 @@ class Elem {
     this.dataset = {};
     this.style = {setProperty() {}};
     this.hidden = false;
-    this.options = [];
     this.scrollTop = 0;
     this.scrollHeight = 0;
     this.clientHeight = 0;
@@ -54,6 +53,8 @@ class Elem {
     this.children.forEach(c => { c.parentNode = null; });
     this.children = [];
   }
+  // A select's options are the option children it holds.
+  get options() { return this.children.filter(c => c.tagName === 'OPTION'); }
   get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
   set textContent(v) {
     this._detach();
@@ -88,9 +89,19 @@ class Elem {
     }
     this.parentNode = null;
   }
+  replaceWith(node) {
+    const p = this.parentNode;
+    if (!p) return;
+    const i = p.children.indexOf(this);
+    node.remove();
+    p.children[i] = node;
+    node.parentNode = p;
+    this.parentNode = null;
+  }
   setAttribute(k, v) { this._attrs[k] = String(v); }
   getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; }
-  addEventListener() {}
+  // The listener is kept, so a test can fire it (see fire()).
+  addEventListener(type, listener) { this._listeners = this._listeners || {}; this._listeners[type] = listener; }
   focus() {}
   querySelectorAll(selector) {
     const found = [];
@@ -104,14 +115,57 @@ class Elem {
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
 }
 
+// The page's own HTML: the ids it has, and the tag each one is. The window asks for no other element, so a control
+// taken off the page comes back as null here, as it would in a browser.
+const HTML = fs.readFileSync(path.join(__dirname, '..', 'public', 'ai', 'index.html'), 'utf8');
+const PAGE_IDS = new Map();
+for (const m of HTML.matchAll(/<(\w+)\b[^>]*?\sid="([^"]+)"/g)) PAGE_IDS.set(m[2], m[1]);
+
+// What GET /collab/ai/presets gives, for OpenRouter and for OpenCode Go (each has its own two models).
+const OPENROUTER = {
+  service: {id: 'openrouter', name: 'OpenRouter'},
+  beta: {on: false, until: 0},
+  presets: [
+    {id: 'balanced', label: 'Balanced', name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash',
+      reasoningLevels: ['default', 'low', 'medium', 'high']},
+    {id: 'fast', label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash',
+      reasoningLevels: ['default', 'low', 'medium', 'high']},
+  ],
+  defaultReasoning: 'default',
+};
+const OPENCODE = {
+  service: {id: 'opencode', name: 'OpenCode Go'},
+  beta: {on: true, until: 1900000000000},
+  presets: [
+    {id: 'balanced', label: 'Balanced', name: 'Step 5 Preview', model: 'step-5-preview-free', reasoningLevels: ['default']},
+    {id: 'fast', label: 'Fast', name: 'DeepSeek V4.1 Flash', model: 'deepseek-v4.1-flash', reasoningLevels: ['default']},
+  ],
+  defaultReasoning: 'default',
+};
+
+// What a fetch gives the window back: its status, and the body as JSON or as text.
+function reply(status, body) {
+  const text = typeof body === 'string' ? body : JSON.stringify(body);
+  return {ok: status >= 200 && status < 300, status,
+    json: () => Promise.resolve(JSON.parse(text)), text: () => Promise.resolve(text)};
+}
+
 // A page: the window's script running in its own context, the elements it asks for, and the streams it is given.
-function openPage() {
+// The options: local (what this computer remembers, shared by the pages that are given it), presets (the answer to
+// GET /collab/ai/presets; without it the route is not set up), status (the answer to GET /collab/ai/status).
+function openPage(options = {}) {
   const elements = Object.create(null);
-  const page = {answers: [], sent: [], stored: {}, clipboard: [], window: null, document: null};
+  const local = options.local || {};
+  const page = {answers: [], applyReplies: [], sent: [], applied: [], stored: {}, local, clipboard: [], window: null,
+    document: null};
   page.document = {
     createElement: tag => new Elem(tag),
     createTextNode: text => new Elem(null, text),
-    getElementById: id => elements[id] || (elements[id] = Object.assign(new Elem('div'), {id})),
+    getElementById: id => {
+      if (!PAGE_IDS.has(id)) return null;
+      if (!elements[id]) elements[id] = Object.assign(new Elem(PAGE_IDS.get(id)), {id});
+      return elements[id];
+    },
     querySelectorAll: () => [],   // the [data-fill] buttons of the empty screen: none here
     documentElement: new Elem('html'),
     body: new Elem('body'),
@@ -123,7 +177,11 @@ function openPage() {
     document: page.document,
     location: {search: '?projectId=5', origin: 'http://helper.test', pathname: '/collab/ai/'},
     navigator: {clipboard: {writeText: text => { page.clipboard.push(text); return Promise.resolve(); }}},
-    localStorage: {getItem: () => null, setItem() {}},
+    localStorage: {
+      getItem: key => (Object.prototype.hasOwnProperty.call(local, key) ? local[key] : null),
+      setItem: (key, value) => { local[key] = String(value); },
+      removeItem: key => { delete local[key]; },
+    },
     sessionStorage: {
       getItem: key => (Object.prototype.hasOwnProperty.call(page.stored, key) ? page.stored[key] : null),
       setItem: (key, value) => { page.stored[key] = String(value); },
@@ -135,13 +193,24 @@ function openPage() {
     setTimeout: (callback, ms) => { const t = setTimeout(callback, ms); t.unref(); return t; },
     clearTimeout,
     fetch: (url, init) => {
-      if (url !== '/collab/ai/stream') {
-        return Promise.resolve({ok: false, status: 404, json: () => Promise.resolve({})});
+      if (url === '/collab/ai/stream') {
+        page.sent.push(JSON.parse(init.body));
+        const next = page.answers.shift();
+        if (!next) return Promise.reject(new Error('the window asked for an answer that was not set up'));
+        return Promise.resolve(next);
       }
-      page.sent.push(JSON.parse(init.body));
-      const next = page.answers.shift();
-      if (!next) return Promise.reject(new Error('the window asked for an answer that was not set up'));
-      return Promise.resolve(next);
+      if (url === '/collab/ai/apply') {
+        page.applied.push(JSON.parse(init.body));
+        return Promise.resolve(page.applyReplies.length ? page.applyReplies.shift() : reply(200, {ok: true}));
+      }
+      if (url === '/collab/ai/presets') {
+        return Promise.resolve(options.presets ? reply(200, options.presets) : reply(404, {}));
+      }
+      if (url.indexOf('/collab/ai/status') === 0) {
+        return Promise.resolve(reply(200, Object.assign({configured: true, search: false, vision: false, name: 'Ana',
+          fullUntil: 0, running: false, question: '', beta: {on: false, until: 0}}, options.status)));
+      }
+      return Promise.resolve(reply(404, {}));   // the stop route, and anything else: not set up here
     },
     DOMPurify: {addHook() {}, sanitize: html => html},
     marked: {parse: text => text},
@@ -247,7 +316,7 @@ function cardLines(card) {
 }
 
 const subagent = (id, state, task, report) => Object.assign(
-  {type: 'subagent', id, state, tier: 'default', model: 'm1', name: 'Model one', reasoning: 'high', task, steps: 1},
+  {type: 'subagent', id, state, model: 'm1', name: 'Model one', reasoning: 'high', task, steps: 1},
   report ? {report} : {});
 
 test('(a) failed try is taken back; the words, steps and retry before it stay, on screen and in history', async () => {
@@ -549,34 +618,207 @@ test('(j) /beta: its PIN is hidden on screen, and kept out of the conversation t
   assert.deepStrictEqual(page.sent[1].messages, [{role: 'user', content: 'hi'}], 'the PIN is not in the history');
 });
 
-test('(k) the Smart button sends the task in the box as /smart, and is off while an answer is written or the smart subagent rests', async () => {
-  const page = openPage();
-  const button = page.document.getElementById('smartBtn');
-  page.document.getElementById('input').value = '';   // an empty box, as a real textarea has
-  button.onclick();
-  assert.strictEqual(page.sent.length, 0, 'there is no task to send');
-  assert.match(page.document.getElementById('hint').textContent, /Type the task/);
-  page.document.getElementById('input').value = 'check every label';
-  let controller = null;
-  let n = 0;
-  page.answers.push({ok: true, status: 200, body: new ReadableStream({start(c) { controller = c; }})});
-  button.onclick();
-  assert.deepStrictEqual(page.sent[0].messages, [{role: 'user', content: '/smart check every label'}]);
-  assert.strictEqual(page.document.getElementById('input').value, '', 'the box is cleared');
-  assert.strictEqual(button.disabled, true, 'off while the answer is written');
-  const put = ev => controller.enqueue(new TextEncoder().encode('id: ' + ++n + '\ndata: ' + JSON.stringify(ev) + '\n\n'));
-  put({type: 'cooldown', smartReadyInSeconds: 600});
+// The reasoning list's options, as the person sees them.
+function reasoningOptions(page) {
+  return page.document.getElementById('pickReasoning').options.map(o => o.textContent);
+}
+
+// The person picks a reasoning effort, or ticks or unticks the fast subagent box (the page's own change handlers run).
+function chooseReasoning(page, level) {
+  const select = page.document.getElementById('pickReasoning');
+  select.value = level;
+  select.onchange();
+}
+
+function setFastSub(page, on) {
+  const box = page.document.getElementById('fastSub');
+  box.checked = on;
+  box.onchange();
+}
+
+// Fires a listener the page set on an element (the box's 'input' event, say).
+function fire(el, type) {
+  el._listeners[type]();
+}
+
+test('(k) the question is sent with its reasoning and the fast subagent choice, and no preset, run mode, provider or effort', async () => {
+  const page = openPage({presets: OPENROUTER});
   await flush();
-  assert.strictEqual(button.textContent, 'Smart · 10 min', 'the minutes are shown');
-  put({type: 'done'});
-  controller.close();
-  for (let i = 0; i < 200 && sendLabel(page) !== 'Send'; i++) await flush();
-  assert.strictEqual(button.disabled, true, 'still off while the smart subagent rests');
+  const answer = startAnswer(page, 'Question');
+  await answer.end();
+  assert.deepStrictEqual(Object.keys(page.sent[0]).sort(), ['fastSubagent', 'messages', 'projectId', 'reasoning']);
+  assert.strictEqual(page.sent[0].projectId, '5');
+  assert.strictEqual(page.sent[0].reasoning, 'default');
+  assert.strictEqual(page.sent[0].fastSubagent, false);
 });
 
-test('(l) the Smart button is on when the smart subagent is ready', async () => {
+test('(l) the removed controls are not on the page, and the slash menu lists only the commands that remain', () => {
   const page = openPage();
-  const button = page.document.getElementById('smartBtn');
-  assert.strictEqual(button.disabled, false);
-  assert.strictEqual(button.textContent, 'Smart');
+  ['pickProvider', 'pickModel', 'pickMode', 'effort', 'effortOut', 'smartBtn', 'smartLine'].forEach(id => {
+    assert.strictEqual(page.document.getElementById(id), null, id + ' is not on the page');
+  });
+  assert.doesNotMatch(HTML, /smart|ultracode|parallel/i);
+  assert.doesNotMatch(HTML, /Service|Effort|Model:|Mode:/);
+  const input = page.document.getElementById('input');
+  input.value = '/';
+  fire(input, 'input');
+  const shown = page.document.getElementById('slash').children.map(row => row.children[0].textContent);
+  assert.deepStrictEqual(shown,
+    ['/goal', '/plan', '/check', '/explain', '/fix', '/reasoning', '/override', '/beta', '/discard', '/new', '/help']);
+});
+
+test('(m) /reasoning takes default, low, medium or high, and refuses max; /help lists only the commands that remain', () => {
+  const page = openPage();
+  page.window.__aiHelper.send('/reasoning max');
+  assert.strictEqual(page.sent.length, 0, 'a local command never reaches the model');
+  assert.match(lastAnswer(page).querySelector('.md').textContent, /Choose `default`, `low`, `medium` or `high`/);
+  page.window.__aiHelper.send('/reasoning medium');
+  assert.match(lastAnswer(page).querySelector('.md').textContent, /Reasoning effort is now \*\*Medium\*\*\./);
+  assert.strictEqual(page.local['aihelper.reasoning'], 'medium');
+  page.window.__aiHelper.send('/help');
+  const help = lastAnswer(page).querySelector('.md').textContent;
+  assert.match(help, /`\/reasoning default`, `low`, `medium` or `high`/);
+  assert.doesNotMatch(help, /\/effort|\/model|\/mode|\/smart|\bmax\b/);
+  assert.strictEqual(page.sent.length, 0);
+});
+
+test('(n) the reasoning list has the balanced model\'s levels without max, and its label reads Reasoning effort', async () => {
+  const withMax = JSON.parse(JSON.stringify(OPENROUTER));
+  withMax.presets[0].reasoningLevels.push('max');   // an older server may still list it: it is not offered
+  const page = openPage({presets: withMax});
+  await flush();
+  assert.deepStrictEqual(reasoningOptions(page), ['Default', 'Low', 'Medium', 'High']);
+  assert.strictEqual(page.document.getElementById('pickReasoning').value, 'default');
+  assert.match(HTML, /<span>Reasoning effort<\/span>\s*<select id="pickReasoning" aria-label="Reasoning effort">/);
+  const other = openPage({presets: OPENCODE});
+  await flush();
+  assert.deepStrictEqual(reasoningOptions(other), ['Default'], 'OpenCode Go offers no reasoning levels');
+});
+
+test('(o) the reasoning picked is sent and remembered; a service that offers only Default sends Default and keeps the pick', async () => {
+  const local = {};
+  const page = openPage({presets: OPENROUTER, local});
+  await flush();
+  chooseReasoning(page, 'high');
+  assert.strictEqual(local['aihelper.reasoning'], 'high');
+  const first = startAnswer(page, 'Question one');
+  await first.end();
+  assert.strictEqual(page.sent[0].reasoning, 'high');
+
+  const other = openPage({presets: OPENCODE, local});
+  await flush();
+  const second = startAnswer(other, 'Question two');
+  await second.end();
+  assert.strictEqual(other.sent[0].reasoning, 'default');
+  assert.strictEqual(local['aihelper.reasoning'], 'high', 'the pick is kept for when the service offers it again');
+});
+
+test('(p) the fast subagent box is unchecked by default, is sent as fastSubagent, is remembered, and its tooltip names the model it picks', async () => {
+  const local = {};
+  const page = openPage({presets: OPENROUTER, local});
+  await flush();
+  const box = page.document.getElementById('fastSub');
+  const tip = page.document.getElementById('fastPick');
+  assert.strictEqual(box.checked, false, 'unchecked by default');
+  assert.strictEqual(tip.title,
+    'Subagents use Ling 3.1 Flash, the balanced model of OpenRouter, the same model as the answers.');
+  const first = startAnswer(page, 'Question one');
+  await first.end();
+  assert.strictEqual(page.sent[0].fastSubagent, false);
+
+  setFastSub(page, true);
+  assert.strictEqual(local['aihelper.fastSub'], 'true');
+  assert.strictEqual(tip.title, 'Subagents use Ling 3 Flash, the fast model of OpenRouter.');
+  const second = startAnswer(page, 'Question two');
+  await second.end();
+  assert.strictEqual(page.sent[1].fastSubagent, true);
+
+  // The choice stays on this computer: a window opened again starts checked, and names the fast model of its service.
+  const again = openPage({presets: OPENCODE, local});
+  await flush();
+  assert.strictEqual(again.document.getElementById('fastSub').checked, true);
+  assert.strictEqual(again.document.getElementById('fastPick').title,
+    'Subagents use DeepSeek V4.1 Flash, the fast model of OpenCode Go.');
+});
+
+test('(p2) before the presets answer, the fast subagent tooltip names no model', () => {
+  const page = openPage();
+  assert.strictEqual(page.document.getElementById('fastPick').title,
+    'Subagents use the balanced model, the same as the answers.');
+});
+
+test('(q) an Apply the server refuses shows the server reason; a later Apply that works clears it', async () => {
+  const page = openPage();
+  const answer = startAnswer(page, 'Make the label blue');
+  await answer.push({type: 'proposal', id: 'p1', summary: 'Blue label', files: [{path: 'Screen1.scm', isNew: false}],
+    media: []});
+  await answer.end();
+  const row = lastAnswer(page);
+  const button = row.querySelector('.apply');
+  const note = row.querySelector('.note');
+  page.applyReplies.push(reply(409, {error: 'No file would change, so nothing was applied. Ask again for a real change.'}));
+  button.onclick();
+  await flush();
+  assert.deepStrictEqual(page.applied[0], {projectId: '5', id: 'p1'});
+  assert.strictEqual(note.textContent, 'No file would change, so nothing was applied. Ask again for a real change.');
+  assert.strictEqual(note.classList.contains('err'), true);
+  assert.strictEqual(button.disabled, false, 'Apply can be pressed again');
+  assert.strictEqual(button.textContent, 'Apply');
+
+  page.applyReplies.push(reply(502, 'Bad Gateway'));   // a plain-text answer still says what happened
+  button.onclick();
+  await flush();
+  assert.strictEqual(note.textContent, 'The server did not apply this change (error 502).');
+
+  button.onclick();   // no reply set: the server applies it
+  await flush();
+  assert.strictEqual(note.textContent, 'The App Inventor tab reloads by itself to show it');
+  assert.strictEqual(note.classList.contains('err'), false, 'the error is not shown any more');
+  assert.strictEqual(row.querySelector('.card.proposal').classList.contains('applied'), true);
+  assert.strictEqual(row.querySelector('.done-tag').textContent, '✓ Applied');
+});
+
+test('(r) a subagent card shows its model and reasoning, with no tier label, and a queued card shows no state', async () => {
+  const page = openPage();
+  const answer = startAnswer(page, 'Question');
+  await answer.push({type: 'step'});
+  // An older server may still send a tier and the queued state: neither is shown.
+  await answer.push({type: 'subagent', id: 's1', state: 'queued', tier: 'smart', name: 'Model one', model: 'm1',
+    reasoning: 'high', task: 'Check Screen2', steps: 0});
+  const card = subCard(page, 'Check Screen2');
+  assert.strictEqual(card.querySelector('.sa-tier'), null, 'no tier label');
+  assert.strictEqual(card.className, 'card subagent', 'queued is not a state any more');
+  assert.strictEqual(card.querySelector('.sa-state').textContent, '');
+  assert.strictEqual(card.querySelector('.sa-model').textContent, 'Model one');
+  assert.strictEqual(card.querySelector('.sa-eff').textContent, 'reasoning high');
+  await answer.end();
+});
+
+test('(s) a cooldown event from an older server is ignored', async () => {
+  const page = openPage();
+  const answer = startAnswer(page, 'Question');
+  await answer.push({type: 'text', delta: 'Words.'});
+  await answer.push({type: 'cooldown', smartReadyInSeconds: 600});
+  await answer.end();
+  assert.deepStrictEqual(screen(page), ['words: Words.']);
+});
+
+test('(t) the keys of earlier versions are taken off this computer; the reasoning that is still kept is used', async () => {
+  const local = {'aihelper.model': 'smart', 'aihelper.mode': 'ultracode', 'aihelper.provider': 'opencode',
+    'aihelper.effort': 'high', 'aihelper.reasoning': 'low'};
+  const page = openPage({local});
+  assert.deepStrictEqual(Object.keys(local), ['aihelper.reasoning']);
+  const answer = startAnswer(page, 'Question');
+  await answer.end();
+  assert.strictEqual(page.sent[0].reasoning, 'low');
+});
+
+test('(u) the full-app pill and the picture button follow the status', async () => {
+  const page = openPage({status: {vision: true, fullUntil: Date.now() + 10 * 60000}});
+  await flush();
+  const pill = page.document.getElementById('modeBtn');
+  assert.strictEqual(pill.textContent, 'Full apps · 10 min');
+  assert.strictEqual(pill.classList.contains('full'), true);
+  assert.strictEqual(page.document.getElementById('attach').hidden, false, 'the model takes pictures');
+  assert.strictEqual(page.document.getElementById('sub').textContent, 'Signed in as Ana');
 });

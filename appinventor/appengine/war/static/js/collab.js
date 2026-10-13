@@ -429,18 +429,18 @@
     } catch (err) {
       return;
     }
-    send({t: 'op', projectId: where.projectId, screen: where.screen, kind: 'blocks', data: json});
+    send({t: 'op', projectId: where.projectId, screen: where.screen, kind: 'blocks', data: json, epoch: C.epoch});
   };
 
   C.sendDesignerOp = function(projectId, screen, op) {
     if (C.isJoined(projectId)) {
-      send({t: 'op', projectId: String(projectId), screen: screen, kind: 'designer', data: op});
+      send({t: 'op', projectId: String(projectId), screen: screen, kind: 'designer', data: op, epoch: C.epoch});
     }
   };
 
   C.sendTreeChanged = function(projectId) {
     if (C.isJoined(projectId)) {
-      send({t: 'op', projectId: String(projectId), screen: '', kind: 'tree', data: {}});
+      send({t: 'op', projectId: String(projectId), screen: '', kind: 'tree', data: {}, epoch: C.epoch});
     }
   };
 

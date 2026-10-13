@@ -38,10 +38,14 @@ const sockets = new Map();
 const cookies = new Map();
 const now = Date.now;
 let alerts = [];
-const hub = new Hub((id, msg) => {
+// A socket that is closing or closed takes no messages, and the hub does not wait for it.
+function socketOpen(id) {
   const ws = sockets.get(id);
-  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
-});
+  return !!ws && ws.readyState === ws.OPEN;
+}
+const hub = new Hub((id, msg) => {
+  if (socketOpen(id)) sockets.get(id).send(JSON.stringify(msg));
+}, Date.now, socketOpen);
 setInterval(() => hub.sweep(), 10 * 1000).unref();
 
 function forwardedProto(req) {
@@ -329,8 +333,9 @@ function onConnection(ws, me, cookie) {
         hub.cursor(client.id, msg);
         break;
       case 'flushed':
-        // This tab has saved what it had, ready for an AI change (see Assistant.apply in ai.js).
-        hub.ackFlush(client.id, String(msg.applyId || ''));
+        // This tab has saved what it had, ready for an AI change (see Assistant.apply in ai.js). ok false means
+        // its save failed, so the change must not go in.
+        hub.ackFlush(client.id, String(msg.applyId || ''), msg.ok !== false);
         break;
       case 'codechanged': {
         // Do not take the browser's word for it: ask App Inventor whether this person really just

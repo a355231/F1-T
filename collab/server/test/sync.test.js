@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const {Hub} = require('../rooms');
+const {Hub, EMPTY_ROOM_TTL_MS} = require('../rooms');
 
 function setup() {
   let now = 1000000;
@@ -86,17 +86,99 @@ test('backups are due only for projects with changes since the last backup', () 
   assert.deepStrictEqual(hub.backupsDue(), []);
 });
 
-test('an AI change waits until every open tab has saved, or for a few seconds, whichever is first', async () => {
+test('an AI change waits until every open tab has saved; a tab that stays silent stops it after the wait', async () => {
   const {hub, pair} = setup();
   const {a, b} = pair();
   const answered = hub.awaitFlush('5', 'f1', 5000);
   hub.ackFlush(a.id, 'f1');
   hub.ackFlush(b.id, 'f1');
-  await answered;
+  assert.deepStrictEqual(await answered, {ok: true});
   const started = Date.now();
-  await hub.awaitFlush('5', 'f2', 40);   // nobody answers
+  assert.deepStrictEqual(await hub.awaitFlush('5', 'f2', 40), {ok: false});   // nobody answers
   assert.ok(Date.now() - started >= 30);
-  await hub.awaitFlush('404', 'f3', 5000);   // nobody has that project open: nothing to wait for
+  assert.deepStrictEqual(await hub.awaitFlush('404', 'f3', 5000), {ok: true},
+    'nobody has that project open: nothing to wait for');
+});
+
+test('a tab that says its save failed stops an AI change at once', async () => {
+  const {hub, pair} = setup();
+  const {a, b} = pair();
+  const started = Date.now();
+  const failed = hub.awaitFlush('5', 'f4', 5000);
+  hub.ackFlush(a.id, 'f4', false);
+  assert.deepStrictEqual(await failed, {ok: false});
+  assert.ok(Date.now() - started < 1000, 'it did not wait for the timer');
+  hub.ackFlush(b.id, 'f4');   // late, and nothing is waiting any more
+});
+
+test('a tab whose socket is down is not waited for by an AI change', async () => {
+  const inbox = {};
+  const closed = new Set();
+  const hub = new Hub((id, msg) => (inbox[id] = inbox[id] || []).push(msg), () => 1000,
+    id => !closed.has(id));
+  const a = hub.addClient({userId: 'u1', email: 'a@team.local'});
+  const b = hub.addClient({userId: 'u2', email: 'b@team.local'});
+  hub.join(a.id, '5', {projectName: 'P', ownerEmail: 'a@team.local'});
+  hub.join(b.id, '5', {projectName: 'P', ownerEmail: 'a@team.local'});
+  closed.add(b.id);
+  const done = hub.awaitFlush('5', 'f5', 5000);
+  hub.ackFlush(a.id, 'f5');
+  assert.deepStrictEqual(await done, {ok: true});
+});
+
+test('a tab that drops out during an AI change is not waited for any more', async () => {
+  const {hub, pair} = setup();
+  const {a, b} = pair();
+  const done = hub.awaitFlush('5', 'f6', 5000);
+  hub.ackFlush(a.id, 'f6');
+  hub.removeClient(b.id);
+  assert.deepStrictEqual(await done, {ok: true});
+});
+
+test('a restore moves the write count up, and a tab that joins afterwards is told the count', () => {
+  const {hub, all, pair} = setup();
+  const {a, b} = pair();
+  assert.strictEqual(all(b.id, 'joined')[0].writes, 0, 'nothing written yet');
+  hub.removeClient(a.id);
+  hub.removeClient(b.id);
+  hub.restored('5', 'a');   // nobody has the project open now
+  const c = hub.addClient({userId: 'u3', email: 'c@team.local'});
+  hub.join(c.id, '5', {projectName: 'P', ownerEmail: 'a@team.local'});
+  assert.ok(all(c.id, 'joined').pop().writes > 0, 'a tab that was away sees the change');
+  hub.restored('9', 'a');   // a project nobody has ever had open still counts
+  const d = hub.addClient({userId: 'u4', email: 'd@team.local'});
+  hub.join(d.id, '9', {projectName: 'Q', ownerEmail: 'a@team.local'});
+  assert.ok(all(d.id, 'joined').pop().writes > 0);
+});
+
+test('the write count only goes up, even when the clock stands still, and outlives the room', () => {
+  const {hub, advance} = setup();
+  const first = hub.written('5');
+  assert.strictEqual(hub.written('5'), first + 1);
+  const a = hub.addClient({userId: 'u1', email: 'a@team.local'});
+  hub.join(a.id, '5', {projectName: 'P', ownerEmail: 'a@team.local'});
+  hub.leave(a.id);
+  advance(EMPTY_ROOM_TTL_MS + 1);
+  hub.sweep();
+  assert.ok(!hub.rooms.has('5'), 'the room is forgotten');
+  const b = hub.addClient({userId: 'u2', email: 'b@team.local'});
+  hub.join(b.id, '5', {projectName: 'P', ownerEmail: 'a@team.local'});
+  assert.ok(hub.rooms.get('5').members.has(b.id));
+  assert.ok(hub.writes.get('5') > first, 'the count is still there');
+});
+
+test('an edit made on a copy from before a restore is dropped; an edit with no epoch still goes in', () => {
+  const {hub, pair} = setup();
+  const {a} = pair();
+  const oldEpoch = hub.rooms.get('5').epoch;
+  hub.restored('5', 'a');
+  hub.op(a.id, {projectId: '5', screen: 'Screen1', kind: 'blocks', data: {}, epoch: oldEpoch});
+  assert.strictEqual(hub.rooms.get('5').log.length, 0, 'the old copy cannot write into the new log');
+  hub.op(a.id, {projectId: '5', screen: 'Screen1', kind: 'blocks', data: {},
+    epoch: hub.rooms.get('5').epoch});
+  assert.strictEqual(hub.rooms.get('5').log.length, 1);
+  hub.op(a.id, {projectId: '5', screen: 'Screen1', kind: 'blocks', data: {}});
+  assert.strictEqual(hub.rooms.get('5').log.length, 2, 'a client that sends no epoch is as before');
 });
 
 test('restoring starts the session over and tells everyone to reload', () => {

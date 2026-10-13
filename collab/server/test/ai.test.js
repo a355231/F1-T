@@ -6,6 +6,7 @@ const {execFileSync} = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const {Assistant, checkAttachments, modelTakesImages, nameOf, PROVIDERS, responsesRequest, responsesToChat} = require('../ai');
 const aiTools = require('../ai-tools');
 const registry = require('../ai-registry');
@@ -128,11 +129,12 @@ const ids = res => res.text.split('\n\n').map(b => /^id: (\d+)/m.exec(b)).filter
 
 // Builds an assistant with a fake App Inventor (ask), a fake model (fetchImpl) that answers from a script,
 // and a clock that the test can move. A script step may be a function of the request, so that it can
-// use ids the tools just made. options.models lists the models OpenRouter knows, for the vision check.
+// use ids the tools just made. options.models lists the models OpenRouter knows, for the vision check. The project is
+// kept in a store that the fake App Inventor reads and writes, so a change is read back as a reloaded tab reads it.
+// options.writeIgnored makes the writes not reach the store, to test the read-back.
 function setup(script, options = {}) {
   process.env.OPENROUTER_API_KEY = 'sk-test';
-  // The companion's models come from its presets; the ai.env overrides point the default preset at the test model.
-  process.env.AI_MODEL_SMART = 'some/smart';
+  // The companion's models come from its presets; the ai.env overrides point the balanced and fast presets at test models.
   process.env.AI_MODEL_BALANCED = 'some/model';
   process.env.AI_MODEL_FAST = 'some/fast';
   delete process.env.OPENROUTER_MODEL;
@@ -143,12 +145,14 @@ function setup(script, options = {}) {
   if (options.vision !== undefined) process.env.AI_VISION = options.vision;
   else delete process.env.AI_VISION;
   // respond(payload) answers every model call instead of the script, when a test needs to tell the helper from its subagents.
-  const {models, vision, files: projectFiles, bundleFailures: failures = 0, respond, ...rest} = options;
+  const {models, vision, files: projectFiles, bundleFailures: failures = 0, respond, writeIgnored = false, ...rest} = options;
   let bundleFailures = failures;
   const modelList = models || [{id: 'some/model', architecture: {input_modalities: ['text']}}];
   let now = 1000000000000;
   const asked = [];
   const hub = new Hub(() => {});
+  const store = Object.assign({}, projectFiles || PROJECT_FILES);   // the text of each file of the project
+  const pictures = {};                                              // the size of each picture of the project
   const ask = async (path, cookie, method, body, headers) => {
     asked.push({path, method, body, headers});
     if (path.startsWith('/ode/collab/whoami')) {
@@ -161,12 +165,27 @@ function setup(script, options = {}) {
         bundleFailures--;
         return null;
       }
-      return bundlePage(projectFiles || PROJECT_FILES, new URL(path, 'http://x').searchParams.get('after'));
+      return bundlePage(store, new URL(path, 'http://x').searchParams.get('after'));
     }
-    if (path.startsWith('/ode/collab/files')) return {files: Object.keys(PROJECT_FILES).map(p => ({path: p, bytes: PROJECT_FILES[p].length}))};
-    if (path.startsWith('/ode/collab/file?')) return {text: 'file text', bytes: 9};
+    if (path.startsWith('/ode/collab/files')) {
+      const listed = Object.keys(store).map(p => ({path: p, bytes: Buffer.byteLength(store[p])}))
+        .concat(Object.keys(pictures).map(p => ({path: p, bytes: pictures[p]})));
+      return {ok: true, files: listed};
+    }
+    if (path.startsWith('/ode/collab/file?')) {
+      const file = new URL(path, 'http://x').searchParams.get('path');
+      if (!Object.hasOwn(store, file)) return null;
+      return {ok: true, path: file, bytes: Buffer.byteLength(store[file]), text: store[file]};
+    }
     if (path.startsWith('/ode/collab/rawfile')) return {ok: true, path: 'assets/logo.png', mime: 'image/png', bytes: 40, data: PNG_B64};
-    if (path.startsWith('/ode/collab/writefiles') || path.startsWith('/ode/collab/writemedia')) return {ok: true};
+    if (path.startsWith('/ode/collab/writefiles')) {
+      if (!writeIgnored) Object.assign(store, JSON.parse(body).files);
+      return {ok: true};
+    }
+    if (path.startsWith('/ode/collab/writemedia')) {
+      for (const m of JSON.parse(body).media) pictures['assets/' + m.name] = Buffer.from(m.data, 'base64').length;
+      return {ok: true};
+    }
     return null;
   };
   const calls = [];
@@ -187,8 +206,8 @@ function setup(script, options = {}) {
     return {ok: true, body: sseBody(turn)};
   };
   const ai = new Assistant(Object.assign({ask, hub, fetchImpl, now: () => now, log: () => {}, retryWaitMs: 5}, rest));
-  return {ai, asked, calls, hub, pinFile: process.env.AI_PIN_FILE, advance: ms => { now += ms; },
-    failBundles: n => { bundleFailures = n; }};
+  return {ai, asked, calls, hub, pinFile: process.env.AI_PIN_FILE, store, pictures,
+    advance: ms => { now += ms; }, failBundles: n => { bundleFailures = n; }};
 }
 
 async function say(ai, who, text, projectId = '5') {
@@ -409,30 +428,34 @@ async function withOpenCodeKey(key, fn) {
     else process.env.OPENCODE_API_KEY = before;
   }
 }
-const providerNamed = (body, id) => JSON.parse(body).providers.find(p => p.id === id);
+// The presets as a person's browser gets them (GET /collab/ai/presets).
+const presetsOf = async (ai, who) => JSON.parse((await getJson(ai, who, '/collab/ai/presets')).body);
 
-test('/beta: OpenCode Go is locked until a person types /beta and the PIN; it is theirs alone, and lasts an hour', async () => {
+test('/beta: a person\'s answers use OpenCode Go only while they have typed /beta and the PIN, for an hour, and only for them', async () => {
   await withOpenCodeKey('oc-test', async () => {
     const t = setup([textTurn('one'), textTurn('two'), textTurn('three')]);
-    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'opencode').locked, true);
-    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'openrouter').locked, false);
-    assert.match(texts(await say(t.ai, 'ann', '/beta')), /OpenCode Go models are off/);
-    assert.match(texts(await say(t.ai, 'ann', '/beta 00000')), /^Wrong PIN\.$/);
-    assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)), /OpenCode Go models are on for you until/);
-    assert.match(texts(await say(t.ai, 'ann', '/beta')), /on for you until/, 'the status says so');
-    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'opencode').locked, false);
-    assert.strictEqual(providerNamed((await getJson(t.ai, 'bob', '/collab/ai/presets')).body, 'opencode').locked, true, 'bob did not type it');
-    await sayTuned(t.ai, 'ann', 'hi', {provider: 'opencode'});
+    assert.strictEqual((await presetsOf(t.ai, 'ann')).service.id, 'openrouter', 'OpenRouter until /beta is typed');
+    assert.match(texts(await say(t.ai, 'ann', '/beta')), /^Your answers use OpenRouter\. Type \/beta and the PIN to use OpenCode Go for an hour\.$/);
+    assert.strictEqual(texts(await say(t.ai, 'ann', '/beta 00000')), 'Wrong PIN.');
+    assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)),
+      /^Your answers now use OpenCode Go until \d\d:\d\d\. Type \/beta off to go back to OpenRouter\.$/);
+    assert.match(texts(await say(t.ai, 'ann', '/beta')), /^Your answers use OpenCode Go until \d\d:\d\d\. Type \/beta off to go back to OpenRouter\.$/,
+      'the status says so');
+    const ann = await presetsOf(t.ai, 'ann');
+    assert.deepStrictEqual([ann.service.id, ann.beta.on], ['opencode', true]);
+    assert.ok(ann.beta.until > t.ai.now(), 'on until a time still to come');
+    assert.strictEqual((await presetsOf(t.ai, 'bob')).service.id, 'openrouter', 'bob did not type it');
+    await sayTuned(t.ai, 'ann', 'hi');
     assert.strictEqual(t.calls[0].url, PROVIDERS.opencode.url, 'ann gets OpenCode Go');
-    await sayTuned(t.ai, 'bob', 'hi', {provider: 'opencode'});
-    assert.strictEqual(t.calls[1].url, PROVIDERS.openrouter.url, 'bob falls back to OpenRouter');
+    await sayTuned(t.ai, 'bob', 'hi');
+    assert.strictEqual(t.calls[1].url, PROVIDERS.openrouter.url, 'bob gets OpenRouter');
     assert.doesNotMatch(JSON.stringify(t.calls), new RegExp(PIN_VALUE), 'the PIN never reaches the model');
     t.advance(HOUR + 60000);
-    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'opencode').locked, true, 'the hour is over');
-    assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)), /on for you until/);
-    assert.match(texts(await say(t.ai, 'ann', '/beta off')), /^OpenCode Go models are off\.$/);
-    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'opencode').locked, true, '/beta off ends it');
-    await sayTuned(t.ai, 'ann', 'again', {provider: 'opencode'});
+    assert.strictEqual((await presetsOf(t.ai, 'ann')).service.id, 'openrouter', 'the hour is over');
+    assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)), /^Your answers now use OpenCode Go until/);
+    assert.strictEqual(texts(await say(t.ai, 'ann', '/beta off')), 'Your answers use OpenRouter again.');
+    assert.strictEqual((await presetsOf(t.ai, 'ann')).service.id, 'openrouter', '/beta off ends it');
+    await sayTuned(t.ai, 'ann', 'again');
     assert.strictEqual(t.calls[2].url, PROVIDERS.openrouter.url, 'with /beta off the request uses OpenRouter');
   });
 });
@@ -446,21 +469,25 @@ test('/beta uses the PIN of /override and its lock, and a PIN changed with "turn
     assert.match(texts(await say(t.ai, 'fay', '/override ' + PIN_VALUE)), /Too many wrong PINs/, '/override is locked too');
     assert.match(texts(await say(t.ai, 'fay', '/beta ' + PIN_VALUE)), /Too many wrong PINs/);
     t.advance(16 * 60 * 1000);
-    assert.match(texts(await say(t.ai, 'fay', '/beta ' + PIN_VALUE)), /on for you until/);
+    assert.match(texts(await say(t.ai, 'fay', '/beta ' + PIN_VALUE)), /Your answers now use OpenCode Go until/);
     const done = await changePin(t.ai, 'fay', {current: PIN_VALUE, new: 'Fresh2026', endFull: true});
     assert.strictEqual(done.status, 200);
-    assert.strictEqual(providerNamed((await getJson(t.ai, 'fay', '/collab/ai/presets')).body, 'opencode').locked, true,
-      'turning it off for everyone ends /beta too');
-    assert.match(texts(await say(t.ai, 'fay', '/beta Fresh2026')), /on for you until/, 'the new PIN works');
+    assert.strictEqual((await presetsOf(t.ai, 'fay')).beta.on, false, 'turning it off for everyone ends /beta too');
+    assert.match(texts(await say(t.ai, 'fay', '/beta Fresh2026')), /Your answers now use OpenCode Go until/, 'the new PIN works');
   });
 });
 
-test('/beta with no OpenCode Go key says so, and OpenCode Go stays out of the list', async () => {
+test('/beta with no OpenCode Go key says so, and the answers stay on OpenRouter', async () => {
   await withOpenCodeKey(null, async () => {
-    const t = setup([]);
-    assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)), /has no key on this server yet/);
-    assert.strictEqual(providerNamed((await getJson(t.ai, 'ann', '/collab/ai/presets')).body, 'opencode').configured, false);
-    assert.strictEqual(t.calls.length, 0);
+    const t = setup([textTurn('one')]);
+    assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)),
+      /^Your answers now use OpenCode Go until \d\d:\d\d\. Type \/beta off to go back to OpenRouter\. OpenCode Go has no key on this server yet, so answers stay on OpenRouter\.$/);
+    assert.strictEqual((await presetsOf(t.ai, 'ann')).service.id, 'openrouter');
+    assert.match(texts(await say(t.ai, 'ann', '/beta')),
+      /^Your answers use OpenCode Go until \d\d:\d\d\. Type \/beta off to go back to OpenRouter\. OpenCode Go has no key on this server yet, so answers stay on OpenRouter\.$/,
+      '/beta alone says the answers stay on OpenRouter too');
+    await sayTuned(t.ai, 'ann', 'hi');
+    assert.strictEqual(t.calls[0].url, PROVIDERS.openrouter.url, 'the answer stays on OpenRouter');
   });
 });
 
@@ -476,47 +503,13 @@ test('commands with a PIN, /beta included, never reach the model, even when they
   assert.ok(!t.calls[0].payload.messages.some(m => /^\/beta/.test(m.content || '')));
 });
 
-test('/smart: the smart subagent does the task, and its report is the answer when nothing changed; the helper makes no call of its own', async () => {
-  const t = setup([textTurn('Report: every label has text.')]);
+test('/smart is not a command any more: it is a question like any other', async () => {
+  const t = setup([textTurn('Every label has text.')]);
   const evs = await say(t.ai, 'ann', '/smart check every label');
-  assert.strictEqual(t.calls.length, 1, 'only the subagent calls the model');
-  assert.ok(isSub(t.calls[0].payload), 'it is a subagent');
-  assert.strictEqual(t.calls[0].payload.model, 'anthropic/claude-haiku-5.5', 'the smart tier');
-  assert.match(t.calls[0].payload.messages[1].content, /check every label/, 'it is given the task');
-  assert.strictEqual(texts(evs), 'Report: every label has text.');
-  assert.deepStrictEqual(evs.filter(e => e.type === 'cooldown'), [{type: 'cooldown', smartReadyInSeconds: 2700}], 'the timer starts');
-  assert.strictEqual(evs[evs.length - 1].type, 'done');
-});
-
-test('/smart: when the subagent changes the draft, the helper carries on from its report and answers with the change', async () => {
-  const t = setup([
-    toolTurn('scm_set_property', {screen: 'Screen1', component: 'Label1', property: 'Text', value: 'Hello'}, 'c1'),
-    textTurn('Report: the label now says Hello.'),
-    textTurn('I changed the label to Hello.'),
-  ]);
-  const evs = await say(t.ai, 'ann', '/smart change the label to Hello');
-  assert.strictEqual(t.calls.length, 3);
-  assert.ok(isSub(t.calls[0].payload) && isSub(t.calls[1].payload), 'the first two calls are the subagent\'s');
-  assert.ok(!isSub(t.calls[2].payload), 'the third is the helper, with the report as the result of the subagent call');
-  assert.strictEqual(toolMessages(t.calls[2].payload).find(m => m.tool_call_id === 'smart-task').content,
-    'Report: the label now says Hello.');
-  assert.match(texts(evs), /I changed the label to Hello\./);
-});
-
-test('/smart inside the cooldown says when it can be used again, and calls no model', async () => {
-  const t = setup([textTurn('Report one.')]);
-  await say(t.ai, 'ann', '/smart check every label');
-  t.advance(10 * 60 * 1000);
-  const evs = await say(t.ai, 'bob', '/smart check the colours');
-  assert.strictEqual(t.calls.length, 1, 'the refused request calls no model');
-  assert.match(texts(evs), /is resting.*again in 35 minutes/s);
-  assert.deepStrictEqual(evs.filter(e => e.type === 'cooldown'), [{type: 'cooldown', smartReadyInSeconds: 2100}]);
-});
-
-test('/smart with no task asks for one, and calls no model', async () => {
-  const t = setup([]);
-  assert.match(texts(await say(t.ai, 'ann', '/smart')), /^Tell me the task after \/smart/);
-  assert.strictEqual(t.calls.length, 0);
+  assert.strictEqual(t.calls.length, 1, 'one model call: the helper answers itself');
+  assert.ok(!isSub(t.calls[0].payload), 'no subagent is started');
+  assert.strictEqual(texts(evs), 'Every label has text.');
+  assert.ok(!evs.some(e => e.type === 'cooldown'), 'no cooldown is shown');
 });
 
 test('commands never reach the model, even when they are in the earlier messages', async () => {
@@ -735,19 +728,24 @@ test('an AI change waits until every open tab has saved, then goes in, and the o
   assert.ok(sent.some(s => s.msg.t === 'reload' && s.id === ann.id), 'the open tab reloads to show the change');
 });
 
-test('a tab that does not answer does not hold an AI change for long', async () => {
+test('a tab that does not answer holds an AI change only for the wait, then the change is not made and the tabs reload', async () => {
   const t = setup([
     toolTurn('draft_replace', BIG_SCREEN_EDIT, 'r1'),
     toolTurn('propose_draft', {summary: 'A block'}, 'p1'),
     textTurn('Press Apply.'),
   ], {flushMs: 30});
-  t.hub.send = () => {};
+  const sent = [];
+  t.hub.send = (id, msg) => sent.push({id, msg});
   const ann = t.hub.addClient({userId: 'u-ann', email: 'ann@team.local'});
   t.hub.join(ann.id, '5', {projectName: 'Pong', ownerEmail: 'ann@team.local'});
   const proposal = (await say(t.ai, 'ann', 'add a block')).find(e => e.type === 'proposal');
   const started = Date.now();
-  assert.strictEqual((await apply(t.ai, 'ann', proposal.id)).status, 200);
-  assert.ok(Date.now() - started < 2000, 'it went in after the wait, not after a minute');
+  const res = await apply(t.ai, 'ann', proposal.id);
+  assert.strictEqual(res.status, 400);
+  assert.match(JSON.parse(res.body).error, /could not save what it had/);
+  assert.ok(Date.now() - started < 2000, 'it gave up after the wait, not after a minute');
+  assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'nothing was written');
+  assert.ok(sent.some(s => s.msg.t === 'reload' && s.id === ann.id), 'the open tab reloads, which also unfreezes it');
 });
 
 test('/goal with nothing after it asks for the goal', async () => {
@@ -1046,12 +1044,6 @@ test('a problem the project already had does not stop a complete app from being 
 
 // ---- full-app mode builds on until the app is complete; a question or a plan leaves an unfinished app alone ----
 
-async function sayWithEffort(ai, who, text, effort) {
-  const res = fakeRes();
-  await ai.handle(fakeReq('/collab/ai/stream', 'POST', {projectId: '5', effort, messages: [{role: 'user', content: text}]}, 'AppInventor=' + who), res);
-  return events(res);
-}
-
 test('in full-app mode, an answer that stops with the app unfinished is asked to carry on, and the app is proposed once complete', async () => {
   const t = setup([
     toolTurn('scm_new_screen', {name: 'Quiz'}, 'n1'),
@@ -1176,19 +1168,6 @@ test('in full-app mode, an answer cut off in plain words carries on, and nobody 
   const evs = await say(t.ai, 'ann', 'build a quiz');
   assert.ok(!evs.some(e => e.type === 'status' && /cut off/i.test(e.text)));
   assert.match(texts(evs), /Carrying on\./);
-});
-
-test('the effort level changes how carefully the helper works; an unknown level counts as medium', async () => {
-  const t = setup([textTurn('a'), textTurn('b'), textTurn('c'), textTurn('d')]);
-  await sayWithEffort(t.ai, 'ann', 'hi', 'high');
-  assert.match(systemOf(t.calls[0]), /Effort is HIGH/);
-  await sayWithEffort(t.ai, 'ann', 'hi', 'low');
-  assert.match(systemOf(t.calls[1]), /Effort is LOW/);
-  await sayWithEffort(t.ai, 'ann', 'hi', 'medium');
-  assert.doesNotMatch(systemOf(t.calls[2]), /Effort is/);
-  const evs = await sayWithEffort(t.ai, 'ann', 'hi', 'extreme');
-  assert.doesNotMatch(systemOf(t.calls[3]), /Effort is/);
-  assert.ok(!evs.some(e => e.type === 'error'));
 });
 
 test('turning full-app mode off throws the unfinished app away; the next app starts from the project', async () => {
@@ -1502,7 +1481,7 @@ test('if the notes cannot be written, the answer still goes on, and says that ea
   }
 });
 
-test('the helper hands a piece of the job to its one subagent: the default tier, on high reasoning; the person sees its steps but not its words', async () => {
+test('the helper hands a piece of the job to its one subagent: the balanced model, on high reasoning; the person sees its steps but not its words', async () => {
   const t = setup([
     toolTurn('subagent', {task: 'Set the label on Screen1 to Hello.'}, 'h1'),
     toolTurn('scm_set_property', {screen: 'Screen1', component: 'Label1', property: 'Text', value: 'Hello'}, 'c1'),
@@ -1515,7 +1494,7 @@ test('the helper hands a piece of the job to its one subagent: the default tier,
   assert.strictEqual(t.calls[0].payload.reasoning, undefined, 'the helper itself is not sent a reasoning setting');
   assert.deepStrictEqual(t.calls[1].payload.reasoning, {effort: 'high'}, 'the subagent is sent high reasoning');
   assert.strictEqual(t.calls[1].payload.max_tokens, 32000, 'with room for its reasoning');
-  assert.strictEqual(t.calls[1].payload.model, 'inclusionai/ling-3.1-flash', 'the default tier\'s model');
+  assert.strictEqual(t.calls[1].payload.model, 'some/model', 'the balanced model, which the companion answers with');
   assert.deepStrictEqual(t.calls[2].payload.reasoning, {effort: 'high'}, 'and so is each of its answers');
   assert.strictEqual(t.calls[3].payload.reasoning, undefined);
   assert.ok(!texts(evs).includes('The label now says Hello.'), "the subagent's words are not shown to the person");
@@ -1573,7 +1552,7 @@ test('if the subagent cannot finish, the helper is told why and carries on witho
   assert.match(texts(evs), /The subagent could not finish, so I stopped there\./);
 });
 
-// ---- models, run modes, reasoning and the subagent tiers ----
+// ---- models, reasoning and the subagent's model ----
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // A model answer that asks for several tools at once: each call comes in its own piece of the stream.
@@ -1582,7 +1561,7 @@ const callsTurn = calls => [
     function: {name: c.name, arguments: JSON.stringify(c.args || {})}}]}}]})),
   '[DONE]',
 ];
-// An answer sent with the settings the browser sends with each message (preset, runMode, reasoning).
+// An answer sent with the settings the browser sends with each message (reasoning and fastSubagent).
 async function sayTuned(ai, who, text, fields = {}, projectId = '5') {
   const res = fakeRes();
   await ai.handle(fakeReq('/collab/ai/stream', 'POST', Object.assign({projectId, messages: [{role: 'user', content: text}]}, fields),
@@ -1594,7 +1573,7 @@ const taskOf = p => p.messages[1].content;
 const toolMessages = p => p.messages.filter(m => m.role === 'tool');
 const cardOf = (evs, id) => evs.filter(e => e.type === 'subagent' && e.id === id);
 const statesOf = (evs, id) => cardOf(evs, id).map(e => e.state);
-const MODEL_VARS = ['AI_MODEL_SMART', 'AI_MODEL_BALANCED', 'AI_MODEL_FAST', 'OPENROUTER_MODEL', 'AI_DAILY_LIMIT'];
+const MODEL_VARS = ['AI_MODEL_BALANCED', 'AI_MODEL_FAST', 'OPENROUTER_MODEL', 'AI_DAILY_LIMIT'];
 const saveEnv = () => Object.fromEntries(MODEL_VARS.map(k => [k, process.env[k]]));
 function restoreEnv(saved) {
   for (const [k, v] of Object.entries(saved)) {
@@ -1603,31 +1582,24 @@ function restoreEnv(saved) {
   }
 }
 
-test('GET /collab/ai/presets: the models in order, the run modes, the defaults and the subagent tiers; signed-in people only', async () => {
+test('GET /collab/ai/presets: the service in use, the state of /beta, the balanced and fast presets and the default reasoning; signed-in people only', async () => {
   const t = setup([]);
   const saved = saveEnv();
-  for (const k of ['AI_MODEL_SMART', 'AI_MODEL_BALANCED', 'AI_MODEL_FAST']) delete process.env[k];
+  for (const k of ['AI_MODEL_BALANCED', 'AI_MODEL_FAST']) delete process.env[k];
   try {
     const res = await getJson(t.ai, 'ann', '/collab/ai/presets');
     assert.strictEqual(res.status, 200);
-    const body = JSON.parse(res.body);
-    assert.deepStrictEqual(body.presets, [
-      {id: 'smart', label: 'Smart', name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5',
-        reasoningLevels: ['default', 'low', 'medium', 'high', 'max']},
-      {id: 'balanced', label: 'Balanced', name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash',
-        reasoningLevels: ['default', 'low', 'medium', 'high']},
-      {id: 'fast', label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash',
-        reasoningLevels: ['default', 'low', 'medium', 'high']},
-    ]);
-    assert.strictEqual(body.defaultPreset, 'balanced');
-    assert.deepStrictEqual(body.runModes, [
-      {id: 'normal', label: 'Normal', agents: 1}, {id: 'parallel', label: 'Parallel', agents: 2},
-      {id: 'ultracode', label: 'Ultracode', agents: 3}]);
-    assert.strictEqual(body.defaultRunMode, 'normal');
-    assert.strictEqual(body.defaultReasoning, 'default');
-    assert.deepStrictEqual(body.subagents.default, {name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash', reasoning: 'high'});
-    assert.deepStrictEqual(body.subagents.smart, {name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5', reasoning: 'high',
-      cooldownMinutes: 45, readyInSeconds: 0});
+    assert.deepStrictEqual(JSON.parse(res.body), {
+      service: {id: 'openrouter', name: 'OpenRouter'},
+      beta: {on: false, until: 0},
+      presets: [
+        {id: 'balanced', label: 'Balanced', name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash',
+          reasoningLevels: ['default', 'low', 'medium', 'high']},
+        {id: 'fast', label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash',
+          reasoningLevels: ['default', 'low', 'medium', 'high']},
+      ],
+      defaultReasoning: 'default',
+    });
     t.ai.ask = async () => null;
     assert.strictEqual((await getJson(t.ai, 'ann', '/collab/ai/presets')).status, 401, 'signed-out visitors get nothing');
   } finally {
@@ -1635,147 +1607,97 @@ test('GET /collab/ai/presets: the models in order, the run modes, the defaults a
   }
 });
 
-test('the companion uses the model of its preset: an unknown or missing preset is balanced; AI_MODEL_* change only the model string; OPENROUTER_MODEL is not read', async () => {
-  const t = setup([textTurn('a'), textTurn('b'), textTurn('c'), textTurn('d')]);
+test('with /beta on, the service and its presets are OpenCode Go\'s', async () => {
+  await withOpenCodeKey('oc-test', async () => {
+    const t = setup([textTurn('x')]);
+    await say(t.ai, 'ann', '/beta ' + PIN_VALUE);
+    const body = await presetsOf(t.ai, 'ann');
+    assert.deepStrictEqual(body.service, {id: 'opencode', name: 'OpenCode Go'});
+    assert.deepStrictEqual(body.presets.map(p => [p.id, p.name, p.model, p.reasoningLevels]), [
+      ['balanced', 'Step 5 Preview', 'step-5-preview-free', ['default']],
+      ['fast', 'DeepSeek V4.1 Flash', 'deepseek-v4.1-flash', ['default']],
+    ]);
+    assert.strictEqual(body.beta.on, true);
+  });
+});
+
+test('the companion answers with the balanced model, whatever preset the browser names; AI_MODEL_* change only the model string', async () => {
+  const t = setup([textTurn('a'), textTurn('b'), textTurn('c')]);
   const saved = saveEnv();
   try {
     process.env.OPENROUTER_MODEL = 'old/model';
     delete process.env.AI_MODEL_BALANCED;
     await sayTuned(t.ai, 'ann', 'hi');
-    process.env.AI_MODEL_FAST = 'other/fast';
+    process.env.AI_MODEL_BALANCED = 'other/balanced';
     await sayTuned(t.ai, 'ann', 'hi', {preset: 'fast'});
     await sayTuned(t.ai, 'ann', 'hi', {preset: 'smart'});
-    await sayTuned(t.ai, 'ann', 'hi', {preset: 'turbo'});
-    assert.deepStrictEqual(t.calls.map(c => c.payload.model),
-      ['inclusionai/ling-3.1-flash', 'other/fast', 'some/smart', 'inclusionai/ling-3.1-flash']);
+    assert.deepStrictEqual(t.calls.map(c => c.payload.model), ['inclusionai/ling-3.1-flash', 'other/balanced', 'other/balanced'],
+      'the preset in the body is ignored; OPENROUTER_MODEL is not read');
   } finally {
     restoreEnv(saved);
   }
 });
 
-test('pictures are offered by the model in use: smart takes them, balanced does not; the status check asks about the preset it is given', async () => {
-  const models = [{id: 'some/smart', architecture: {input_modalities: ['text', 'image']}},
-    {id: 'some/model', architecture: {input_modalities: ['text']}}];
-  const t = setup([textTurn('a'), textTurn('b')], {models});
-  await sayTuned(t.ai, 'ann', 'look', {preset: 'smart'});
-  assert.ok(toolNames(t.calls[0]).includes('view_picture'));
-  await sayTuned(t.ai, 'ann', 'look', {preset: 'balanced'});
-  assert.ok(!toolNames(t.calls[1]).includes('view_picture'));
-  const smart = JSON.parse((await getJson(t.ai, 'ann', '/collab/ai/status?projectId=5&preset=smart')).body);
-  const balanced = JSON.parse((await getJson(t.ai, 'ann', '/collab/ai/status?projectId=5&preset=balanced')).body);
-  assert.deepStrictEqual([smart.vision, balanced.vision], [true, false]);
+test('pictures are offered by the balanced model in use, and the status check asks about it', async () => {
+  const models = [{id: 'some/model', architecture: {input_modalities: ['text', 'image']}},
+    {id: 'some/fast', architecture: {input_modalities: ['text']}}];
+  const t = setup([textTurn('a')], {models});
+  await sayTuned(t.ai, 'ann', 'look', {preset: 'fast'});
+  assert.ok(toolNames(t.calls[0]).includes('view_picture'), 'the companion uses the balanced model, which takes pictures');
+  const status = JSON.parse((await getJson(t.ai, 'ann', '/collab/ai/status?projectId=5')).body);
+  assert.deepStrictEqual([status.configured, status.vision, status.beta], [true, true, {on: false, until: 0}]);
 });
 
-test('run modes: normal runs one subagent at a time, parallel two and ultracode three; the rest wait in the order they were asked for', async () => {
-  for (const [mode, cap] of [['normal', 1], ['parallel', 2], ['ultracode', 3], ['turbo', 1]]) {
-    const t = setup(null, {respond: async p => {
-      if (isSub(p)) {
-        await sleep(15);
-        return textTurn('Checked: ' + taskOf(p) + '.');
-      }
-      if (toolMessages(p).length) return textTurn('All three are checked.');
-      return callsTurn([
-        {id: 'a', name: 'subagent', args: {task: 'first'}},
-        {id: 'b', name: 'subagent', args: {task: 'second', mode: 'smart'}},
-        {id: 'c', name: 'subagent', args: {task: 'third'}},
-      ]);
-    }});
-    const evs = await sayTuned(t.ai, 'ann', 'check three things', {runMode: mode});
-    assert.deepStrictEqual(evs.filter(e => e.type === 'subagent' && e.state === 'running').map(e => e.id), ['s0:a', 's0:b', 's0:c'],
-      mode + ': started in the order asked');
-    assert.deepStrictEqual(evs.filter(e => e.type === 'subagent' && e.state === 'queued').map(e => e.id), ['s0:a', 's0:b', 's0:c'].slice(cap),
-      mode + ': the rest are queued');
-    let running = 0;
-    let most = 0;
-    for (const e of evs) {
-      if (e.type !== 'subagent') continue;
-      if (e.state === 'running') running++;
-      if (e.state === 'done' || e.state === 'failed') running--;
-      most = Math.max(most, running);
-    }
-    assert.strictEqual(most, cap, mode + ': no more than ' + cap + ' at once');
-    const last = t.calls.filter(c => !isSub(c.payload) && toolMessages(c.payload).length).pop().payload;
-    assert.deepStrictEqual(toolMessages(last).map(m => m.tool_call_id), ['a', 'b', 'c'], mode + ': the results come back in the order of the calls');
-  }
-});
-
-test('the smart subagent is usable once in 45 minutes, for the whole team: a request inside that time is refused at once, with the minutes left', async () => {
-  const t = setup([
-    toolTurn('subagent', {task: 'Check the layout.', mode: 'smart'}, 'h1'),
-    textTurn('Report: the layout is fine.'),
-    textTurn('The layout is fine.'),
-    toolTurn('subagent', {task: 'Check the colours.', mode: 'smart'}, 'h2'),
-    textTurn('The smart one is resting, so I did it myself.'),
-  ]);
-  const first = await say(t.ai, 'ann', 'check the layout');
-  assert.strictEqual(t.calls[1].payload.model, 'anthropic/claude-haiku-5.5');
-  assert.deepStrictEqual(first.filter(e => e.type === 'cooldown'), [{type: 'cooldown', smartReadyInSeconds: 2700}], 'the timer starts');
-  t.advance(10 * 60 * 1000 + 30 * 1000);   // 34.5 minutes left: 35 when rounded up
-  const second = await say(t.ai, 'bob', 'check the colours', '6');
-  assert.strictEqual(t.calls.length, 5, 'the refused request calls no model');
-  const refusal = toolMessages(t.calls[4].payload).find(m => m.tool_call_id === 'h2').content;
-  assert.match(refusal, /another 35 minutes/);
-  assert.match(refusal, /mode default/);
-  assert.deepStrictEqual(second.filter(e => e.type === 'cooldown'), [{type: 'cooldown', smartReadyInSeconds: 2070}]);
-  assert.strictEqual(cardOf(second, 's0:h2').length, 0, 'a refused request shows no card');
-  const presets = JSON.parse((await getJson(t.ai, 'bob', '/collab/ai/presets')).body);
-  assert.strictEqual(presets.subagents.smart.readyInSeconds, 2070, 'the same timer is shown to everyone');
-});
-
-test('after 45 minutes the smart subagent can be used again', async () => {
-  const t = setup([
-    toolTurn('subagent', {task: 'one', mode: 'smart'}, 'h1'), textTurn('Report one.'), textTurn('One done.'),
-    toolTurn('subagent', {task: 'two', mode: 'smart'}, 'h2'), textTurn('Report two.'), textTurn('Two done.'),
-  ]);
-  await say(t.ai, 'ann', 'first');
-  t.advance(45 * 60 * 1000);
-  await say(t.ai, 'ann', 'second');
-  assert.strictEqual(t.calls.length, 6);
-  assert.strictEqual(t.calls[4].payload.model, 'anthropic/claude-haiku-5.5');
-});
-
-test('the smart timer starts when a smart subagent starts running, not when it is queued; a second smart one that had to wait is refused', async () => {
+test('subagents run one at a time, in the order the model asked for them: each one finishes before the next starts', async () => {
+  let running = 0;
+  let most = 0;
   const t = setup(null, {respond: async p => {
     if (isSub(p)) {
-      if (taskOf(p) === 'slow') await sleep(20);
-      return textTurn('Report on ' + taskOf(p) + '.');
+      running++;
+      most = Math.max(most, running);
+      await sleep(15);
+      running--;
+      return textTurn('Checked: ' + taskOf(p) + '.');
     }
-    if (toolMessages(p).length) return textTurn('Done.');
+    if (toolMessages(p).length) return textTurn('All three are checked.');
     return callsTurn([
-      {id: 'slow', name: 'subagent', args: {task: 'slow'}},
-      {id: 's1', name: 'subagent', args: {task: 'first', mode: 'smart'}},
-      {id: 's2', name: 'subagent', args: {task: 'second', mode: 'smart'}},
+      {id: 'a', name: 'subagent', args: {task: 'first'}},
+      {id: 'b', name: 'subagent', args: {task: 'second'}},
+      {id: 'c', name: 'subagent', args: {task: 'third'}},
     ]);
   }});
-  const evs = await say(t.ai, 'ann', 'three checks');
-  const s1Running = evs.findIndex(e => e.type === 'subagent' && e.id === 's0:s1' && e.state === 'running');
-  assert.ok(s1Running > 0 && evs.findIndex(e => e.type === 'cooldown') > s1Running, 'the timer starts with s1');
-  assert.deepStrictEqual(statesOf(evs, 's0:s1'), ['queued', 'running', 'done']);
-  assert.deepStrictEqual(statesOf(evs, 's0:s2'), ['queued', 'failed']);
-  assert.strictEqual(cardOf(evs, 's0:s2').at(-1).detail, 'smart in 45 min');
-  assert.deepStrictEqual(evs.filter(e => e.type === 'cooldown').map(e => e.smartReadyInSeconds), [2700, 2700]);
+  const evs = await say(t.ai, 'ann', 'check three things');
+  assert.deepStrictEqual(evs.filter(e => e.type === 'subagent').map(e => e.id + ' ' + e.state),
+    ['s0:a running', 's0:a done', 's0:b running', 's0:b done', 's0:c running', 's0:c done']);
+  assert.strictEqual(most, 1, 'never more than one at once');
   const last = t.calls.filter(c => !isSub(c.payload) && toolMessages(c.payload).length).pop().payload;
-  assert.match(toolMessages(last).find(m => m.tool_call_id === 's2').content, /another 45 minutes/);
+  assert.deepStrictEqual(toolMessages(last).map(m => m.tool_call_id), ['a', 'b', 'c'], 'the results come back in the order of the calls');
+  assert.strictEqual(texts(evs), 'All three are checked.');
 });
 
-test('subagent requests: the default tier on Ling 3.1 Flash and the smart tier on Claude Haiku 5.5, both with high reasoning and 32000 tokens', async () => {
+test('there is no cooldown: a subagent asked for in one answer after another is never refused', async () => {
   const t = setup([
-    toolTurn('subagent', {task: 'one'}, 'h1'), textTurn('Report one.'),
-    toolTurn('subagent', {task: 'two', mode: 'smart'}, 'h2'), textTurn('Report two.'),
-    textTurn('Both done.'),
+    toolTurn('subagent', {task: 'one'}, 'h1'), textTurn('Report one.'), textTurn('One done.'),
+    toolTurn('subagent', {task: 'two'}, 'h2'), textTurn('Report two.'), textTurn('Two done.'),
   ]);
-  await say(t.ai, 'ann', 'two pieces');
+  const first = await say(t.ai, 'ann', 'first');
+  const second = await say(t.ai, 'bob', 'second');
+  assert.strictEqual(statesOf(first, 's0:h1').at(-1), 'done');
+  assert.strictEqual(statesOf(second, 's0:h2').at(-1), 'done');
+  assert.ok(!first.concat(second).some(e => e.type === 'cooldown'), 'no cooldown is shown');
+});
+
+test('subagent requests: the balanced model, which the companion answers with, on high reasoning and 32000 tokens; the companion keeps its usual length', async () => {
+  const t = setup([toolTurn('subagent', {task: 'one'}, 'h1'), textTurn('Report one.'), textTurn('Done.')]);
+  await say(t.ai, 'ann', 'one piece');
   assert.strictEqual(t.calls[0].payload.max_tokens, 8000, 'the helper keeps its usual length');
   assert.strictEqual(t.calls[0].payload.reasoning, undefined);
-  assert.strictEqual(t.calls[1].payload.model, 'inclusionai/ling-3.1-flash');
+  assert.strictEqual(t.calls[1].payload.model, 'some/model');
   assert.deepStrictEqual(t.calls[1].payload.reasoning, {effort: 'high'});
   assert.strictEqual(t.calls[1].payload.max_tokens, 32000);
-  assert.strictEqual(t.calls[3].payload.model, 'anthropic/claude-haiku-5.5');
-  assert.deepStrictEqual(t.calls[3].payload.reasoning, {effort: 'high'});
-  assert.strictEqual(t.calls[3].payload.max_tokens, 32000);
 });
 
-test('the default subagent has no limit: no step or time cap, and its calls do not count against the questions', async () => {
+test('a subagent has no limit: no step or time cap, and its calls do not count against the questions', async () => {
   const saved = saveEnv();
   process.env.AI_DAILY_LIMIT = '1';
   let t;
@@ -1790,7 +1712,7 @@ test('the default subagent has no limit: no step or time cap, and its calls do n
       if (toolMessages(p).length) return textTurn('All six are done.');
       return callsTurn([1, 2, 3, 4, 5, 6].map(k => ({id: 's' + k, name: 'subagent', args: {task: 'piece ' + k}})));
     }});
-    const evs = await sayTuned(t.ai, 'ann', 'do six pieces', {runMode: 'ultracode'});
+    const evs = await sayTuned(t.ai, 'ann', 'do six pieces');
     assert.ok(!evs.some(e => e.type === 'error' || e.type === 'status'), 'nothing stops it');
     for (let k = 1; k <= 6; k++) assert.strictEqual(statesOf(evs, 's0:s' + k).at(-1), 'done', 's0:s' + k);
     assert.strictEqual(cardOf(evs, 's0:s1').at(-1).steps, 21, 'twenty reads and a report');
@@ -1800,118 +1722,6 @@ test('the default subagent has no limit: no step or time cap, and its calls do n
   } finally {
     restoreEnv(saved);
   }
-});
-
-const UNFINISHED = 'The subagent did not finish within 12 answers or 4 minutes. Ask again with a smaller piece of the job.';
-
-test('a smart subagent makes twelve model answers at most: when a thirteenth would be needed, it stops and the helper is told to ask again', async () => {
-  const t = setup(null, {respond: async p => {
-    // The stub stops after 40 answers, so that a subagent without the limit ends the test with a failure, not a hang.
-    if (isSub(p)) {
-      if (toolMessages(p).length >= 40) return textTurn('Report.');
-      return toolTurn('read_file', {path: 'src/a/Screen1.scm', from: toolMessages(p).length + 1}, 'r' + toolMessages(p).length);
-    }
-    if (toolMessages(p).length) return textTurn('It did not finish, so I will do the piece myself.');
-    return toolTurn('subagent', {task: 'read the project a piece at a time', mode: 'smart'}, 'h1');
-  }});
-  const evs = await say(t.ai, 'ann', 'read it');
-  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 12, 'twelve model answers, then it stops');
-  assert.strictEqual(toolMessages(t.calls.at(-1).payload)[0].content, UNFINISHED);
-  const card = cardOf(evs, 's0:h1').at(-1);
-  assert.deepStrictEqual([card.state, card.detail, card.steps], ['failed', 'stopped', 12]);
-  assert.match(texts(evs), /I will do the piece myself/);
-  assert.ok(!evs.some(e => e.type === 'error'), 'no error is shown');
-});
-
-test('a smart subagent stops once four minutes have passed on the clock, counted from when it starts running', async () => {
-  const t = setup(null, {respond: async p => {
-    if (isSub(p)) {
-      if (toolMessages(p).length >= 40) return textTurn('Report.');   // so that a subagent without the limit ends, and fails
-      t.advance(90 * 1000);   // each model answer takes 90 seconds on the clock
-      return toolTurn('read_file', {path: 'src/a/Screen1.scm', from: toolMessages(p).length + 1}, 'r' + toolMessages(p).length);
-    }
-    if (toolMessages(p).length) return textTurn('It ran out of time, so I will do the piece myself.');
-    return toolTurn('subagent', {task: 'read it slowly', mode: 'smart'}, 'h1');
-  }});
-  const evs = await say(t.ai, 'ann', 'read it');
-  // The answers start at 0, 90 and 180 seconds. The one due at 270 seconds is not made: more than four minutes are up.
-  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 3, 'three answers, then it stops');
-  assert.strictEqual(toolMessages(t.calls.at(-1).payload)[0].content, UNFINISHED);
-  const card = cardOf(evs, 's0:h1').at(-1);
-  assert.deepStrictEqual([card.state, card.detail, card.steps], ['failed', 'stopped', 3]);
-  assert.match(texts(evs), /I will do the piece myself/);
-});
-
-test('a smart subagent\'s answer that starts a second before its deadline is cut off at the deadline, and the run ends with the stop text', async () => {
-  // The second answer starts with one second of the four minutes left, and it never ends, so only the deadline can stop
-  // it. turnMs (1.5 seconds) is a safety net only: if the deadline did not work, the answer would be cut off at turnMs,
-  // and the test would fail on the wrong text rather than wait.
-  const t = setup(null, {turnMs: 1500, respond: async p => {
-    if (isSub(p)) {
-      if (toolMessages(p).length === 0) {
-        t.advance(239 * 1000);
-        return toolTurn('read_file', {path: 'src/a/Screen1.scm', from: 1}, 'r0');
-      }
-      return {paced: Infinity, gap: 15};
-    }
-    if (toolMessages(p).length) return textTurn('I will do the piece myself.');
-    return toolTurn('subagent', {task: 'read it', mode: 'smart'}, 'h1');
-  }});
-  const evs = await say(t.ai, 'ann', 'read it');
-  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 2, 'two model answers: the second is cut off');
-  assert.strictEqual(t.calls[1].payload.model, 'anthropic/claude-haiku-5.5');
-  assert.strictEqual(t.calls[2].signal.aborted, true, 'the model call is cancelled at the deadline');
-  assert.strictEqual(toolMessages(t.calls.at(-1).payload)[0].content, UNFINISHED);
-  const card = cardOf(evs, 's0:h1').at(-1);
-  assert.deepStrictEqual([card.state, card.detail, card.steps], ['failed', 'stopped', 2]);
-  assert.match(texts(evs), /I will do the piece myself/);
-  assert.ok(!evs.some(e => e.type === 'error'), 'no error is shown');
-});
-
-test('a retry that would start after the deadline does not run: nothing is shown as trying again, and the run ends with the stop text', async () => {
-  // The first try fails two seconds before the deadline. Its retry would wait five seconds, so it would start after the
-  // deadline: it is not made, and the wait is not made either.
-  let tries = 0;
-  const t = setup(null, {retryWaitMs: 5000, respond: async p => {
-    if (isSub(p)) {
-      if (tries++ === 0) {
-        t.advance(238 * 1000);
-        return {status: 500, detail: 'busy'};
-      }
-      return textTurn('Report: fine.');
-    }
-    if (toolMessages(p).length) return textTurn('It did not finish, so I will do the piece myself.');
-    return toolTurn('subagent', {task: 'check', mode: 'smart'}, 'h1');
-  }});
-  const evs = await say(t.ai, 'ann', 'check');
-  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 1, 'the retry is not made');
-  assert.strictEqual(toolMessages(t.calls.at(-1).payload)[0].content, UNFINISHED);
-  assert.deepStrictEqual(statesOf(evs, 's0:h1'), ['running', 'failed']);
-  const card = cardOf(evs, 's0:h1').at(-1);
-  assert.deepStrictEqual([card.detail, card.steps], ['stopped', 1]);
-  assert.ok(!evs.some(e => e.type === 'reset' || e.type === 'status'), 'nothing is shown as trying again');
-  assert.match(texts(evs), /I will do the piece myself/);
-  assert.ok(!evs.some(e => e.type === 'error'), 'no error is shown');
-});
-
-test('a retry that would start before the deadline runs as usual', async () => {
-  let tries = 0;
-  const t = setup(null, {respond: async p => {
-    if (isSub(p)) {
-      if (tries++ === 0) {
-        t.advance(230 * 1000);   // the first try fails ten seconds before the deadline; its retry starts well before it
-        return {status: 500, detail: 'busy'};
-      }
-      return textTurn('Report: fine.');
-    }
-    if (toolMessages(p).length) return textTurn('Checked.');
-    return toolTurn('subagent', {task: 'check', mode: 'smart'}, 'h1');
-  }});
-  const evs = await say(t.ai, 'ann', 'check');
-  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 2, 'the retry is made');
-  assert.deepStrictEqual(statesOf(evs, 's0:h1'), ['running', 'resting', 'running', 'done']);
-  assert.strictEqual(cardOf(evs, 's0:h1').at(-1).steps, 1);
-  assert.strictEqual(texts(evs), 'Checked.');
 });
 
 test('the helper\'s steps carry no id, and a subagent\'s model calls are steps that carry its id: two of each here', async () => {
@@ -1997,33 +1807,7 @@ function slowListings(t) {
 // the report instead.
 const fourListings = p => (toolMessages(p).length ? null : callsTurn([1, 2, 3, 4].map(k => ({id: 'L' + k, name: 'list_files'}))));
 
-test('a smart subagent checks its time before each tool call: a call that would start at the deadline is not run, and the run ends with the stop text', async () => {
-  // Each listing takes 100 seconds on the clock, and the deadline is four minutes after the run starts. The first three
-  // listings start at 0, 100 and 200 seconds and run to their end. The fourth would start at 300 seconds, so it is not run.
-  const t = setup(null, {respond: async p => {
-    if (isSub(p)) return fourListings(p) || textTurn('Report: not reached.');
-    if (toolMessages(p).length) return textTurn('It ran out of time, so I will do the piece myself.');
-    return toolTurn('subagent', {task: 'List the files four times.', mode: 'smart'}, 'h1');
-  }});
-  const seen = slowListings(t);
-  const evs = await say(t.ai, 'ann', 'list the files four times');
-  assert.deepStrictEqual(seen.starts, [0, 100, 200], 'the first three listings start at 0, 100 and 200 seconds');
-  assert.deepStrictEqual(evs.filter(e => e.type === 'tool' && e.name === 'list_files' && e.state === 'done').map(e => e.id),
-    ['s0:h1:1:L1', 's0:h1:1:L2', 's0:h1:1:L3'], 'the first three run to their end');
-  assert.ok(!evs.some(e => e.id === 's0:h1:1:L4'), 'the fourth is not run, so it has no tool step');
-  const results = toolMessages({messages: seen.messages});
-  assert.deepStrictEqual(results.map(m => m.tool_call_id), ['L1', 'L2', 'L3', 'L4'], 'every call is answered');
-  assert.strictEqual(results[3].content, 'The time for this subagent is up, so this call was not run.');
-  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 1, 'no further answer: the run ends');
-  const card = cardOf(evs, 's0:h1').at(-1);
-  assert.deepStrictEqual([card.state, card.detail, card.steps], ['failed', 'stopped', 1]);
-  assert.strictEqual(toolMessages(t.calls.at(-1).payload).find(m => m.tool_call_id === 'h1').content, UNFINISHED,
-    'the helper is told the run ended');
-  assert.match(texts(evs), /I will do the piece myself/);
-  assert.ok(!evs.some(e => e.type === 'error'), 'no error is shown');
-});
-
-test('the same four listings in a default subagent all run: a default subagent has no time cap', async () => {
+test('the same four listings in a subagent all run: a subagent has no time cap', async () => {
   const t = setup(null, {respond: async p => {
     if (isSub(p)) return fourListings(p) || textTurn('Report: four listings.');
     if (toolMessages(p).length) return textTurn('All four are listed.');
@@ -2042,9 +1826,9 @@ test('the same four listings in a default subagent all run: a default subagent h
   assert.ok(!evs.some(e => e.type === 'status' || e.type === 'error'), 'nothing stops it');
 });
 
-test('a default run is not stopped by time: its answers go on past four minutes, and one begun after that is not cut off', async () => {
-  // Each answer takes five minutes on the clock, so the default run is past four minutes from its second answer on, and its
-  // last answer begins at fifteen minutes. turnMs is short, but it is not applied to the default tier.
+test('a subagent run is not stopped by time: its answers go on past four minutes, and one begun after that is not cut off', async () => {
+  // Each answer takes five minutes on the clock, so the run is past four minutes from its second answer on, and its
+  // last answer begins at fifteen minutes. turnMs is short, but a subagent has no turn limit.
   const t = setup(null, {turnMs: 50, respond: async p => {
     if (isSub(p)) {
       t.advance(5 * 60 * 1000);
@@ -2063,14 +1847,7 @@ test('a default run is not stopped by time: its answers go on past four minutes,
   assert.strictEqual(texts(evs), 'Checked.');
 });
 
-test('the notes on earlier steps are a model call too: they end at the deadline of the run they are for', async () => {
-  // The notes would take about two and a half seconds; the deadline is one second away.
-  const t = setup([{paced: 30, gap: 80}]);
-  await assert.rejects(t.ai.summarizeSteps('anthropic/claude-haiku-5.5', 'Person: read it', null, t.ai.now() + 1000));
-  assert.strictEqual(t.calls[0].signal.aborted, true, 'the model call is cancelled at the deadline');
-});
-
-test('a default subagent is not stopped at twelve answers: it can make fifteen', async () => {
+test('a subagent is not stopped at twelve answers: it can make fifteen', async () => {
   const t = setup(null, {respond: async p => {
     if (isSub(p)) {
       const n = toolMessages(p).length;
@@ -2117,7 +1894,7 @@ test('a subagent cut off by the length limit carries on in smaller pieces, and g
   assert.strictEqual(statesOf(evs2, 's0:h1').at(-1), 'failed');
 });
 
-test('Stop ends a running subagent at once, and one still waiting for its slot too', async () => {
+test('Stop ends a running subagent at once, and the one asked after it never starts', async () => {
   const t = setup(null, {respond: async p => {
     if (isSub(p)) return {paced: Infinity, gap: 15};
     return callsTurn([{id: 'x', name: 'subagent', args: {task: 'forever'}}, {id: 'y', name: 'subagent', args: {task: 'waiting'}}]);
@@ -2131,7 +1908,8 @@ test('Stop ends a running subagent at once, and one still waiting for its slot t
   assert.strictEqual(evs.at(-1).type, 'done');
   assert.ok(!evs.some(e => e.type === 'error'), 'no error is shown');
   assert.deepStrictEqual(statesOf(evs, 's0:x').slice(-1), ['failed']);
-  assert.deepStrictEqual(statesOf(evs, 's0:y'), ['queued', 'failed']);
+  assert.deepStrictEqual(statesOf(evs, 's0:y'), [], 'the second one never starts');
+  assert.strictEqual(t.calls.length, 2, 'the helper and the first subagent: no model call after Stop');
   assert.strictEqual(t.calls[1].signal.aborted, true, 'the call to the model was cancelled');
 });
 
@@ -2163,24 +1941,17 @@ test('Stop during one call of a subagent\'s step: the calls after it do not star
   assert.strictEqual(evs.at(-1).type, 'done');
 });
 
-test('a default subagent has no time limit on one answer, so a long answer is not cut off; a smart one keeps the limit of an answer', async () => {
-  // Each model answer here takes about 480 ms, and one answer may take 50 ms at most.
-  const scripted = args => ({turnMs: 50, respond: async p => {
+test('a subagent has no time limit on one answer, so a long answer is not cut off', async () => {
+  // Each model answer here takes about 480 ms, and one answer may take 50 ms at most. That limit is for the helper's answers.
+  const t = setup(null, {turnMs: 50, respond: async p => {
     if (isSub(p)) return {paced: 6, gap: 80};
     if (toolMessages(p).length) return textTurn('Checked.');
-    return toolTurn('subagent', args, 'h1');
+    return toolTurn('subagent', {task: 'write a long piece'}, 'h1');
   }});
-  const dflt = setup(null, scripted({task: 'write a long piece'}));
-  const evs = await say(dflt.ai, 'ann', 'write it');
-  assert.strictEqual(statesOf(evs, 's0:h1').at(-1), 'done', 'the default subagent finishes its long answer');
-  assert.strictEqual(dflt.calls.filter(c => isSub(c.payload)).length, 1);
+  const evs = await say(t.ai, 'ann', 'write it');
+  assert.strictEqual(statesOf(evs, 's0:h1').at(-1), 'done', 'the subagent finishes its long answer');
+  assert.strictEqual(t.calls.filter(c => isSub(c.payload)).length, 1);
   assert.strictEqual(texts(evs), 'Checked.');
-
-  const smart = setup(null, scripted({task: 'write a long piece', mode: 'smart'}));
-  const evs2 = await say(smart.ai, 'ann', 'write it');
-  assert.strictEqual(statesOf(evs2, 's0:h1').at(-1), 'failed', 'the smart subagent keeps the limit of one answer');
-  assert.match(toolMessages(smart.calls[2].payload)[0].content, /^The subagent could not finish: That answer ran past the time limit/);
-  assert.strictEqual(smart.calls.filter(c => isSub(c.payload)).length, 1, 'and it is not tried again');
 });
 
 test('a subagent whose model stalls is tried again: its card shows resting while it waits, and its status lines carry its id', async () => {
@@ -2210,8 +1981,7 @@ test('a report goes back to the helper as the tool result (up to 8000 characters
   const t = setup([toolTurn('subagent', {task: 'T'.repeat(300)}, 'h1'), textTurn('R'.repeat(9000)), textTurn('Got it.')]);
   const evs = await say(t.ai, 'ann', 'report');
   const done = cardOf(evs, 's0:h1').at(-1);
-  assert.deepStrictEqual([done.state, done.tier, done.model, done.name, done.reasoning],
-    ['done', 'default', 'inclusionai/ling-3.1-flash', 'Ling 3.1 Flash', 'high']);
+  assert.deepStrictEqual([done.state, done.model, done.name, done.reasoning], ['done', 'some/model', 'some/model', 'high']);
   assert.strictEqual(done.task.length, 200);
   assert.strictEqual(done.report.length, 2000);
   assert.strictEqual(done.steps, 1);
@@ -2244,17 +2014,11 @@ test('reasoning is shown as traces: a subagent\'s carry its id, the helper\'s do
   assert.strictEqual(texts(evs), 'Checked.');
 });
 
-test('two subagents changing the same screen at the same moment: both changes reach the proposal', async () => {
-  let arrived = 0;
-  let open;
-  const together = new Promise(r => { open = r; });
+test('two subagents changing the same screen one after the other: both changes reach the proposal', async () => {
   let helper = 0;
   const t = setup(null, {respond: async p => {
     if (isSub(p)) {
       if (toolMessages(p).length) return textTurn('Added.');
-      arrived++;
-      if (arrived === 2) open();
-      await together;   // both make their first change at the same moment
       return /Button/.test(taskOf(p))
         ? toolTurn('scm_add_component', {screen: 'Screen1', type: 'Button', name: 'Button1'}, 'w1')
         : toolTurn('scm_add_component', {screen: 'Screen1', type: 'Label', name: 'Label2'}, 'w2');
@@ -2267,7 +2031,7 @@ test('two subagents changing the same screen at the same moment: both changes re
     if (helper === 2) return toolTurn('propose_draft', {summary: 'Adds a button and a label'}, 'pp');
     return textTurn('Press Apply.');
   }});
-  const evs = await sayTuned(t.ai, 'ann', 'add two things', {runMode: 'parallel'});
+  const evs = await say(t.ai, 'ann', 'add two things');
   const proposal = evs.find(e => e.type === 'proposal');
   assert.ok(proposal, 'a proposal is made');
   assert.strictEqual((await apply(t.ai, 'ann', proposal.id)).status, 200);
@@ -2301,48 +2065,49 @@ test('a proposal in the same step as a subagent waits for it, so the proposal in
   assert.deepStrictEqual([label.Text, label.FontSize], ['Hello', '20'], 'the change of the subagent is in the proposal');
 });
 
-test('a subagent is offered view_picture only when its model takes pictures, and a picture it asks for goes to it in a message of its own', async () => {
-  const models = [{id: 'inclusionai/ling-3.1-flash', architecture: {input_modalities: ['text', 'image']}},
-    {id: 'anthropic/claude-haiku-5.5', architecture: {input_modalities: ['text']}}];
+test('a subagent is offered view_picture only when its model takes pictures; a picture it asks for goes to it in a message of its own', async () => {
+  const models = [{id: 'some/model', architecture: {input_modalities: ['text', 'image']}},
+    {id: 'some/fast', architecture: {input_modalities: ['text']}}];
   const t = setup([
     toolTurn('subagent', {task: 'look at the logo'}, 'h1'),
     toolTurn('view_picture', {path: 'assets/logo.png'}, 'v1'),
     textTurn('The logo is red.'),
     textTurn('Checked the logo.'),
-    toolTurn('subagent', {task: 'look again', mode: 'smart'}, 'h2'),
+    toolTurn('subagent', {task: 'look again'}, 'h2'),
     textTurn('Looked, without pictures.'),
     textTurn('Done.'),
   ], {models});
   await say(t.ai, 'ann', 'look at the logo');
-  assert.ok(toolNames(t.calls[1]).includes('view_picture'), 'the default tier can look at pictures');
+  assert.ok(toolNames(t.calls[1]).includes('view_picture'), 'the balanced model can look at pictures');
   const shown = t.calls[2].payload.messages.find(m => m.role === 'user' && Array.isArray(m.content));
   assert.strictEqual(shown.content[1].type, 'image_url');
-  await say(t.ai, 'ann', 'look again');
-  assert.ok(!toolNames(t.calls[5]).includes('view_picture'), 'the smart tier cannot');
+  await sayTuned(t.ai, 'ann', 'look again', {fastSubagent: true});
+  assert.ok(!toolNames(t.calls[5]).includes('view_picture'), 'the fast model cannot');
 });
 
-test('a subagent\'s conversation is kept within the room of its own model', async () => {
-  const models = [{id: 'anthropic/claude-haiku-5.5', context_length: 100000, architecture: {input_modalities: ['text']}}];
+test('a subagent\'s conversation is kept within the room of its model: the balanced model\'s room, or the fast model\'s', async () => {
+  const models = [{id: 'some/model', context_length: 100000, architecture: {input_modalities: ['text']}}];
   const files = Object.assign({}, PROJECT_FILES, {'src/a/Screen1.bky': bigBlocks(120)});
-  let mode = 'smart';
-  const t = setup(null, {files, models, respond: async p => {
+  const readingSub = async p => {
     if (isSub(p)) {
       const n = toolMessages(p).length;
       if (n < 5) return toolTurn('read_file', {path: 'src/a/Screen1.bky', from: 1}, 'r' + n);
       return textTurn('Read it.');
     }
     if (toolMessages(p).length) return textTurn('Read.');
-    return toolTurn('subagent', {task: 'read the blocks', mode}, 'h1');
-  }});
-  await say(t.ai, 'ann', 'read the blocks');
-  const smartCalls = t.calls.filter(c => isSub(c.payload));
-  assert.strictEqual(smartCalls.at(-1).payload.model, 'anthropic/claude-haiku-5.5');
-  assert.match(JSON.stringify(smartCalls.at(-1).payload.messages), /shortened to keep the answer small/, 'the smaller room is used');
-  mode = 'default';
-  await say(t.ai, 'ann', 'read the blocks again');
-  const defaultCalls = t.calls.filter(c => isSub(c.payload) && c.payload.model === 'inclusionai/ling-3.1-flash');
-  assert.ok(defaultCalls.length >= 5);
-  assert.doesNotMatch(JSON.stringify(defaultCalls.at(-1).payload.messages), /shortened to keep/, 'the default tier\'s room is not used up here');
+    return toolTurn('subagent', {task: 'read the blocks'}, 'h1');
+  };
+  const balanced = setup(null, {files, models, respond: readingSub});
+  await sayTuned(balanced.ai, 'ann', 'read the blocks');
+  const subs = balanced.calls.filter(c => isSub(c.payload));
+  assert.strictEqual(subs.at(-1).payload.model, 'some/model');
+  assert.match(JSON.stringify(subs.at(-1).payload.messages), /shortened to keep the answer small/, 'the room of 100000 tokens is used');
+  const fast = setup(null, {files, models, respond: readingSub});
+  await sayTuned(fast.ai, 'ann', 'read the blocks', {fastSubagent: true});
+  const fastSubs = fast.calls.filter(c => isSub(c.payload));
+  assert.strictEqual(fastSubs.at(-1).payload.model, 'some/fast');
+  assert.ok(fastSubs.length >= 5, 'five answers');
+  assert.doesNotMatch(JSON.stringify(fastSubs.at(-1).payload.messages), /shortened to keep/, 'the fast model\'s room is not used up here');
 });
 
 test('the log says that a subagent started and how it ended, and never its task or its report', async () => {
@@ -2351,45 +2116,36 @@ test('the log says that a subagent started and how it ended, and never its task 
     {log: m => lines.push(m)});
   await say(t.ai, 'ann', 'go');
   const log = lines.join('\n');
-  assert.match(log, /a default subagent started/);
-  assert.match(log, /a default subagent finished after 1 step\(s\)/);
+  assert.match(log, /a subagent started/);
+  assert.match(log, /a subagent finished after 1 step\(s\)/);
   assert.doesNotMatch(log, /private task words|secret report words/);
 });
 
 // ---- the companion's reasoning ----
 
-test('companion reasoning: smart with max is sent as effort max with 32000 tokens; default sends no reasoning key and keeps the usual length', async () => {
+test('companion reasoning: a level is sent as reasoning effort with 32000 tokens; default sends no reasoning key and keeps the usual length', async () => {
   const t = setup([textTurn('a'), textTurn('b')]);
-  await sayTuned(t.ai, 'ann', 'hi', {preset: 'smart', reasoning: 'max'});
-  assert.deepStrictEqual(t.calls[0].payload.reasoning, {effort: 'max'});
+  await sayTuned(t.ai, 'ann', 'hi', {reasoning: 'high'});
+  assert.deepStrictEqual(t.calls[0].payload.reasoning, {effort: 'high'});
   assert.strictEqual(t.calls[0].payload.max_tokens, 32000);
-  assert.strictEqual(t.calls[0].payload.model, 'some/smart');
   await sayTuned(t.ai, 'ann', 'hi', {reasoning: 'turbo'});
   assert.ok(!('reasoning' in t.calls[1].payload), 'no reasoning key');
   assert.strictEqual(t.calls[1].payload.max_tokens, 8000);
 });
 
-test('max is only for Claude Haiku 5.5: on any other preset it is high, and the person is told', async () => {
+test('max is no reasoning level any more: a request for it gets the default, and the body\'s other settings are ignored', async () => {
   const t = setup([textTurn('a')]);
-  const evs = await sayTuned(t.ai, 'ann', 'hi', {preset: 'balanced', reasoning: 'max'});
-  assert.deepStrictEqual(t.calls[0].payload.reasoning, {effort: 'high'});
-  assert.strictEqual(t.calls[0].payload.max_tokens, 32000);
-  assert.ok(evs.some(e => e.type === 'status' && e.text === 'Max reasoning is only for Claude Haiku 5.5, so high is used.'));
-});
-
-test('a max request the service refuses (a 400 about reasoning) is sent once more with high, and the person is told', async () => {
-  const t = setup([{status: 400, detail: 'Invalid value for reasoning effort: max'}, textTurn('Answer with high.')]);
-  const evs = await sayTuned(t.ai, 'ann', 'hi', {preset: 'smart', reasoning: 'max'});
-  assert.deepStrictEqual(t.calls.map(c => c.payload.reasoning), [{effort: 'max'}, {effort: 'high'}]);
-  assert.strictEqual(t.calls[1].payload.max_tokens, 32000);
-  assert.ok(evs.some(e => e.type === 'status' && e.text === 'Max reasoning was not accepted for this model, so high was used.'));
-  assert.strictEqual(texts(evs), 'Answer with high.');
-  assert.ok(!evs.some(e => e.type === 'error'));
+  const evs = await sayTuned(t.ai, 'ann', 'hi', {reasoning: 'max', effort: 'high', runMode: 'ultracode', preset: 'smart',
+    provider: 'opencode'});
+  assert.ok(!('reasoning' in t.calls[0].payload), 'no reasoning key');
+  assert.strictEqual(t.calls[0].payload.max_tokens, 8000);
+  assert.strictEqual(t.calls[0].url, PROVIDERS.openrouter.url, 'provider is not read: OpenRouter, as no /beta is on');
+  assert.ok(!evs.some(e => e.type === 'status'), 'nothing is said about it');
 });
 
 test('a 400 that does not mention effort or reasoning is not retried', async () => {
   const t = setup([{status: 400, detail: 'bad request'}, textTurn('never reached')]);
-  const evs = await sayTuned(t.ai, 'ann', 'hi', {preset: 'smart', reasoning: 'max'});
+  const evs = await sayTuned(t.ai, 'ann', 'hi', {reasoning: 'high'});
   assert.strictEqual(t.calls.length, 1);
   assert.ok(evs.some(e => e.type === 'error'));
 });
@@ -2402,7 +2158,7 @@ test('reasoning pieces come back with the tool calls in the helper\'s own loop t
       '[DONE]'],
     textTurn('Listed.'),
   ]);
-  await sayTuned(t.ai, 'ann', 'what files?', {preset: 'smart', reasoning: 'high'});
+  await sayTuned(t.ai, 'ann', 'what files?', {reasoning: 'high'});
   const sent = t.calls[1].payload.messages.find(m => m.role === 'assistant' && m.tool_calls);
   assert.deepStrictEqual(sent.reasoning_details, [{type: 'reasoning.text', text: 'Look at the screen first.', index: 0, signature: 'sig-2'}]);
 });
@@ -2433,8 +2189,8 @@ test('every model call is sized for the model it sends: its room is that model\'
     const t = setup(script, options);
     const roomOf = t.ai.contextWindow.bind(t.ai);
     const asked = [];
-    t.ai.contextWindow = async model => {
-      const window = await roomOf(model);
+    t.ai.contextWindow = async (model, service) => {
+      const window = await roomOf(model, service);
       asked.push({model, window});
       return window;
     };
@@ -2453,26 +2209,19 @@ test('every model call is sized for the model it sends: its room is that model\'
     sized(plain);
     assert.deepStrictEqual(plain.t.calls.map(c => c.payload.max_tokens), [8000], 'the companion without reasoning: 8000');
 
-    const reasoning = await run([textTurn('b')], {}, t => sayTuned(t.ai, 'ann', 'hi', {preset: 'smart', reasoning: 'high'}));
+    const reasoning = await run([textTurn('b')], {}, t => sayTuned(t.ai, 'ann', 'hi', {reasoning: 'high'}));
     sized(reasoning);
     assert.deepStrictEqual(reasoning.t.calls.map(c => c.payload.max_tokens), [32000], 'the companion with reasoning: 32000');
 
-    const refused = await run([{status: 400, detail: 'Invalid value for reasoning effort: max'}, textTurn('c')], {},
-      t => sayTuned(t.ai, 'ann', 'hi', {preset: 'smart', reasoning: 'max'}));
-    assert.deepStrictEqual(refused.t.calls.map(c => c.payload.max_tokens), [32000, 32000], 'max, then high, both with 32000');
-    assert.deepStrictEqual(refused.given.map(g => g.maxOutput), [32000], 'the compactor was told the same length');
-    assert.deepStrictEqual(refused.asked.map(a => a.model), ['some/smart']);
-
-    const subs = await run([
-      toolTurn('subagent', {task: 'one'}, 'h1'), textTurn('Report one.'),
-      toolTurn('subagent', {task: 'two', mode: 'smart'}, 'h2'), textTurn('Report two.'),
-      textTurn('Both done.'),
-    ], {}, t => sayTuned(t.ai, 'ann', 'two pieces'));
+    const subs = await run([toolTurn('subagent', {task: 'one'}, 'h1'), textTurn('Report one.'), textTurn('Done.')], {},
+      t => sayTuned(t.ai, 'ann', 'a piece'));
     sized(subs);
-    const [, defaultSub, , smartSub] = subs.asked;
-    assert.deepStrictEqual([defaultSub.model, defaultSub.window], ['inclusionai/ling-3.1-flash', 262144], 'the default subagent: Ling, 256K');
-    assert.deepStrictEqual([smartSub.model, smartSub.window], ['anthropic/claude-haiku-5.5', 1000000], 'the smart subagent: Claude 5, 1M');
-    assert.deepStrictEqual(subs.t.calls.filter(c => isSub(c.payload)).map(c => c.payload.max_tokens), [32000, 32000], 'subagents: 32000');
+    assert.deepStrictEqual(subs.t.calls.filter(c => isSub(c.payload)).map(c => c.payload.max_tokens), [32000], 'the subagent: 32000');
+
+    const fast = await run([toolTurn('subagent', {task: 'one'}, 'h1'), textTurn('Report one.'), textTurn('Done.')], {},
+      t => sayTuned(t.ai, 'ann', 'a piece', {fastSubagent: true}));
+    sized(fast);
+    assert.strictEqual(fast.t.calls.filter(c => isSub(c.payload)).at(-1).payload.model, 'some/fast');
   } finally {
     compactor.compactContext = real;
   }
@@ -2543,21 +2292,19 @@ test('a preset named by its model in ai.env shows that model, not the built-in n
   }
 });
 
-test('OpenCode Go has its own endpoint, key and models, and OpenRouter stays the default', () => {
-  const info = env => JSON.parse(execFileSync(process.execPath, ['-e',
-    "const a = require('./ai'); console.log(JSON.stringify({info: a.providerInfo(), models: Object.values(a.PRESETS).map(p => p.model)}));"],
-  {cwd: __dirname + '/..', encoding: 'utf8', env: Object.assign({}, process.env, {OPENROUTER_URL: '', AI_PROVIDER: ''}, env)}));
-  const oc = info({AI_PROVIDER: 'opencode'});
-  assert.equal(oc.info.name, 'OpenCode Go');
-  assert.equal(oc.info.url, 'https://opencode.ai/zen/go/v1/chat/completions');
-  assert.equal(oc.info.keyVar, 'OPENCODE_API_KEY');
-  assert.deepEqual(oc.models, ['muse-spark-1.3-contributor', 'step-5-preview-free', 'deepseek-v4.1-flash']);
+test('the service is OpenRouter unless a person has /beta on and OpenCode Go has a key; AI_PROVIDER selects nothing', () => {
+  const child = env => JSON.parse(execFileSync(process.execPath, ['-e',
+    "const a = require('./ai'); const {PROVIDERS, nameOf} = a; console.log(JSON.stringify({" +
+    'on: a.serviceFor(true).id, off: a.serviceFor(false).id, opencode: PROVIDERS.opencode.presets.balanced.model,' +
+    "fast: nameOf('fast', PROVIDERS.opencode), openrouter: Object.keys(PROVIDERS.openrouter.presets)}));"],
+  {cwd: __dirname + '/..', encoding: 'utf8',
+    env: Object.assign({}, process.env, {OPENROUTER_URL: '', AI_PROVIDER: 'opencode', OPENCODE_API_KEY: ''}, env)}));
+  assert.deepStrictEqual(child({}), {on: 'openrouter', off: 'openrouter', opencode: 'step-5-preview-free',
+    fast: 'DeepSeek V4.1 Flash', openrouter: ['balanced', 'fast']}, 'AI_PROVIDER names nothing, and with no key OpenCode Go is not used');
+  assert.strictEqual(child({OPENCODE_API_KEY: 'oc'}).on, 'opencode', '/beta on, with a key: OpenCode Go');
+  assert.strictEqual(child({OPENCODE_API_KEY: 'oc'}).off, 'openrouter', 'without /beta: OpenRouter');
   assert.equal(PROVIDERS.opencode.vision, true, 'OpenCode Go takes pictures');
-  const or = info({});
-  assert.equal(or.info.name, 'OpenRouter');
-  assert.equal(or.info.keyVar, 'OPENROUTER_API_KEY');
-  assert.ok(or.models.includes('anthropic/claude-haiku-5.5'));
-  assert.equal(info({AI_PROVIDER: 'nonsense'}).info.name, 'OpenRouter', 'an unknown provider means OpenRouter');
+  assert.ok(PROVIDERS.openrouter.presets.balanced.model.includes('ling'));
 });
 
 test('the Responses API request is built from the chat body, pictures and tool calls included', () => {
@@ -2616,4 +2363,190 @@ test('a Responses API stream that ends without its completion is taken as ended 
   }
   assert.equal(finish, '');
   assert.equal(state.sawDone, false, 'no done line, so the answer is taken as ended early');
+});
+
+// ---- the new rules: the OpenCode Go session header, the log, and what Apply checks ----
+
+test('OpenCode Go requests carry a session header made from the person and the project, and nothing that names them', async () => {
+  await withOpenCodeKey('oc-test', async () => {
+    const t = setup([textTurn('one'), textTurn('two')]);
+    await say(t.ai, 'ann', '/beta ' + PIN_VALUE);
+    await sayTuned(t.ai, 'ann', 'hi');
+    await sayTuned(t.ai, 'bob', 'hi');
+    const session = crypto.createHash('sha256').update('u-ann|5').digest('hex').slice(0, 32);
+    assert.strictEqual(t.calls[0].headers['x-opencode-session'], session, 'the first 32 hex characters of sha256 of user|project');
+    assert.strictEqual(t.calls[0].headers.authorization, 'Bearer oc-test');
+    assert.strictEqual(t.calls[1].headers['x-opencode-session'], undefined, 'OpenRouter gets no session header');
+    assert.doesNotMatch(JSON.stringify(t.calls[0].headers), /ann@team\.local|u-ann/, 'neither the email nor the user id is sent');
+  });
+});
+
+test('the session header goes on the Responses API too, and on the notes on earlier steps', async () => {
+  await withOpenCodeKey('oc-test', async () => {
+    const saved = process.env.AI_OPENCODE_MODEL_BALANCED;
+    process.env.AI_OPENCODE_MODEL_BALANCED = 'muse-spark-1.3-contributor';
+    try {
+      const t = setup([[{type: 'response.output_text.delta', delta: 'Hi there.'}, {type: 'response.completed', response: {}}]]);
+      await say(t.ai, 'ann', '/beta ' + PIN_VALUE);
+      const evs = await sayTuned(t.ai, 'ann', 'hi');
+      assert.strictEqual(t.calls[0].url, PROVIDERS.opencode.responsesUrl, 'the model answers on the Responses API');
+      assert.strictEqual(t.calls[0].headers['x-opencode-session'], crypto.createHash('sha256').update('u-ann|5').digest('hex').slice(0, 32));
+      assert.strictEqual(texts(evs), 'Hi there.');
+    } finally {
+      if (saved === undefined) delete process.env.AI_OPENCODE_MODEL_BALANCED;
+      else process.env.AI_OPENCODE_MODEL_BALANCED = saved;
+    }
+  });
+});
+
+test('the notes on earlier steps carry the session header too', async () => {
+  await withOpenCodeKey('oc-test', async () => {
+    process.env.AI_CONTEXT_TOKENS = '30000';
+    try {
+      const t = setup([textTurn('NOTES: the person wants a quiz app.'), textTurn('Here is the next step.')]);
+      await say(t.ai, 'ann', '/beta ' + PIN_VALUE);
+      const history = [];
+      for (let i = 0; i < 20; i++) {
+        history.push({role: 'user', content: 'question ' + i + ' ' + 'q'.repeat(2500)});
+        if (i < 19) history.push({role: 'assistant', content: 'answer ' + i + ' ' + 'a'.repeat(2500)});
+      }
+      const res = fakeRes();
+      await t.ai.handle(fakeReq('/collab/ai/stream', 'POST', {projectId: '5', messages: history}, 'AppInventor=ann'), res);
+      assert.strictEqual(t.calls.length, 2, 'the notes, then the answer');
+      const session = crypto.createHash('sha256').update('u-ann|5').digest('hex').slice(0, 32);
+      assert.deepStrictEqual(t.calls.map(c => c.headers['x-opencode-session']), [session, session]);
+    } finally {
+      delete process.env.AI_CONTEXT_TOKENS;
+    }
+  });
+});
+
+test('when OpenCode Go refuses a request, the log says what the service said; the person sees the same message as before', async () => {
+  await withOpenCodeKey('oc-test', async () => {
+    const lines = [];
+    const refusal = JSON.stringify({type: 'error', error: {type: 'MissingSessionID', message: 'Missing x-opencode-session header, key oc-test'}});
+    const t = setup([{status: 400, detail: refusal}, textTurn('never reached')], {log: m => lines.push(m)});
+    await say(t.ai, 'ann', '/beta ' + PIN_VALUE);
+    const evs = await say(t.ai, 'ann', 'a private question about the blocks');
+    const log = lines.join('\n');
+    assert.match(log, /the AI service answered 400: Missing x-opencode-session header, key \(key\)/, 'the service\'s own message');
+    assert.doesNotMatch(log, /oc-test/, 'a key the service repeats is not logged');
+    assert.doesNotMatch(log, /private question/, 'the question is not logged');
+    assert.strictEqual(evs.find(e => e.type === 'error').message, 'The AI service answered with an error (400). Try again in a moment.');
+  });
+});
+
+test('a proposal that would change no file is refused before Apply is shown, and the model is told to make a real change', async () => {
+  const t = setup([
+    toolTurn('draft_replace', {path: 'src/a/Screen1.scm', old: 'Score', new: 'Score'}, 'n2'),
+    toolTurn('propose_draft', {summary: 'Nothing changed'}, 'n3'),
+    textTurn('I will make a real change.'),
+  ]);
+  const evs = await say(t.ai, 'ann', 'change nothing');
+  assert.ok(!evs.some(e => e.type === 'proposal'), 'no Apply is shown');
+  assert.match(toolErr(evs).detail, /no file would change/);
+  const told = t.calls[2].payload.messages.find(m => m.role === 'tool' && m.tool_call_id === 'n3');
+  assert.match(told.content, /^Error: not proposed: no file would change/);
+  assert.match(told.content, /Make the change the person asked for/);
+});
+
+test('a file whose text is the project\'s own is left out of a proposal, and the rest is proposed', async () => {
+  const t = setup([
+    toolTurn('propose_change', {summary: 'Changes the blocks', files: {'src/a/Screen1.scm': SCM, 'src/a/Screen1.bky': BKY.replace('</xml>', '<comment/></xml>')}}),
+    textTurn('Press Apply.'),
+  ]);
+  const evs = await say(t.ai, 'ann', 'add a comment');
+  const proposal = evs.find(e => e.type === 'proposal');
+  assert.deepStrictEqual(proposal.files, [{path: 'src/a/Screen1.bky', isNew: false}]);
+  assert.strictEqual((await apply(t.ai, 'ann', proposal.id)).status, 200);
+  assert.deepStrictEqual(Object.keys(JSON.parse(t.asked.find(a => a.path.startsWith('/ode/collab/writefiles')).body).files), ['src/a/Screen1.bky']);
+});
+
+test('Apply refuses a change when the file has moved on since the suggestion was made, and writes nothing', async () => {
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')]);
+  const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
+  const ann = t.hub.addClient({userId: 'u-ann', email: 'ann@team.local'});
+  t.hub.join(ann.id, '5', {projectName: 'Pong', ownerEmail: 'ann@team.local'});
+  const sent = [];
+  t.hub.send = (id, msg) => sent.push(msg);
+  t.store['src/a/Screen1.scm'] = SCM + ' ';   // a teammate saved the screen meanwhile
+  const res = await apply(t.ai, 'ann', proposal.id);
+  assert.strictEqual(res.status, 400);
+  assert.match(JSON.parse(res.body).error, /changed after this suggestion was made/);
+  assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'nothing was written');
+  assert.deepStrictEqual(sent, [], 'refused before any tab is asked to save, so no tab is frozen or reloaded');
+});
+
+test('Apply makes no change, and says so, when the project already has the text', async () => {
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')]);
+  const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
+  const ann = t.hub.addClient({userId: 'u-ann', email: 'ann@team.local'});
+  t.hub.join(ann.id, '5', {projectName: 'Pong', ownerEmail: 'ann@team.local'});
+  const sent = [];
+  t.hub.send = (id, msg) => sent.push(msg);
+  t.store['src/a/Screen1.scm'] = 'new';   // the same change was saved by someone else
+  const res = await apply(t.ai, 'ann', proposal.id);
+  assert.strictEqual(res.status, 400, 'not reported as applied');
+  assert.match(JSON.parse(res.body).error, /already has this text, so nothing was changed/);
+  assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'nothing was written');
+  assert.deepStrictEqual(sent, [], 'no tab is frozen or reloaded for it');
+});
+
+test('Apply does not report a change as done when the project does not hold it when it is read back', async () => {
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')],
+    {writeIgnored: true});
+  const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
+  const res = await apply(t.ai, 'ann', proposal.id);
+  assert.strictEqual(res.status, 400);
+  assert.match(JSON.parse(res.body).error, /does not hold all of it when it is read back/);
+  assert.ok(t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'the write was sent');
+  assert.strictEqual(t.store['src/a/Screen1.scm'], SCM, 'the project still has its old text');
+});
+
+test('Apply makes no change when an open tab could not save what it had, and frees the tabs by a reload', async () => {
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')]);
+  const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
+  t.hub.awaitFlush = async () => ({ok: false});
+  const res = await apply(t.ai, 'ann', proposal.id);
+  assert.strictEqual(res.status, 400);
+  assert.match(JSON.parse(res.body).error, /could not save what it had/);
+  assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'nothing was written');
+});
+
+test('the fast subagent option sends subagents to the fast model; without it they use the model the companion answers with', async () => {
+  const pieces = () => [toolTurn('subagent', {task: 'one'}, 'h1'), textTurn('Report one.'), textTurn('Done.')];
+  const fast = setup(pieces());
+  const evs = await sayTuned(fast.ai, 'ann', 'a piece', {fastSubagent: true});
+  assert.deepStrictEqual(fast.calls.map(c => c.payload.model), ['some/model', 'some/fast', 'some/model'],
+    'the helper always answers with the balanced model');
+  assert.strictEqual(cardOf(evs, 's0:h1').at(-1).model, 'some/fast', 'the card names the model it uses');
+  const plain = setup(pieces());
+  await sayTuned(plain.ai, 'ann', 'a piece', {fastSubagent: false});
+  assert.deepStrictEqual(plain.calls.map(c => c.payload.model), ['some/model', 'some/model', 'some/model']);
+  await withOpenCodeKey('oc-test', async () => {
+    const oc = setup(pieces());
+    await say(oc.ai, 'ann', '/beta ' + PIN_VALUE);
+    await sayTuned(oc.ai, 'ann', 'a piece', {fastSubagent: true});
+    assert.deepStrictEqual(oc.calls.map(c => [c.url, c.payload.model]), [
+      [PROVIDERS.opencode.url, 'step-5-preview-free'],
+      [PROVIDERS.opencode.url, 'deepseek-v4.1-flash'],
+      [PROVIDERS.opencode.url, 'step-5-preview-free'],
+    ], 'with OpenCode Go, the fast subagent uses its fast model');
+  });
+});
+
+test('Apply tries a read of the project once more, and when the project still cannot be read it changes nothing', async () => {
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')]);
+  const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
+  const ask = t.ai.ask;
+  t.ai.ask = async (path, ...rest) => {
+    if (!path.startsWith('/ode/collab/file?')) return ask(path, ...rest);
+    t.asked.push({path});
+    return null;   // App Inventor does not answer for the file
+  };
+  const res = await apply(t.ai, 'ann', proposal.id);
+  assert.strictEqual(res.status, 400);
+  assert.match(JSON.parse(res.body).error, /could not be read just now/);
+  assert.strictEqual(t.asked.filter(a => a.path.startsWith('/ode/collab/file?')).length, 2, 'the read was tried twice');
+  assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'nothing was written');
 });

@@ -298,3 +298,18 @@ test('after a failed update every page shows the notice, until the file is remov
   fs.unlinkSync(file);
   assert.doesNotMatch((await fetchRaw('/html-page')).body.toString(), /aicollab-update-notice/);
 });
+
+test('a restored backup moves the write count, so a tab that joins afterwards knows the project changed', async () => {
+  const ann = await connect('ann');
+  const bob = await connect('bob' + Date.now().toString(36));
+  ann.send({t: 'join', projectId: '81'});
+  assert.ok(await until(() => ann.has('joined')), 'ann joined');
+  const before = ann.last('joined').writes;
+  ann.send({t: 'restored', projectId: '81'});
+  assert.ok(await until(() => ann.has('reload')), 'the open tab is told to reload');
+  bob.send({t: 'join', projectId: '81'});
+  assert.ok(await until(() => bob.has('joined')), 'bob joined');
+  assert.ok(bob.last('joined').writes > before, 'the count moved up');
+  ann.ws.close();
+  bob.ws.close();
+});

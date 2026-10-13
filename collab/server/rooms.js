@@ -31,13 +31,16 @@ const QUIET_MS = 5 * 1000;
 const RESYNC_MIN_GAP_MS = 60 * 1000;
 
 class Hub {
-  constructor(send, now = Date.now) {
+  // isOpen(id) says whether a client's socket can take a message right now.
+  constructor(send, now = Date.now, isOpen = () => true) {
     this.send = send;
     this.now = now;
+    this.isOpen = isOpen;
     this.clients = new Map();
     this.rooms = new Map();
     this.nextClient = 1;
     this.flushWaits = new Map();   // applyId -> {waiting: Set of client ids, finish}
+    this.writes = new Map();       // projectId -> write count; kept even when the room is forgotten
   }
 
   addClient({userId, email}) {
@@ -73,6 +76,10 @@ class Hub {
     if (!client) return;
     this.leave(id, false);
     this.clients.delete(id);
+    // A tab that has gone away cannot answer, so an AI change in progress stops waiting for it.
+    for (const wait of this.flushWaits.values()) {
+      if (wait.waiting.delete(id) && !wait.waiting.size) wait.finish({ok: true});
+    }
     this.broadcastRoster();
   }
 
@@ -113,7 +120,8 @@ class Hub {
   joinedMessage(room, id) {
     return {t: 'joined', projectId: room.projectId, epoch: room.epoch, leaderId: room.leader,
       log: room.log, cursors: this.cursorsInRoom(room, id), chat: room.chat,
-      activity: room.activity, locks: this.lockList(room), sels: this.selsInRoom(room, id)};
+      activity: room.activity, locks: this.lockList(room), sels: this.selsInRoom(room, id),
+      writes: this.writes.get(room.projectId) || 0};
   }
 
   leave(id, rosterUpdate = true) {
@@ -229,11 +237,13 @@ class Hub {
     return true;
   }
 
-  op(id, {projectId, screen, kind, data}) {
+  op(id, {projectId, screen, kind, data, epoch}) {
     const client = this.clients.get(id);
     if (!client || !client.projectId || client.projectId !== String(projectId)) return;
     if (kind !== 'blocks' && kind !== 'designer' && kind !== 'tree') return;
     const room = this.rooms.get(client.projectId);
+    // Made on a copy from before the last restore or AI change: it would put an old change into the new log.
+    if (epoch !== undefined && epoch !== room.epoch) return;
     const entry = {seq: ++room.seq, from: id, name: client.name, color: client.color,
       screen: String(screen), kind, data, at: this.now()};
     room.log.push(entry);
@@ -458,9 +468,10 @@ class Hub {
     if (room) room.backedSeq = seq;
   }
 
-  // A backup was restored: start the project's session over and send everyone's page to reload. Returns how many
-  // open tabs were told.
+  // A backup was restored, or an AI change was written: start the project's session over and send everyone's page to
+  // reload. Returns how many open tabs were told.
   restored(projectId, byName) {
+    this.written(projectId);   // a tab that is not open now sees the new count when it joins
     const room = this.rooms.get(String(projectId));
     if (!room) return 0;
     room.log = [];
@@ -471,28 +482,43 @@ class Hub {
     return room.members.size;
   }
 
-  // Before an AI change goes in, every open tab saves what it has and says so (ackFlush). Resolves when all of
-  // them have, or after ms, whichever comes first. A tab that is not open cannot hold anything unsaved.
+  // Before an AI change goes in, every open tab saves what it has and says so (ackFlush). Resolves {ok: true} when
+  // all of them have. Resolves {ok: false} at once if one says its save failed, and after ms if one is still silent.
+  // A tab whose socket is down cannot answer, so it is not waited for; its write count catches it instead.
   awaitFlush(projectId, applyId, ms) {
     const room = this.rooms.get(String(projectId));
-    const waiting = new Set(room ? room.members : []);
-    if (!waiting.size) return Promise.resolve();
+    const waiting = new Set([...(room ? room.members : [])].filter(id => this.isOpen(id)));
+    if (!waiting.size) return Promise.resolve({ok: true});
     return new Promise(resolve => {
-      const finish = () => {
+      const finish = result => {
         clearTimeout(timer);
         this.flushWaits.delete(applyId);
-        resolve();
+        resolve(result);
       };
-      const timer = setTimeout(finish, ms);
+      const timer = setTimeout(() => finish({ok: false}), ms);
       this.flushWaits.set(applyId, {waiting, finish});
     });
   }
 
-  ackFlush(clientId, applyId) {
+  // ok false means the tab's save failed; the change must not go in.
+  ackFlush(clientId, applyId, ok = true) {
     const wait = this.flushWaits.get(applyId);
-    if (!wait) return;
+    if (!wait || !wait.waiting.has(clientId)) return;
+    if (!ok) {
+      wait.finish({ok: false});
+      return;
+    }
     wait.waiting.delete(clientId);
-    if (!wait.waiting.size) wait.finish();
+    if (!wait.waiting.size) wait.finish({ok: true});
+  }
+
+  // Moves the project's write count up, so a tab that loaded an earlier count reloads before it saves. The count
+  // starts from the clock, so it is still higher than before after the hub restarts.
+  written(projectId) {
+    const key = String(projectId);
+    const next = Math.max(this.now(), (this.writes.get(key) || 0) + 1);
+    this.writes.set(key, next);
+    return next;
   }
 
   // Tell everyone in a project something that makes their page start over (a restored backup).

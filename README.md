@@ -45,8 +45,8 @@ To see the address and the team code again, and check that everything is running
 ```
 
 Or type **`MITSTATUS`** on the Pi. It shows the address, the access code, the override code, the AI models and the
-keys, and offers: change the AI models, get a new address, restart App Inventor, change the access code, change the
-override code, update the app (it checks GitHub and asks first), change the API key, change the OpenCode Go models,
+keys, and offers: change the OpenRouter models, get a new address, restart App Inventor, change the access code, change the
+override code, update the app (it checks GitHub and asks first), change the OpenRouter API key, change the OpenCode Go models,
 change the OpenCode Go API key, or exit. It is installed with the rest, so after an update it is there too. (The first time, or after an update
 from before it, you can also install just the command with `sudo install -m 755 ~/F1-T/collab/pi/mitstatus.sh /usr/local/bin/MITSTATUS`.)
 
@@ -86,11 +86,10 @@ components and documentation, draw pictures, and ask you a question when it need
 | `/check [focus]` | Checks the project and says what is wrong |
 | `/explain [focus]` | Explains how the project works |
 | `/fix <problem>` | Makes the smallest change that fixes one problem |
-| `/effort` | Sets how hard the helper works: low, medium or high (the slider does the same) |
+| `/reasoning <level>` | Sets how hard the model thinks: default, low, medium or high (the Reasoning effort list does the same) |
 | `/override <PIN>` | Turns on full-app mode for an hour, so the helper can build a small app |
 | `/override off` | Turns full-app mode off |
-| `/beta <PIN>` | Turns on the OpenCode Go models for an hour, with the same PIN; `/beta off` turns them off |
-| `/smart <task>` | Gives the task to the smart subagent now (once every 45 minutes for the team); the Smart button does the same |
+| `/beta <PIN>` | Makes your answers use OpenCode Go for an hour, with the same PIN; `/beta off` sends them back to OpenRouter |
 | `/discard` | Throws away an unfinished full app |
 | `/new` (or `/clear`) | Starts a new conversation |
 | `/help` | Lists the commands |
@@ -101,7 +100,7 @@ components and documentation, draw pictures, and ask you a question when it need
 sudo /opt/appinventor/set-ai.sh            # the OpenRouter key
 sudo /opt/appinventor/set-ai.sh --pin      # the PIN that unlocks full-app mode (also Change override PIN in the Team panel)
 sudo /opt/appinventor/set-ai.sh --search   # optional: a Brave Search key for web search
-sudo /opt/appinventor/set-ai.sh --model smart anthropic/claude-haiku-5.5   # the model of one preset (or --reset)
+sudo /opt/appinventor/set-ai.sh --model balanced anthropic/claude-haiku-5.5   # the balanced model of OpenRouter (or --reset)
 sudo /opt/appinventor/set-ai.sh --key opencode             # the OpenCode Go key (--key openrouter for OpenRouter)
 sudo /opt/appinventor/set-ai.sh --status   # what is set
 ```

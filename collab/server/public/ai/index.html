@@ -56,7 +56,6 @@
     </button>
     <input id="file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
     <textarea id="input" rows="1" placeholder="Ask about this project, or type / for commands" aria-label="Message"></textarea>
-    <button id="smartBtn" class="smartbtn" type="button" title="Give the task to the smart subagent now">Smart</button>
     <button id="send" class="send" type="submit" aria-label="Send">
       <svg class="i-send" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 4l-7 7h4v9h6v-9h4z"/></svg>
       <svg class="i-stop" viewBox="0 0 24 24" width="14" height="14"><rect x="5" y="5" width="14" height="14" rx="3" fill="currentColor"/></svg>
@@ -64,31 +63,17 @@
   </div>
   <div class="tools">
     <div class="picks">
-      <label class="pick" title="Which service the helper's models come from">
-        <span>Service:</span>
-        <select id="pickProvider" aria-label="Service"></select>
-      </label>
-      <label class="pick" title="Which model writes the helper's own answers">
-        <span>Model:</span>
-        <select id="pickModel" aria-label="Model"></select>
-      </label>
-      <label class="pick" title="How many subagents may work at once in one answer">
-        <span>Mode:</span>
-        <select id="pickMode" aria-label="Mode"></select>
-      </label>
       <label class="pick" title="How hard the model thinks before it answers">
-        <span>Reasoning:</span>
-        <select id="pickReasoning" aria-label="Reasoning"></select>
+        <span>Reasoning effort</span>
+        <select id="pickReasoning" aria-label="Reasoning effort"></select>
+      </label>
+      <label class="pick fast" id="fastPick" title="Subagents use the fast model">
+        <input id="fastSub" type="checkbox">
+        <span>Fast model as a subagent</span>
       </label>
     </div>
-    <label class="effort" title="How hard the helper works">
-      <span>Effort</span>
-      <input id="effort" type="range" min="0" max="2" step="1" value="1" aria-label="Effort: how hard the helper works">
-      <output id="effortOut" for="effort">Medium</output>
-    </label>
     <div class="hint" id="hint">Enter sends · Shift+Enter for a new line · Esc stops</div>
   </div>
-  <div class="smartline" id="smartLine">Smart subagent: ready</div>
 </form>
 
 <script src="/collab/ai/static/marked.js"></script>

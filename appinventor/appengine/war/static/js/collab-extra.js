@@ -96,18 +96,13 @@
   // ---- messages from the hub ----
 
   // Before the AI helper's change goes in: save what is open, then stop saving until the page reloads. Without the
-  // save, an edit made a moment before would be lost in the reload. The hub waits for the answer, or a few seconds.
+  // save, an edit made a moment before would be lost in the reload. The answer comes only when the save has finished.
+  // A save that fails never answers, so the hub waits for it to time out, and then refuses the change.
   function saveThenFreeze(applyId) {
-    var answered = false;
     function answer() {
-      if (answered) {
-        return;
-      }
-      answered = true;
       window.AICollab_frozen = true;
       C.send({t: 'flushed', applyId: applyId});
     }
-    setTimeout(answer, 5000);
     if (window.AICollab_saveNow) {
       window.AICollab_saveNow(answer);
     } else {
@@ -118,6 +113,7 @@
   // Reloads this page to show a change that is in. Once only. Nothing is saved on the way out: the saves were made
   // before the change went in, and saving now would write the old copy over it.
   var reloading = false;
+  var joinedWrites = null;   // the hub's AI change count when this page joined; null until it first joins
   function reloadSoon(text) {
     window.AICollab_frozen = true;
     banner('restore', text);
@@ -143,6 +139,16 @@
 
   C.onExtra = function(msg) {
     switch (msg.t) {
+      case 'joined':
+        // The hub counts the AI changes to the project. A count higher than the one this page joined with means a change
+        // went in while this page was away, so it reloads before it saves anything.
+        if (typeof msg.writes === 'number') {
+          if (joinedWrites !== null && msg.writes > joinedWrites) {
+            reloadSoon('Loading the change the AI helper made…');
+          }
+          joinedWrites = msg.writes;
+        }
+        break;
       case 'joined':
         C.activity = msg.activity || [];
         C.chat = msg.chat || [];
