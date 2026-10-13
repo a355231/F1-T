@@ -121,25 +121,43 @@ const HTML = fs.readFileSync(path.join(__dirname, '..', 'public', 'ai', 'index.h
 const PAGE_IDS = new Map();
 for (const m of HTML.matchAll(/<(\w+)\b[^>]*?\sid="([^"]+)"/g)) PAGE_IDS.set(m[2], m[1]);
 
-// What GET /collab/ai/presets gives, for OpenRouter and for OpenCode Go (each has its own two models).
+// What GET /collab/ai/presets gives: every service with its models, which of them are locked or not set up, the service in
+// use, and the defaults. OpenRouter's Smart model takes max reasoning; the others do not.
+const OR_PRESETS = [
+  {id: 'smart', label: 'Smart', name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5',
+    reasoningLevels: ['default', 'low', 'medium', 'high', 'max']},
+  {id: 'balanced', label: 'Balanced', name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash',
+    reasoningLevels: ['default', 'low', 'medium', 'high']},
+  {id: 'fast', label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash',
+    reasoningLevels: ['default', 'low', 'medium', 'high']},
+];
+const OC_PRESETS = [
+  {id: 'smart', label: 'Smart', name: 'Muse Spark 1.3', model: 'muse-spark-1.3-contributor', reasoningLevels: ['default']},
+  {id: 'balanced', label: 'Balanced', name: 'Step 5 Preview', model: 'step-5-preview-free', reasoningLevels: ['default']},
+  {id: 'fast', label: 'Fast', name: 'DeepSeek V4.1 Flash', model: 'deepseek-v4.1-flash', reasoningLevels: ['default']},
+];
 const OPENROUTER = {
   service: {id: 'openrouter', name: 'OpenRouter'},
   beta: {on: false, until: 0},
-  presets: [
-    {id: 'balanced', label: 'Balanced', name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash',
-      reasoningLevels: ['default', 'low', 'medium', 'high']},
-    {id: 'fast', label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash',
-      reasoningLevels: ['default', 'low', 'medium', 'high']},
+  providers: [
+    {id: 'openrouter', name: 'OpenRouter', configured: true, locked: false, presets: OR_PRESETS},
+    {id: 'opencode', name: 'OpenCode Go', configured: true, locked: true, presets: OC_PRESETS},
   ],
+  presets: OR_PRESETS,
+  defaultProvider: 'openrouter',
+  defaultPreset: 'balanced',
   defaultReasoning: 'default',
 };
 const OPENCODE = {
   service: {id: 'opencode', name: 'OpenCode Go'},
   beta: {on: true, until: 1900000000000},
-  presets: [
-    {id: 'balanced', label: 'Balanced', name: 'Step 5 Preview', model: 'step-5-preview-free', reasoningLevels: ['default']},
-    {id: 'fast', label: 'Fast', name: 'DeepSeek V4.1 Flash', model: 'deepseek-v4.1-flash', reasoningLevels: ['default']},
+  providers: [
+    {id: 'openrouter', name: 'OpenRouter', configured: true, locked: false, presets: OR_PRESETS},
+    {id: 'opencode', name: 'OpenCode Go', configured: true, locked: false, presets: OC_PRESETS},
   ],
+  presets: OC_PRESETS,
+  defaultProvider: 'opencode',
+  defaultPreset: 'balanced',
   defaultReasoning: 'default',
 };
 
@@ -641,58 +659,69 @@ function fire(el, type) {
   el._listeners[type]();
 }
 
-test('(k) the question is sent with its reasoning and the fast subagent choice, and no preset, run mode, provider or effort', async () => {
+test('(k) the question is sent with the service, model, effort, reasoning and fast subagent choice, and no run mode', async () => {
   const page = openPage({presets: OPENROUTER});
   await flush();
   const answer = startAnswer(page, 'Question');
   await answer.end();
-  assert.deepStrictEqual(Object.keys(page.sent[0]).sort(), ['fastSubagent', 'messages', 'projectId', 'reasoning']);
+  assert.deepStrictEqual(Object.keys(page.sent[0]).sort(),
+    ['effort', 'fastSubagent', 'messages', 'preset', 'projectId', 'provider', 'reasoning']);
   assert.strictEqual(page.sent[0].projectId, '5');
+  assert.strictEqual(page.sent[0].provider, 'openrouter');
+  assert.strictEqual(page.sent[0].preset, 'balanced');
+  assert.strictEqual(page.sent[0].effort, 'medium');
   assert.strictEqual(page.sent[0].reasoning, 'default');
   assert.strictEqual(page.sent[0].fastSubagent, false);
 });
 
-test('(l) the removed controls are not on the page, and the slash menu lists only the commands that remain', () => {
+test('(l) the mode, smart and ultracode controls are not on the page; the service, model and effort are', () => {
   const page = openPage();
-  ['pickProvider', 'pickModel', 'pickMode', 'effort', 'effortOut', 'smartBtn', 'smartLine'].forEach(id => {
+  ['pickMode', 'smartBtn', 'smartLine'].forEach(id => {
     assert.strictEqual(page.document.getElementById(id), null, id + ' is not on the page');
   });
-  assert.doesNotMatch(HTML, /smart|ultracode|parallel/i);
-  assert.doesNotMatch(HTML, /Service|Effort|Model:|Mode:/);
+  ['pickProvider', 'pickModel', 'pickReasoning', 'effort', 'effortOut', 'fastSub'].forEach(id => {
+    assert.ok(page.document.getElementById(id), id + ' is on the page');
+  });
+  assert.doesNotMatch(HTML, /smart|ultracode|parallel|id="pickMode"/i);
+  assert.match(HTML, /<span>Service:<\/span>/);
+  assert.match(HTML, /<span>Model:<\/span>/);
   const input = page.document.getElementById('input');
   input.value = '/';
   fire(input, 'input');
   const shown = page.document.getElementById('slash').children.map(row => row.children[0].textContent);
   assert.deepStrictEqual(shown,
-    ['/goal', '/plan', '/check', '/explain', '/fix', '/reasoning', '/override', '/beta', '/discard', '/new', '/help']);
+    ['/goal', '/plan', '/check', '/explain', '/fix', '/reasoning', '/model', '/effort', '/override', '/beta', '/discard', '/new', '/help']);
 });
 
-test('(m) /reasoning takes default, low, medium or high, and refuses max; /help lists only the commands that remain', () => {
+test('(m) /reasoning takes default, low, medium or high; max only on the Smart model; /help lists the commands that remain', () => {
   const page = openPage();
   page.window.__aiHelper.send('/reasoning max');
   assert.strictEqual(page.sent.length, 0, 'a local command never reaches the model');
-  assert.match(lastAnswer(page).querySelector('.md').textContent, /Choose `default`, `low`, `medium` or `high`/);
+  assert.match(lastAnswer(page).querySelector('.md').textContent, /Max reasoning is only for the Smart model\./);
   page.window.__aiHelper.send('/reasoning medium');
   assert.match(lastAnswer(page).querySelector('.md').textContent, /Reasoning effort is now \*\*Medium\*\*\./);
   assert.strictEqual(page.local['aihelper.reasoning'], 'medium');
   page.window.__aiHelper.send('/help');
   const help = lastAnswer(page).querySelector('.md').textContent;
   assert.match(help, /`\/reasoning default`, `low`, `medium` or `high`/);
-  assert.doesNotMatch(help, /\/effort|\/model|\/mode|\/smart|\bmax\b/);
+  assert.match(help, /\/model smart/);
+  assert.match(help, /\/effort low/);
+  assert.doesNotMatch(help, /\/mode\b|\/smart\b/);
   assert.strictEqual(page.sent.length, 0);
 });
 
-test('(n) the reasoning list has the balanced model\'s levels without max, and its label reads Reasoning effort', async () => {
-  const withMax = JSON.parse(JSON.stringify(OPENROUTER));
-  withMax.presets[0].reasoningLevels.push('max');   // an older server may still list it: it is not offered
-  const page = openPage({presets: withMax});
+test('(n) the reasoning list offers only the levels of the model in use, and is labelled Reasoning effort', async () => {
+  const page = openPage({presets: OPENROUTER});
   await flush();
-  assert.deepStrictEqual(reasoningOptions(page), ['Default', 'Low', 'Medium', 'High']);
-  assert.strictEqual(page.document.getElementById('pickReasoning').value, 'default');
-  assert.match(HTML, /<span>Reasoning effort<\/span>\s*<select id="pickReasoning" aria-label="Reasoning effort">/);
+  const picker = page.document.getElementById('pickReasoning');
+  assert.deepStrictEqual(reasoningOptions(page), ['Default', 'Low', 'Medium', 'High', 'Max']);
+  assert.deepStrictEqual(picker.options.map(o => !o.disabled), [true, true, true, true, false], 'Max is for the Smart model');
+  assert.strictEqual(picker.value, 'default');
+  assert.match(HTML, /<span>Reasoning effort:<\/span>\s*<select id="pickReasoning" aria-label="Reasoning effort">/);
   const other = openPage({presets: OPENCODE});
   await flush();
-  assert.deepStrictEqual(reasoningOptions(other), ['Default'], 'OpenCode Go offers no reasoning levels');
+  assert.deepStrictEqual(other.document.getElementById('pickReasoning').options.filter(o => !o.disabled).map(o => o.textContent),
+    ['Default'], 'OpenCode Go offers no reasoning levels');
 });
 
 test('(o) the reasoning picked is sent and remembered; a service that offers only Default sends Default and keeps the pick', async () => {
@@ -803,14 +832,19 @@ test('(s) a cooldown event from an older server is ignored', async () => {
   assert.deepStrictEqual(screen(page), ['words: Words.']);
 });
 
-test('(t) the keys of earlier versions are taken off this computer; the reasoning that is still kept is used', async () => {
-  const local = {'aihelper.model': 'smart', 'aihelper.mode': 'ultracode', 'aihelper.provider': 'opencode',
+test('(t) the choices kept on this computer are used again; the run mode key is no longer read', async () => {
+  const local = {'aihelper.model': 'fast', 'aihelper.mode': 'ultracode', 'aihelper.provider': 'openrouter',
     'aihelper.effort': 'high', 'aihelper.reasoning': 'low'};
-  const page = openPage({local});
-  assert.deepStrictEqual(Object.keys(local), ['aihelper.reasoning']);
+  const page = openPage({presets: OPENROUTER, local});
+  await flush();
+  assert.strictEqual(page.document.getElementById('pickModel').value, 'fast');
+  assert.strictEqual(page.document.getElementById('pickProvider').value, 'openrouter');
   const answer = startAnswer(page, 'Question');
   await answer.end();
   assert.strictEqual(page.sent[0].reasoning, 'low');
+  assert.strictEqual(page.sent[0].preset, 'fast');
+  assert.strictEqual(page.sent[0].effort, 'high');
+  assert.strictEqual('runMode' in page.sent[0], false);
 });
 
 test('(u) the full-app pill and the picture button follow the status', async () => {

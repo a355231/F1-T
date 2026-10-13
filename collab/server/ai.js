@@ -94,8 +94,11 @@ const MAX_TOKENS = () => parseInt(process.env.AI_MAX_TOKENS || '8000', 10);
 // The companion's models, one per preset: balanced answers, and fast is for subagents when the person asks for it. The
 // server is the source of truth: the browser gets this list from GET /collab/ai/presets. AI_MODEL_BALANCED and
 // AI_MODEL_FAST in ai.env change only the model string.
-const PRESET_IDS = ['balanced', 'fast'];
+const PRESET_IDS = ['smart', 'balanced', 'fast'];
+const DEFAULT_PRESET = 'balanced';
 const OPENROUTER_PRESETS = {
+  smart: {label: 'Smart', name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5', env: 'AI_MODEL_SMART',
+    reasoningLevels: ['default', 'low', 'medium', 'high', 'max']},
   balanced: {label: 'Balanced', name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash', env: 'AI_MODEL_BALANCED',
     reasoningLevels: ['default', 'low', 'medium', 'high']},
   fast: {label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash', env: 'AI_MODEL_FAST',
@@ -103,6 +106,8 @@ const OPENROUTER_PRESETS = {
 };
 // OpenCode Go's models in the companion: open models. None of them takes a reasoning setting here.
 const OPENCODE_PRESETS = {
+  smart: {label: 'Smart', name: 'Muse Spark 1.3', model: 'muse-spark-1.3-contributor', env: 'AI_OPENCODE_MODEL_SMART',
+    reasoningLevels: ['default']},
   balanced: {label: 'Balanced', name: 'Step 5 Preview', model: 'step-5-preview-free', env: 'AI_OPENCODE_MODEL_BALANCED',
     reasoningLevels: ['default']},
   fast: {label: 'Fast', name: 'DeepSeek V4.1 Flash', model: 'deepseek-v4.1-flash', env: 'AI_OPENCODE_MODEL_FAST',
@@ -111,7 +116,7 @@ const OPENCODE_PRESETS = {
 // The services the companion can use. OpenRouter is the service of everyone who has not typed /beta. OpenCode Go
 // (opencode.ai) has its own key, an OpenAI-style chat completions endpoint, and a Responses endpoint for the models
 // listed in responseModels. It has no model list, so pictures follow its own setting and the built-in context sizes
-// apply. A person's answers use OpenCode Go only while they have typed /beta and the PIN (see serviceFor).
+// apply. A person's answers use OpenCode Go only while they have typed /beta and the PIN (see usableServiceOf).
 const PROVIDERS = {
   openrouter: {id: 'openrouter', name: 'OpenRouter', keyVar: 'OPENROUTER_API_KEY',
     url: process.env.OPENROUTER_URL || 'https://openrouter.ai/api/v1/chat/completions', modelList: true, vision: false,
@@ -124,8 +129,16 @@ const PROVIDERS = {
 };
 const keyOf = service => process.env[service.keyVar] || '';
 // The service a person's answers use: OpenCode Go while they have /beta on and OpenCode Go has a key, otherwise OpenRouter.
-function serviceFor(beta) {
-  return beta && keyOf(PROVIDERS.opencode) ? PROVIDERS.opencode : PROVIDERS.openrouter;
+const DEFAULT_PROVIDER = Object.hasOwn(PROVIDERS, process.env.AI_PROVIDER || '') ? process.env.AI_PROVIDER : 'openrouter';
+function serviceOf(name) {
+  return Object.hasOwn(PROVIDERS, name) ? PROVIDERS[name] : PROVIDERS[DEFAULT_PROVIDER];
+}
+// The service a request uses. It is the one it names when the person may use it (OpenCode Go only with /beta) and it has
+// a key; otherwise the default, when that may be used and has a key; otherwise OpenRouter.
+function usableServiceOf(name, beta) {
+  const open = s => !s.beta || beta;
+  const choices = [serviceOf(name), serviceOf()].filter(open);
+  return choices.find(s => keyOf(s)) || PROVIDERS.openrouter;
 }
 // The model list of a service with one, for pictures and context sizes; null for a service without one.
 function modelsUrl(service) {
@@ -147,7 +160,18 @@ function streamOf(service, model, body) {
   return apiOf(service, model) === 'responses' ? responsesToChat(body) : body;
 }
 
-const REASONING = ['default', 'low', 'medium', 'high'];
+const REASONING = ['default', 'low', 'medium', 'high', 'max'];
+const EFFORTS = ['low', 'medium', 'high'];
+const EFFORT_NOTE = {
+  low: 'Effort is LOW: make the change the person asked for, check it once with check_project, and propose it. ' +
+    'Look around only as much as the change needs.',
+  medium: '',
+  high: 'Effort is HIGH: before you change anything, read the parts it touches (screen_outline, blocks_outline, ' +
+    'read_file). After each change, run check_project. Before you propose, review the whole result against what the ' +
+    'person asked for, and say in your summary what you checked.',
+};
+const MAX_CLAMPED = 'Max reasoning is only for Claude Haiku 5.5, so high is used.';
+const MAX_REFUSED = 'Max reasoning was not accepted for this model, so high was used.';
 const REASONING_MAX_TOKENS = 32000; // reasoning draws from the same max_tokens budget as the answer, so it gets room for both
 // The model a subagent runs on: the fast preset's when the person has asked for that, otherwise the balanced preset's, which
 // is the model the companion answers with. Its reasoning is high on a service that takes a reasoning setting.
@@ -468,6 +492,11 @@ function modelTakesImages(m) {
 }
 
 // The model string of a preset: the one set in ai.env (AI_MODEL_*), or the default.
+// The preset of a request: a missing or unknown one means balanced.
+function presetOf(id) {
+  return PRESET_IDS.indexOf(id) >= 0 ? id : DEFAULT_PRESET;
+}
+
 function modelOf(preset, service) {
   return process.env[service.presets[preset].env] || service.presets[preset].model;
 }
@@ -502,12 +531,17 @@ function maxTokensOf(level) {
 }
 
 // The settings of one answer, from its stream body. The answer uses OpenCode Go only while the person has /beta on (see
-// serviceFor). Reasoning is one of the levels the service has; any other level is the default one. fastSubagent says
+// usableServiceOf). Reasoning is one of the levels the service has; any other level is the default one. fastSubagent says
 // whether the subagents use the fast model (see subagentOf).
 function settingsOf(data, beta = false) {
-  const service = serviceFor(beta);
-  const reasoning = REASONING.indexOf(data.reasoning) >= 0 && service.reasoning ? data.reasoning : 'default';
-  return {service: service.id, reasoning, fastSubagent: data.fastSubagent === true};
+  const service = usableServiceOf(data.provider, beta);
+  const preset = presetOf(data.preset);
+  let reasoning = REASONING.indexOf(data.reasoning) >= 0 && service.reasoning ? data.reasoning : 'default';
+  // Max is for the smart preset only; on any other, it is high.
+  const clamped = reasoning === 'max' && preset !== 'smart';
+  if (clamped) reasoning = 'high';
+  const effort = EFFORTS.indexOf(data.effort) >= 0 ? data.effort : 'medium';
+  return {service: service.id, preset, reasoning, clamped, effort, fastSubagent: data.fastSubagent === true};
 }
 
 // The session the OpenCode Go header names, for one person and project: the first 32 hex characters of a hash of the two
@@ -752,12 +786,22 @@ class Assistant {
   // What the browser shows for the service and its presets (GET /collab/ai/presets): the service this person's answers
   // use, the state of /beta, the two presets of that service, and the default reasoning level.
   presetInfo(me) {
-    const service = serviceFor(this.betaOn(me.userId));
+    const beta = this.betaOn(me.userId);
+    const describe = id => {
+      const s = PROVIDERS[id];
+      return {id, name: s.name, configured: this.configured(s), locked: !!s.beta && !beta,
+        presets: PRESET_IDS.map(p => ({id: p, label: s.presets[p].label, name: nameOf(p, s), model: modelOf(p, s),
+          reasoningLevels: s.presets[p].reasoningLevels.slice()}))};
+    };
+    const providers = Object.keys(PROVIDERS).map(describe);
+    const inUse = usableServiceOf('', beta);
     return {
-      service: {id: service.id, name: service.name},
+      providers,
+      defaultProvider: inUse.id,
+      service: {id: inUse.id, name: inUse.name},
       beta: this.betaState(me.userId),
-      presets: PRESET_IDS.map(id => ({id, label: service.presets[id].label, name: nameOf(id, service), model: modelOf(id, service),
-        reasoningLevels: service.presets[id].reasoningLevels.slice()})),
+      presets: providers.find(p => p.id === inUse.id).presets,
+      defaultPreset: DEFAULT_PRESET,
       defaultReasoning: 'default',
     };
   }
@@ -886,8 +930,9 @@ class Assistant {
       const pid = params.get('projectId') || '';
       const live = /^\d+$/.test(pid) ? this.activeRun(me.userId, pid) : null;
       // Pictures can be attached when the balanced model of the service in use takes them.
-      const service = serviceFor(this.betaOn(me.userId));
-      const vision = await this.takesPictures(modelOf('balanced', service), true, service);
+      const service = usableServiceOf(params.get('provider'), this.betaOn(me.userId));
+      const preset = presetOf(params.get('preset'));
+      const vision = await this.takesPictures(modelOf(preset, service), true, service);
       return json(200, {configured: this.configured(service), search: !!SEARCH_KEY(), vision,
         name: me.email.split('@')[0], fullUntil: /^\d+$/.test(pid) ? this.fullUntil(me.userId, pid) : 0,
         running: !!live, question: live ? live.question : '', beta: this.betaState(me.userId)});
@@ -1124,9 +1169,11 @@ class Assistant {
     const {me, projectId, access, goal, emit} = ctx;
     const plan = !!ctx.plan;
     const service = PROVIDERS[ctx.service];
-    const model = modelOf('balanced', service);
+    const model = modelOf(presetOf(ctx.preset), service);
     const session = sessionOf(me.userId, projectId);
     const level = ctx.reasoning || 'default';
+    const effort = ctx.effort || 'medium';
+    if (ctx.clamped) emit({type: 'status', text: MAX_CLAMPED});
     const stats = ctx.stats || {steps: 0, tools: 0, pictures: 0};
     if (!this.configured(service)) {
       emit({type: 'text', delta: NOT_SET_UP});
@@ -1170,7 +1217,7 @@ class Assistant {
       fastSubagent: ctx.fastSubagent === true, ask: this.ask, signal: ctx.signal, stats, draft, readOnly: plan,
       state: {proposed: false, edited: false}};
     const system = [full ? SYSTEM_FULL : SYSTEM, search ? SEARCH_NOTE : '', vision ? VISION_NOTE : '',
-      plan ? PLAN_NOTE : '',
+      plan ? PLAN_NOTE : EFFORT_NOTE[effort],
       full && draft.changed.size ? 'The draft from earlier messages has ' + draft.changed.size + ' changed file(s): ' +
         [...draft.changed.keys()].join(', ') + '. Continue from it.' : '',
       dropped.length ? 'Changes to these files were dropped, because the project changed under them: ' + dropped.join(', ') + '.' : '',
@@ -1518,11 +1565,17 @@ class Assistant {
   // and rest(false) tell a subagent when it waits before a try again.
   async streamWithRetry({model, messages, list, signal, emit, level, rest, turnLimit = true, tag, service, session}) {
     let tries = 0;      // the tries that failed and were tried again
+    let lvl = level;
     for (;;) {
       try {
-        return await this.streamTurn({model, messages, list, signal, emit, level, turnLimit, tag, service, session});
+        return await this.streamTurn({model, messages, list, signal, emit, level: lvl, turnLimit, tag, service, session});
       } catch (e) {
         if (signal && signal.aborted) throw e;
+        if (lvl === 'max' && e.status === 400 && /effort|reasoning/i.test(String(e.detail || ''))) {
+          lvl = 'high';
+          emit({type: 'status', text: MAX_REFUSED});
+          continue;
+        }
         if (!retryable(e) || tries >= this.retries) throw e;
         tries++;
         const why = e.stalled ? 'stopped responding' : e.premature ? 'cut its answer short' : 'had a problem';
@@ -1632,22 +1685,24 @@ class Assistant {
     const key = me.userId;
     // With no OpenCode Go key, answers stay on OpenRouter even with /beta on, so these replies say so.
     const note = keyOf(PROVIDERS.opencode) ? ''
-      : ' OpenCode Go has no key on this server yet, so answers stay on OpenRouter.';
+      : ' OpenCode Go has no key on this server yet, so it cannot be used.';
     if (arg === '') {
       return this.betaOn(key)
-        ? 'Your answers use OpenCode Go until ' + clock(this.betaUntil.get(key)) + '. Type /beta off to go back to OpenRouter.' + note
-        : 'Your answers use OpenRouter. Type /beta and the PIN to use OpenCode Go for an hour.';
+        ? 'OpenCode Go is on for you until ' + clock(this.betaUntil.get(key)) + '. Choose OpenCode Go under Service to use it. ' +
+          'Type /beta off to turn it off.' + note
+        : 'OpenCode Go is off. Type /beta and the PIN to turn it on for an hour.';
     }
     if (arg.toLowerCase() === 'off') {
       this.betaUntil.delete(key);
-      return 'Your answers use OpenRouter again.';
+      return 'OpenCode Go is off.';
     }
     const refused = this.pinCheck(arg, 'OpenCode Go cannot be turned on: no PIN is set on this server. Whoever runs the ' +
       'Raspberry Pi can set the PIN with: sudo /opt/appinventor/set-ai.sh --pin');
     if (refused) return refused;
     const until = this.now() + FULL_TTL_MS;
     this.betaUntil.set(key, until);
-    return 'Your answers now use OpenCode Go until ' + clock(until) + '. Type /beta off to go back to OpenRouter.' + note;
+    return 'OpenCode Go is on for you until ' + clock(until) + '. Choose OpenCode Go under Service to use it. ' +
+      'Type /beta off to turn it off.' + note;
   }
 
   // Checks a PIN for /override and /beta. It returns '' when the PIN is right, and otherwise what to tell the person. Five
@@ -1856,5 +1911,5 @@ class Assistant {
   }
 }
 
-module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, modelTakesImages, PROVIDERS, serviceFor, sessionOf,
+module.exports = {Assistant, SYSTEM, SYSTEM_FULL, STATIC, checkAttachments, modelTakesImages, PROVIDERS, serviceOf, usableServiceOf, presetOf, sessionOf,
   nameOf, responsesRequest, responsesToChat, REASONING_MAX_TOKENS};

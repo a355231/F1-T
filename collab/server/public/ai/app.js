@@ -35,6 +35,8 @@
     {cmd: '/explain', help: 'Explain how the project works'},
     {cmd: '/fix', help: 'Make the smallest change that fixes one problem'},
     {cmd: '/reasoning', help: 'How hard the model thinks: default, low, medium or high'},
+    {cmd: '/model', help: 'Which model answers: smart, balanced or fast'},
+    {cmd: '/effort', help: 'How hard the helper works: low, medium or high'},
     {cmd: '/override', help: 'Full-app mode, with the PIN'},
     {cmd: '/beta', help: 'OpenCode Go models, with the same PIN'},
     {cmd: '/discard', help: 'Throw away an unfinished full app'},
@@ -782,26 +784,55 @@
     }
   }
 
-  // ---- the choices under the box: the reasoning effort and the fast subagent, remembered on this computer. The
-  // levels and the models come from GET /collab/ai/presets. ----
+  // ---- effort: how hard the helper works, from the slider under the box (remembered on this computer) ----
 
-  // The keys of earlier versions of this window. Nothing reads them now, so they are taken off this computer.
-  ['aihelper.model', 'aihelper.mode', 'aihelper.provider', 'aihelper.effort'].forEach(function (key) {
-    try {
-      localStorage.removeItem(key);
-    } catch (e) {
-      // nothing stored here
-    }
-  });
+  var EFFORTS = ['low', 'medium', 'high'];
+  var EFFORT_TEXT = {low: 'Low', medium: 'Medium', high: 'High'};
+  var EFFORT_WHAT = {
+    low: 'Quick changes, checked once.',
+    medium: 'The usual care.',
+    high: 'It reads and checks more before it proposes.',
+  };
+  var effortInput = $('effort');
+  var effortOut = $('effortOut');
+  var effort = 'medium';
+  try {
+    var keptEffort = localStorage.getItem('aihelper.effort');
+    if (EFFORTS.indexOf(keptEffort) >= 0) effort = keptEffort;
+  } catch (e) {
+    // no storage here: medium
+  }
 
-  var REASONS = ['default', 'low', 'medium', 'high'];
-  var REASON_TEXT = {default: 'Default', low: 'Low', medium: 'Medium', high: 'High'};
+  function setEffort(level) {
+    effort = level;
+    effortInput.value = String(EFFORTS.indexOf(level));
+    effortInput.setAttribute('aria-valuetext', EFFORT_TEXT[level]);
+    effortInput.title = EFFORT_WHAT[level];
+    effortOut.textContent = EFFORT_TEXT[level];
+    store('aihelper.effort', level);
+  }
+  effortInput.oninput = function () { setEffort(EFFORTS[Number(effortInput.value)] || 'medium'); };
+  setEffort(effort);
+
+  // ---- service, model, reasoning and fast subagent under the box, remembered on this computer. The lists come from
+  // GET /collab/ai/presets; the lists here are used only until that call has answered. ----
+
+  var PRESET_IDS = ['smart', 'balanced', 'fast'];
+  var REASONS = ['default', 'low', 'medium', 'high', 'max'];
+  var REASON_TEXT = {default: 'Default', low: 'Low', medium: 'Medium', high: 'High', max: 'Max'};
+  var pickProvider = $('pickProvider');
+  var pickModel = $('pickModel');
   var pickReasoning = $('pickReasoning');
   var fastPick = $('fastPick');
   var fastBox = $('fastSub');
-  var presets = [];           // the balanced and fast presets of the service in use, as the server lists them
-  var serviceName = '';       // the name of the service in use, for the tooltip
-  var serverReasoning = 'default';   // the reasoning the server gives when the person has not chosen
+  var providers = [];          // every service, as the server lists it: its presets, and whether it is configured or locked
+  var provider = 'openrouter'; // the service the answers use
+  var preset = 'balanced';     // the model that writes the answers
+  var reasoning = 'default';   // the reasoning level the answers use
+  var serverDefaults = {provider: 'openrouter', preset: 'balanced', reasoning: 'default'};
+  var serviceName = '';        // the name of the service in use, for the tooltip
+  var keptProvider = keptChoice('aihelper.provider', ['openrouter', 'opencode']);
+  var keptPreset = keptChoice('aihelper.model', PRESET_IDS);
   var keptReasoning = keptChoice('aihelper.reasoning', REASONS);
   var fastSub = readFlag('aihelper.fastSub');
 
@@ -835,24 +866,52 @@
     return !!x && typeof x.id === 'string';
   }
 
-  function presetFor(id) {
-    for (var i = 0; i < presets.length; i++) {
-      if (presets[i].id === id) return presets[i];
+  // The services the person may pick: configured, and open to them (OpenCode Go only with /beta).
+  function serviceList() {
+    return providers.filter(function (p) { return p.configured && !p.locked; });
+  }
+
+  function providerOf(id) {
+    for (var i = 0; i < providers.length; i++) {
+      if (providers[i].id === id) return providers[i];
     }
     return null;
   }
 
-  // The levels the answers can use: the balanced model's, as the service lists them. Only the four known ones count.
-  function reasoningLevels() {
-    var p = presetFor('balanced');
-    var levels = p && Array.isArray(p.reasoningLevels)
-      ? p.reasoningLevels.filter(function (l) { return REASONS.indexOf(l) >= 0; }) : [];
-    return levels.length ? levels : REASONS;
+  function presetsOf(id) {
+    var p = providerOf(id);
+    return p && Array.isArray(p.presets) ? p.presets.filter(hasId) : [];
   }
 
-  // The level the answers use: the person's choice when the service offers it, else the server's default, else Default.
+  // The preset of the service in use, by id.
+  function presetFor(id) {
+    var list = presetsOf(provider);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) return list[i];
+    }
+    return null;
+  }
+
+  // The reasoning levels a model offers, of the ones this window knows. Only the four or five known ones count.
+  function reasoningLevelsOf(id) {
+    var p = presetFor(id);
+    var levels = p && Array.isArray(p.reasoningLevels)
+      ? p.reasoningLevels.filter(function (l) { return REASONS.indexOf(l) >= 0; }) : [];
+    return levels.length ? levels : ['default', 'low', 'medium', 'high'];
+  }
+
+  // Max is only for the preset that lists it (the Smart one).
+  function reasonAllowed(level) {
+    return reasoningLevelsOf(preset).indexOf(level) >= 0;
+  }
+
   function reasoningInUse() {
-    return chosen(keptReasoning, reasoningLevels(), serverReasoning, 'default');
+    return reasoning;
+  }
+
+  function presetText(id) {
+    var p = presetFor(id);
+    return p ? p.name + ' (' + p.label + ')' : id;
   }
 
   // The tooltip of the fast subagent box names the model it picks, from the presets response. Until that has
@@ -869,8 +928,8 @@
       : 'Subagents use the balanced model, the same as the answers.';
   }
 
-  // Sets the options of the reasoning list. They are only written when their text changes, so a list that is open is
-  // not reset when the presets are fetched again.
+  // Sets the options of a picker. They are only written when their text changes, so a list that is open is not reset
+  // when the presets are fetched again.
   function fillPicker(sel, items) {
     var same = sel.options.length === items.length;
     for (var i = 0; same && i < items.length; i++) {
@@ -886,8 +945,17 @@
   }
 
   function syncPickers() {
-    fillPicker(pickReasoning, reasoningLevels().map(function (r) { return {value: r, text: REASON_TEXT[r]}; }));
-    pickReasoning.value = reasoningInUse();
+    var offered = serviceList();
+    fillPicker(pickProvider, offered.map(function (p) { return {value: p.id, text: p.name}; }));
+    pickProvider.value = provider;
+    if (pickProvider.parentNode) pickProvider.parentNode.hidden = offered.length < 2;
+    fillPicker(pickModel, presetsOf(provider).map(function (p) { return {value: p.id, text: presetText(p.id)}; }));
+    pickModel.value = preset;
+    fillPicker(pickReasoning, REASONS.map(function (r) { return {value: r, text: REASON_TEXT[r]}; }));
+    pickReasoning.value = reasoning;
+    Array.prototype.forEach.call(pickReasoning.options, function (o) { o.disabled = !reasonAllowed(o.value); });
+    pickReasoning.title = reasonAllowed('max') ? 'How hard the model thinks'
+      : 'How hard the model thinks. Max is only for the Smart model.';
     fastBox.checked = fastSub;
     fastPick.title = fastTip();
   }
@@ -898,12 +966,50 @@
     return ids.indexOf(serverDefault) >= 0 ? serverDefault : fallback;
   }
 
+  // The reasoning the model in use does not offer is replaced by High when it offers it, Default otherwise.
+  function fallbackReasoning() {
+    return reasonAllowed('high') ? 'high' : 'default';
+  }
+
   function setReasoning(level) {
-    keptReasoning = level;
+    reasoning = level;
     store('aihelper.reasoning', level);
     syncPickers();
   }
-  pickReasoning.onchange = function () { setReasoning(pickReasoning.value); };
+
+  // Returns true when Max was given up because the model changed away from Smart: High is used instead.
+  function setPreset(id) {
+    preset = id;
+    store('aihelper.model', id);
+    var clamped = !reasonAllowed(reasoning);
+    if (clamped) setReasoning(fallbackReasoning());
+    else syncPickers();
+    refreshStatus();
+    return clamped;
+  }
+
+  // Changes the service the answers come from. Its models are the ones listed for it, and the reasoning is set again
+  // when the service does not offer the one in use.
+  function setProvider(id) {
+    provider = id;
+    store('aihelper.provider', id);
+    var p = providerOf(id);
+    serviceName = p ? p.name : '';
+    var names = presetsOf(id).map(function (x) { return x.id; });
+    if (names.indexOf(preset) < 0) preset = chosen(null, names, serverDefaults.preset, names[0] || 'balanced');
+    if (!reasonAllowed(reasoning)) reasoning = fallbackReasoning();
+    syncPickers();
+    refreshStatus();
+  }
+
+  pickProvider.onchange = function () { setProvider(pickProvider.value); };
+  pickModel.onchange = function () {
+    if (setPreset(pickModel.value)) flash('Max reasoning is only for the Smart model, so high is used.');
+  };
+  pickReasoning.onchange = function () {
+    if (reasonAllowed(pickReasoning.value)) setReasoning(pickReasoning.value);
+    else syncPickers();
+  };
   fastBox.onchange = function () {
     fastSub = fastBox.checked;
     store('aihelper.fastSub', fastSub ? 'true' : 'false');
@@ -911,7 +1017,8 @@
   };
 
   // The pictures button and the full-app pill follow the server's status. It is asked for on start and after each
-  // answer, since /beta changes the service in use (and so the picture answer), and /override turns full-app mode on.
+  // answer, since /beta and the pickers change the service and the model (and so the picture answer), and /override
+  // turns full-app mode on.
   function applyStatus(s) {
     visionOn = !!s.vision;
     attach.hidden = !visionOn;
@@ -921,7 +1028,8 @@
 
   function refreshStatus() {
     if (!projectId) return;
-    fetch('/collab/ai/status?projectId=' + encodeURIComponent(projectId), {credentials: 'same-origin'})
+    fetch('/collab/ai/status?projectId=' + encodeURIComponent(projectId) + '&provider=' + encodeURIComponent(provider) +
+      '&preset=' + encodeURIComponent(preset), {credentials: 'same-origin'})
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
         if (s) applyStatus(s);
@@ -931,12 +1039,21 @@
       });
   }
 
-  // The presets of the service in use, its name and the server's default reasoning.
+  // The services, their models and the server's defaults. The choice on this computer is used when the service and the
+  // model still offer it.
   function applyPresets(d) {
-    presets = d.presets.filter(hasId);
-    serviceName = d.service && typeof d.service.name === 'string' ? d.service.name : '';
-    serverReasoning = typeof d.defaultReasoning === 'string' ? d.defaultReasoning : 'default';
+    providers = (Array.isArray(d.providers) ? d.providers : []).filter(hasId);
+    serverDefaults = {provider: d.defaultProvider, preset: d.defaultPreset, reasoning: d.defaultReasoning};
+    var offered = serviceList().map(function (p) { return p.id; });
+    provider = chosen(keptProvider, offered, serverDefaults.provider, offered.length ? offered[0] : 'openrouter');
+    var models = presetsOf(provider).map(function (p) { return p.id; });
+    preset = chosen(keptPreset, models, serverDefaults.preset, 'balanced');
+    var inUse = providerOf(provider);
+    serviceName = inUse ? inUse.name : '';
+    reasoning = chosen(keptReasoning, reasoningLevelsOf(preset), serverDefaults.reasoning, 'default');
+    if (!reasonAllowed(reasoning)) reasoning = fallbackReasoning();
     syncPickers();
+    refreshStatus();
   }
 
   // Fetched on start, after each answer and every 30 seconds. If it fails, the lists and defaults stay as they are.
@@ -944,7 +1061,7 @@
     fetch('/collab/ai/presets', {credentials: 'same-origin'})
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
-        if (d && Array.isArray(d.presets) && d.presets.length) applyPresets(d);
+        if (d && Array.isArray(d.providers) && d.providers.length) applyPresets(d);
       })
       .catch(function () {
         // the lists and defaults stay as they are
@@ -961,7 +1078,9 @@
     '- `/check [focus]`: check the project and say what is wrong',
     '- `/explain [focus]`: explain how the project works',
     '- `/fix <problem>`: make the smallest change that fixes one problem',
-    '- `/reasoning default`, `low`, `medium` or `high`: how hard the model thinks (the menu under the box does the same)',
+    '- `/reasoning default`, `low`, `medium` or `high`: how hard the model thinks; `max` is only for the Smart model (the menu under the box does the same)',
+    '- `/model smart`, `balanced` or `fast`: which model writes the helper\'s answers (the menu under the box does the same)',
+    '- `/effort low`, `medium` or `high`: how hard the helper works (the slider does the same)',
     '- `/override <PIN>`: full-app mode for an hour; `/override off` turns it off',
     '- `/beta <PIN>`: the OpenCode Go models for an hour, with the same PIN; `/beta off` turns them off',
     '- `/discard`: throw away an unfinished full app',
@@ -1002,16 +1121,45 @@
   }
 
   // /reasoning sets the choice the menu under the box shows. The levels are the ones the service offers.
+  function effortCommand(arg) {
+    var level = arg.toLowerCase();
+    if (!arg) {
+      showLocal('Effort is **' + EFFORT_TEXT[effort] + '**. Move the slider under the box, or type `/effort low`, `/effort medium` or `/effort high`.');
+      return;
+    }
+    if (EFFORTS.indexOf(level) < 0) {
+      showLocal('Choose `low`, `medium` or `high`, for example `/effort high`.');
+      return;
+    }
+    setEffort(level);
+    showLocal('Effort is now **' + EFFORT_TEXT[effort] + '**. ' + EFFORT_WHAT[effort]);
+  }
+
+  function modelCommand(arg) {
+    var id = arg.toLowerCase();
+    if (!arg) {
+      showLocal('Model is **' + presetText(preset) + '**. Choose it in the menu under the box, or type `/model smart`, `/model balanced` or `/model fast`.');
+      return;
+    }
+    if (PRESET_IDS.indexOf(id) < 0) {
+      showLocal('Choose `smart`, `balanced` or `fast`, for example `/model smart`.');
+      return;
+    }
+    var clamped = setPreset(id);
+    showLocal('Model is now **' + presetText(preset) + '**.' + (clamped ? ' Max reasoning is only for the Smart model, so high is used.' : ''));
+  }
+
   function reasoningCommand(arg) {
     var level = arg.toLowerCase();
     if (!arg) {
-      showLocal('Reasoning effort is **' + REASON_TEXT[reasoningInUse()] + '**. Type `/reasoning default`, `low`, `medium` or `high` to change it.');
+      showLocal('Reasoning effort is **' + REASON_TEXT[reasoningInUse()] + '**. Type `/reasoning default`, `low`, `medium`, `high` or `max` to change it.');
     } else if (REASONS.indexOf(level) < 0) {
-      showLocal('Choose `default`, `low`, `medium` or `high`, for example `/reasoning high`.');
+      showLocal('Choose `default`, `low`, `medium`, `high` or `max`, for example `/reasoning high`.');
+    } else if (!reasonAllowed(level)) {
+      showLocal('Max reasoning is only for the Smart model. Type `/model smart` first, or choose `/reasoning high`.');
     } else {
       setReasoning(level);
-      showLocal('Reasoning effort is now **' + REASON_TEXT[reasoningInUse()] + '**.' +
-        (reasoningInUse() === level ? '' : ' The model in use does not offer ' + REASON_TEXT[level] + '.'));
+      showLocal('Reasoning effort is now **' + REASON_TEXT[reasoningInUse()] + '**.');
     }
   }
 
@@ -1025,6 +1173,8 @@
     }
     addUser(typed);
     if (name === 'help') showLocal(HELP);
+    else if (name === 'effort') effortCommand(arg);
+    else if (name === 'model') modelCommand(arg);
     else reasoningCommand(arg);
   }
 
@@ -1038,7 +1188,7 @@
     var m = /^\/([a-z]+)\s*([\s\S]*)$/i.exec(text);
     var name = m ? m[1].toLowerCase() : '';
     var arg = m ? m[2].trim() : '';
-    if (['help', 'reasoning', 'new', 'clear'].indexOf(name) >= 0) {
+    if (['help', 'effort', 'model', 'reasoning', 'new', 'clear'].indexOf(name) >= 0) {
       runLocal(name, arg, text);
       return;
     }
@@ -1078,7 +1228,8 @@
     autosize();
     var api = newAssistant();
     if (isGoal) startGoal(text.replace(/^\/goal\s*/i, ''));
-    var body = {projectId: projectId, reasoning: reasoningInUse(), fastSubagent: fastSub,
+    var body = {projectId: projectId, provider: provider, preset: preset, effort: effort, reasoning: reasoningInUse(),
+      fastSubagent: fastSub,
       messages: hidesPin ? [{role: 'user', content: text}] : history.slice(-20)};
     if (images.length) body.images = images.map(function (p) { return {name: p.name, mime: p.mime, data: p.data}; });
     runStream(api, body, {goal: isGoal, secret: hidesPin, row: row});
@@ -1411,6 +1562,6 @@
   // for the tests
   window.__aiHelper = {
     send: send,
-    choices: function () { return {reasoning: reasoningInUse(), fastSubagent: fastSub}; },
+    choices: function () { return {provider: provider, preset: preset, effort: effort, reasoning: reasoningInUse(), fastSubagent: fastSub}; },
   };
 })();

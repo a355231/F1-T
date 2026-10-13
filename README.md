@@ -86,10 +86,12 @@ components and documentation, draw pictures, and ask you a question when it need
 | `/check [focus]` | Checks the project and says what is wrong |
 | `/explain [focus]` | Explains how the project works |
 | `/fix <problem>` | Makes the smallest change that fixes one problem |
-| `/reasoning <level>` | Sets how hard the model thinks: default, low, medium or high (the Reasoning effort list does the same) |
+| `/reasoning <level>` | Sets how hard the model thinks: default, low, medium or high, and max on the Smart model (the Reasoning effort list does the same) |
+| `/model <smart\|balanced\|fast>` | Chooses the model that writes the answers (the Model list does the same) |
+| `/effort <low\|medium\|high>` | Sets how hard the helper works (the Effort slider does the same) |
 | `/override <PIN>` | Turns on full-app mode for an hour, so the helper can build a small app |
 | `/override off` | Turns full-app mode off |
-| `/beta <PIN>` | Makes your answers use OpenCode Go for an hour, with the same PIN; `/beta off` sends them back to OpenRouter |
+| `/beta <PIN>` | Turns OpenCode Go on for you for an hour, with the same PIN; choose it under Service to use it. `/beta off` turns it off |
 | `/discard` | Throws away an unfinished full app |
 | `/new` (or `/clear`) | Starts a new conversation |
 | `/help` | Lists the commands |

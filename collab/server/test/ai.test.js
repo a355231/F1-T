@@ -136,6 +136,8 @@ function setup(script, options = {}) {
   process.env.OPENROUTER_API_KEY = 'sk-test';
   // The companion's models come from its presets; the ai.env overrides point the balanced and fast presets at test models.
   process.env.AI_MODEL_BALANCED = 'some/model';
+  process.env.AI_MODEL_SMART = 'some/smart';
+  process.env.AI_MODEL_FAST = 'some/fast';
   process.env.AI_MODEL_FAST = 'some/fast';
   delete process.env.OPENROUTER_MODEL;
   process.env.AI_OVERRIDE_PIN = PIN_VALUE;
@@ -430,33 +432,33 @@ async function withOpenCodeKey(key, fn) {
 }
 // The presets as a person's browser gets them (GET /collab/ai/presets).
 const presetsOf = async (ai, who) => JSON.parse((await getJson(ai, who, '/collab/ai/presets')).body);
+const lockOf = (body, id) => body.providers.find(p => p.id === id).locked;
 
-test('/beta: a person\'s answers use OpenCode Go only while they have typed /beta and the PIN, for an hour, and only for them', async () => {
+test('/beta: OpenCode Go is offered only while a person has typed /beta and the PIN, for an hour, and only for them', async () => {
   await withOpenCodeKey('oc-test', async () => {
     const t = setup([textTurn('one'), textTurn('two'), textTurn('three')]);
-    assert.strictEqual((await presetsOf(t.ai, 'ann')).service.id, 'openrouter', 'OpenRouter until /beta is typed');
-    assert.match(texts(await say(t.ai, 'ann', '/beta')), /^Your answers use OpenRouter\. Type \/beta and the PIN to use OpenCode Go for an hour\.$/);
+    assert.strictEqual(lockOf(await presetsOf(t.ai, 'ann'), 'opencode'), true, 'locked until /beta is typed');
+    assert.match(texts(await say(t.ai, 'ann', '/beta')), /^OpenCode Go is off\. Type \/beta and the PIN to turn it on for an hour\.$/);
     assert.strictEqual(texts(await say(t.ai, 'ann', '/beta 00000')), 'Wrong PIN.');
     assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)),
-      /^Your answers now use OpenCode Go until \d\d:\d\d\. Type \/beta off to go back to OpenRouter\.$/);
-    assert.match(texts(await say(t.ai, 'ann', '/beta')), /^Your answers use OpenCode Go until \d\d:\d\d\. Type \/beta off to go back to OpenRouter\.$/,
-      'the status says so');
+      /^OpenCode Go is on for you until \d\d:\d\d\. Choose OpenCode Go under Service to use it\. Type \/beta off to turn it off\.$/);
+    assert.match(texts(await say(t.ai, 'ann', '/beta')), /^OpenCode Go is on for you until \d\d:\d\d\./, 'the status says so');
     const ann = await presetsOf(t.ai, 'ann');
-    assert.deepStrictEqual([ann.service.id, ann.beta.on], ['opencode', true]);
+    assert.deepStrictEqual([ann.beta.on, lockOf(ann, 'opencode')], [true, false]);
     assert.ok(ann.beta.until > t.ai.now(), 'on until a time still to come');
-    assert.strictEqual((await presetsOf(t.ai, 'bob')).service.id, 'openrouter', 'bob did not type it');
-    await sayTuned(t.ai, 'ann', 'hi');
+    assert.strictEqual(lockOf(await presetsOf(t.ai, 'bob'), 'opencode'), true, 'bob did not type it');
+    await sayTuned(t.ai, 'ann', 'hi', {provider: 'opencode'});
     assert.strictEqual(t.calls[0].url, PROVIDERS.opencode.url, 'ann gets OpenCode Go');
-    await sayTuned(t.ai, 'bob', 'hi');
+    await sayTuned(t.ai, 'bob', 'hi', {provider: 'opencode'});
     assert.strictEqual(t.calls[1].url, PROVIDERS.openrouter.url, 'bob gets OpenRouter');
     assert.doesNotMatch(JSON.stringify(t.calls), new RegExp(PIN_VALUE), 'the PIN never reaches the model');
     t.advance(HOUR + 60000);
-    assert.strictEqual((await presetsOf(t.ai, 'ann')).service.id, 'openrouter', 'the hour is over');
-    assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)), /^Your answers now use OpenCode Go until/);
-    assert.strictEqual(texts(await say(t.ai, 'ann', '/beta off')), 'Your answers use OpenRouter again.');
-    assert.strictEqual((await presetsOf(t.ai, 'ann')).service.id, 'openrouter', '/beta off ends it');
-    await sayTuned(t.ai, 'ann', 'again');
-    assert.strictEqual(t.calls[2].url, PROVIDERS.openrouter.url, 'with /beta off the request uses OpenRouter');
+    assert.strictEqual(lockOf(await presetsOf(t.ai, 'ann'), 'opencode'), true, 'the hour is over');
+    assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)), /^OpenCode Go is on for you until/);
+    assert.strictEqual(texts(await say(t.ai, 'ann', '/beta off')), 'OpenCode Go is off.');
+    assert.strictEqual(lockOf(await presetsOf(t.ai, 'ann'), 'opencode'), true, '/beta off ends it');
+    await sayTuned(t.ai, 'ann', 'again', {provider: 'opencode'});
+    assert.strictEqual(t.calls[2].url, PROVIDERS.openrouter.url, 'with /beta off the request is answered by OpenRouter');
   });
 });
 
@@ -469,11 +471,11 @@ test('/beta uses the PIN of /override and its lock, and a PIN changed with "turn
     assert.match(texts(await say(t.ai, 'fay', '/override ' + PIN_VALUE)), /Too many wrong PINs/, '/override is locked too');
     assert.match(texts(await say(t.ai, 'fay', '/beta ' + PIN_VALUE)), /Too many wrong PINs/);
     t.advance(16 * 60 * 1000);
-    assert.match(texts(await say(t.ai, 'fay', '/beta ' + PIN_VALUE)), /Your answers now use OpenCode Go until/);
+    assert.match(texts(await say(t.ai, 'fay', '/beta ' + PIN_VALUE)), /OpenCode Go is on for you until/);
     const done = await changePin(t.ai, 'fay', {current: PIN_VALUE, new: 'Fresh2026', endFull: true});
     assert.strictEqual(done.status, 200);
     assert.strictEqual((await presetsOf(t.ai, 'fay')).beta.on, false, 'turning it off for everyone ends /beta too');
-    assert.match(texts(await say(t.ai, 'fay', '/beta Fresh2026')), /Your answers now use OpenCode Go until/, 'the new PIN works');
+    assert.match(texts(await say(t.ai, 'fay', '/beta Fresh2026')), /OpenCode Go is on for you until/, 'the new PIN works');
   });
 });
 
@@ -481,11 +483,11 @@ test('/beta with no OpenCode Go key says so, and the answers stay on OpenRouter'
   await withOpenCodeKey(null, async () => {
     const t = setup([textTurn('one')]);
     assert.match(texts(await say(t.ai, 'ann', '/beta ' + PIN_VALUE)),
-      /^Your answers now use OpenCode Go until \d\d:\d\d\. Type \/beta off to go back to OpenRouter\. OpenCode Go has no key on this server yet, so answers stay on OpenRouter\.$/);
+      /^OpenCode Go is on for you until \d\d:\d\d\. Choose OpenCode Go under Service to use it\. Type \/beta off to turn it off\. OpenCode Go has no key on this server yet, so it cannot be used\.$/);
     assert.strictEqual((await presetsOf(t.ai, 'ann')).service.id, 'openrouter');
     assert.match(texts(await say(t.ai, 'ann', '/beta')),
-      /^Your answers use OpenCode Go until \d\d:\d\d\. Type \/beta off to go back to OpenRouter\. OpenCode Go has no key on this server yet, so answers stay on OpenRouter\.$/,
-      '/beta alone says the answers stay on OpenRouter too');
+      /^OpenCode Go is on for you until \d\d:\d\d\. Choose OpenCode Go under Service to use it\. Type \/beta off to turn it off\. OpenCode Go has no key on this server yet, so it cannot be used\.$/,
+      '/beta alone says it cannot be used yet, too');
     await sayTuned(t.ai, 'ann', 'hi');
     assert.strictEqual(t.calls[0].url, PROVIDERS.openrouter.url, 'the answer stays on OpenRouter');
   });
@@ -1582,24 +1584,24 @@ function restoreEnv(saved) {
   }
 }
 
-test('GET /collab/ai/presets: the service in use, the state of /beta, the balanced and fast presets and the default reasoning; signed-in people only', async () => {
+test('GET /collab/ai/presets: the services with their models and locks, the service in use, the state of /beta, and the defaults; signed-in people only', async () => {
   const t = setup([]);
   const saved = saveEnv();
-  for (const k of ['AI_MODEL_BALANCED', 'AI_MODEL_FAST']) delete process.env[k];
+  for (const k of ['AI_MODEL_SMART', 'AI_MODEL_BALANCED', 'AI_MODEL_FAST']) delete process.env[k];
   try {
-    const res = await getJson(t.ai, 'ann', '/collab/ai/presets');
-    assert.strictEqual(res.status, 200);
-    assert.deepStrictEqual(JSON.parse(res.body), {
-      service: {id: 'openrouter', name: 'OpenRouter'},
-      beta: {on: false, until: 0},
-      presets: [
-        {id: 'balanced', label: 'Balanced', name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash',
-          reasoningLevels: ['default', 'low', 'medium', 'high']},
-        {id: 'fast', label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash',
-          reasoningLevels: ['default', 'low', 'medium', 'high']},
-      ],
-      defaultReasoning: 'default',
-    });
+    const body = await presetsOf(t.ai, 'ann');
+    assert.deepStrictEqual(body.presets, [
+      {id: 'smart', label: 'Smart', name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5',
+        reasoningLevels: ['default', 'low', 'medium', 'high', 'max']},
+      {id: 'balanced', label: 'Balanced', name: 'Ling 3.1 Flash', model: 'inclusionai/ling-3.1-flash',
+        reasoningLevels: ['default', 'low', 'medium', 'high']},
+      {id: 'fast', label: 'Fast', name: 'Ling 3 Flash', model: 'inclusionai/ling-3.0-flash',
+        reasoningLevels: ['default', 'low', 'medium', 'high']},
+    ]);
+    assert.deepStrictEqual(body.service, {id: 'openrouter', name: 'OpenRouter'});
+    assert.deepStrictEqual(body.beta, {on: false, until: 0});
+    assert.deepStrictEqual(body.providers.map(p => [p.id, p.locked]), [['openrouter', false], ['opencode', true]]);
+    assert.deepStrictEqual([body.defaultProvider, body.defaultPreset, body.defaultReasoning], ['openrouter', 'balanced', 'default']);
     t.ai.ask = async () => null;
     assert.strictEqual((await getJson(t.ai, 'ann', '/collab/ai/presets')).status, 401, 'signed-out visitors get nothing');
   } finally {
@@ -1607,45 +1609,53 @@ test('GET /collab/ai/presets: the service in use, the state of /beta, the balanc
   }
 });
 
-test('with /beta on, the service and its presets are OpenCode Go\'s', async () => {
+test('with /beta on, OpenCode Go is offered with its own presets, and the service in use is still the default until one is chosen', async () => {
   await withOpenCodeKey('oc-test', async () => {
     const t = setup([textTurn('x')]);
     await say(t.ai, 'ann', '/beta ' + PIN_VALUE);
     const body = await presetsOf(t.ai, 'ann');
-    assert.deepStrictEqual(body.service, {id: 'opencode', name: 'OpenCode Go'});
-    assert.deepStrictEqual(body.presets.map(p => [p.id, p.name, p.model, p.reasoningLevels]), [
+    const oc = body.providers.find(p => p.id === 'opencode');
+    assert.deepStrictEqual([oc.configured, oc.locked], [true, false]);
+    assert.deepStrictEqual(oc.presets.map(p => [p.id, p.name, p.model, p.reasoningLevels]), [
+      ['smart', 'Muse Spark 1.3', 'muse-spark-1.3-contributor', ['default']],
       ['balanced', 'Step 5 Preview', 'step-5-preview-free', ['default']],
       ['fast', 'DeepSeek V4.1 Flash', 'deepseek-v4.1-flash', ['default']],
     ]);
     assert.strictEqual(body.beta.on, true);
+    assert.strictEqual(body.service.id, 'openrouter');
   });
 });
 
-test('the companion answers with the balanced model, whatever preset the browser names; AI_MODEL_* change only the model string', async () => {
-  const t = setup([textTurn('a'), textTurn('b'), textTurn('c')]);
+test('the companion answers with the model of the preset the browser names; AI_MODEL_* change only the model string', async () => {
+  const t = setup([textTurn('a'), textTurn('b'), textTurn('c'), textTurn('d')]);
   const saved = saveEnv();
   try {
     process.env.OPENROUTER_MODEL = 'old/model';
     delete process.env.AI_MODEL_BALANCED;
     await sayTuned(t.ai, 'ann', 'hi');
-    process.env.AI_MODEL_BALANCED = 'other/balanced';
+    process.env.AI_MODEL_FAST = 'other/fast';
     await sayTuned(t.ai, 'ann', 'hi', {preset: 'fast'});
     await sayTuned(t.ai, 'ann', 'hi', {preset: 'smart'});
-    assert.deepStrictEqual(t.calls.map(c => c.payload.model), ['inclusionai/ling-3.1-flash', 'other/balanced', 'other/balanced'],
-      'the preset in the body is ignored; OPENROUTER_MODEL is not read');
+    await sayTuned(t.ai, 'ann', 'hi', {preset: 'turbo'});
+    assert.deepStrictEqual(t.calls.map(c => c.payload.model),
+      ['inclusionai/ling-3.1-flash', 'other/fast', 'some/smart', 'inclusionai/ling-3.1-flash'],
+      'an unknown preset is balanced; OPENROUTER_MODEL is not read');
   } finally {
     restoreEnv(saved);
   }
 });
 
-test('pictures are offered by the balanced model in use, and the status check asks about it', async () => {
+test('pictures are offered by the model of the preset in use, and the status check asks about the preset it is given', async () => {
   const models = [{id: 'some/model', architecture: {input_modalities: ['text', 'image']}},
     {id: 'some/fast', architecture: {input_modalities: ['text']}}];
-  const t = setup([textTurn('a')], {models});
+  const t = setup([textTurn('a'), textTurn('b')], {models});
   await sayTuned(t.ai, 'ann', 'look', {preset: 'fast'});
-  assert.ok(toolNames(t.calls[0]).includes('view_picture'), 'the companion uses the balanced model, which takes pictures');
-  const status = JSON.parse((await getJson(t.ai, 'ann', '/collab/ai/status?projectId=5')).body);
-  assert.deepStrictEqual([status.configured, status.vision, status.beta], [true, true, {on: false, until: 0}]);
+  assert.ok(!toolNames(t.calls[0]).includes('view_picture'), 'the fast model takes no pictures here');
+  await sayTuned(t.ai, 'ann', 'look', {preset: 'balanced'});
+  assert.ok(toolNames(t.calls[1]).includes('view_picture'), 'the balanced model takes pictures');
+  const fast = JSON.parse((await getJson(t.ai, 'ann', '/collab/ai/status?projectId=5&preset=fast')).body);
+  const balanced = JSON.parse((await getJson(t.ai, 'ann', '/collab/ai/status?projectId=5&preset=balanced')).body);
+  assert.deepStrictEqual([fast.vision, balanced.vision, balanced.beta], [false, true, {on: false, until: 0}]);
 });
 
 test('subagents run one at a time, in the order the model asked for them: each one finishes before the next starts', async () => {
@@ -2133,14 +2143,14 @@ test('companion reasoning: a level is sent as reasoning effort with 32000 tokens
   assert.strictEqual(t.calls[1].payload.max_tokens, 8000);
 });
 
-test('max is no reasoning level any more: a request for it gets the default, and the body\'s other settings are ignored', async () => {
-  const t = setup([textTurn('a')]);
-  const evs = await sayTuned(t.ai, 'ann', 'hi', {reasoning: 'max', effort: 'high', runMode: 'ultracode', preset: 'smart',
-    provider: 'opencode'});
-  assert.ok(!('reasoning' in t.calls[0].payload), 'no reasoning key');
-  assert.strictEqual(t.calls[0].payload.max_tokens, 8000);
-  assert.strictEqual(t.calls[0].url, PROVIDERS.openrouter.url, 'provider is not read: OpenRouter, as no /beta is on');
-  assert.ok(!evs.some(e => e.type === 'status'), 'nothing is said about it');
+test('max reasoning is for the smart preset: it is sent there, and on any other preset it is high, with a note', async () => {
+  const t = setup([textTurn('a'), textTurn('b')]);
+  await sayTuned(t.ai, 'ann', 'hi', {reasoning: 'max', preset: 'smart'});
+  assert.deepStrictEqual(t.calls[0].payload.reasoning, {effort: 'max'});
+  assert.strictEqual(t.calls[0].payload.max_tokens, 32000);
+  const evs = await sayTuned(t.ai, 'ann', 'hi', {reasoning: 'max', preset: 'balanced'});
+  assert.deepStrictEqual(t.calls[1].payload.reasoning, {effort: 'high'});
+  assert.ok(evs.some(e => e.type === 'status' && /Max reasoning is only for Claude Haiku 5\.5/.test(e.text)), 'the person is told');
 });
 
 test('a 400 that does not mention effort or reasoning is not retried', async () => {
@@ -2292,19 +2302,19 @@ test('a preset named by its model in ai.env shows that model, not the built-in n
   }
 });
 
-test('the service is OpenRouter unless a person has /beta on and OpenCode Go has a key; AI_PROVIDER selects nothing', () => {
+test('the service is OpenRouter unless the person chooses OpenCode Go with /beta on and a key; AI_PROVIDER names the default', () => {
   const child = env => JSON.parse(execFileSync(process.execPath, ['-e',
-    "const a = require('./ai'); const {PROVIDERS, nameOf} = a; console.log(JSON.stringify({" +
-    'on: a.serviceFor(true).id, off: a.serviceFor(false).id, opencode: PROVIDERS.opencode.presets.balanced.model,' +
-    "fast: nameOf('fast', PROVIDERS.opencode), openrouter: Object.keys(PROVIDERS.openrouter.presets)}));"],
+    "const a = require('./ai'); const {PROVIDERS, usableServiceOf, nameOf} = a; console.log(JSON.stringify({" +
+    "on: usableServiceOf('opencode', true).id, off: usableServiceOf('opencode', false).id, dflt: usableServiceOf('', false).id," +
+    "opencode: PROVIDERS.opencode.presets.balanced.model, fast: nameOf('fast', PROVIDERS.opencode)," +
+    "openrouter: Object.keys(PROVIDERS.openrouter.presets)}));"],
   {cwd: __dirname + '/..', encoding: 'utf8',
     env: Object.assign({}, process.env, {OPENROUTER_URL: '', AI_PROVIDER: 'opencode', OPENCODE_API_KEY: ''}, env)}));
-  assert.deepStrictEqual(child({}), {on: 'openrouter', off: 'openrouter', opencode: 'step-5-preview-free',
-    fast: 'DeepSeek V4.1 Flash', openrouter: ['balanced', 'fast']}, 'AI_PROVIDER names nothing, and with no key OpenCode Go is not used');
+  assert.deepStrictEqual(child({}), {on: 'openrouter', off: 'openrouter', dflt: 'openrouter', opencode: 'step-5-preview-free',
+    fast: 'DeepSeek V4.1 Flash', openrouter: ['smart', 'balanced', 'fast']}, 'no key: OpenCode Go is not used');
   assert.strictEqual(child({OPENCODE_API_KEY: 'oc'}).on, 'opencode', '/beta on, with a key: OpenCode Go');
   assert.strictEqual(child({OPENCODE_API_KEY: 'oc'}).off, 'openrouter', 'without /beta: OpenRouter');
   assert.equal(PROVIDERS.opencode.vision, true, 'OpenCode Go takes pictures');
-  assert.ok(PROVIDERS.openrouter.presets.balanced.model.includes('ling'));
 });
 
 test('the Responses API request is built from the chat body, pictures and tool calls included', () => {
@@ -2371,8 +2381,8 @@ test('OpenCode Go requests carry a session header made from the person and the p
   await withOpenCodeKey('oc-test', async () => {
     const t = setup([textTurn('one'), textTurn('two')]);
     await say(t.ai, 'ann', '/beta ' + PIN_VALUE);
-    await sayTuned(t.ai, 'ann', 'hi');
-    await sayTuned(t.ai, 'bob', 'hi');
+    await sayTuned(t.ai, 'ann', 'hi', {provider: 'opencode'});
+    await sayTuned(t.ai, 'bob', 'hi', {provider: 'opencode'});
     const session = crypto.createHash('sha256').update('u-ann|5').digest('hex').slice(0, 32);
     assert.strictEqual(t.calls[0].headers['x-opencode-session'], session, 'the first 32 hex characters of sha256 of user|project');
     assert.strictEqual(t.calls[0].headers.authorization, 'Bearer oc-test');
@@ -2388,7 +2398,7 @@ test('the session header goes on the Responses API too, and on the notes on earl
     try {
       const t = setup([[{type: 'response.output_text.delta', delta: 'Hi there.'}, {type: 'response.completed', response: {}}]]);
       await say(t.ai, 'ann', '/beta ' + PIN_VALUE);
-      const evs = await sayTuned(t.ai, 'ann', 'hi');
+      const evs = await sayTuned(t.ai, 'ann', 'hi', {provider: 'opencode'});
       assert.strictEqual(t.calls[0].url, PROVIDERS.opencode.responsesUrl, 'the model answers on the Responses API');
       assert.strictEqual(t.calls[0].headers['x-opencode-session'], crypto.createHash('sha256').update('u-ann|5').digest('hex').slice(0, 32));
       assert.strictEqual(texts(evs), 'Hi there.');
@@ -2411,7 +2421,8 @@ test('the notes on earlier steps carry the session header too', async () => {
         if (i < 19) history.push({role: 'assistant', content: 'answer ' + i + ' ' + 'a'.repeat(2500)});
       }
       const res = fakeRes();
-      await t.ai.handle(fakeReq('/collab/ai/stream', 'POST', {projectId: '5', messages: history}, 'AppInventor=ann'), res);
+      await t.ai.handle(fakeReq('/collab/ai/stream', 'POST', {projectId: '5', provider: 'opencode', messages: history},
+        'AppInventor=ann'), res);
       assert.strictEqual(t.calls.length, 2, 'the notes, then the answer');
       const session = crypto.createHash('sha256').update('u-ann|5').digest('hex').slice(0, 32);
       assert.deepStrictEqual(t.calls.map(c => c.headers['x-opencode-session']), [session, session]);
@@ -2427,7 +2438,7 @@ test('when OpenCode Go refuses a request, the log says what the service said; th
     const refusal = JSON.stringify({type: 'error', error: {type: 'MissingSessionID', message: 'Missing x-opencode-session header, key oc-test'}});
     const t = setup([{status: 400, detail: refusal}, textTurn('never reached')], {log: m => lines.push(m)});
     await say(t.ai, 'ann', '/beta ' + PIN_VALUE);
-    const evs = await say(t.ai, 'ann', 'a private question about the blocks');
+    const evs = await sayTuned(t.ai, 'ann', 'a private question about the blocks', {provider: 'opencode'});
     const log = lines.join('\n');
     assert.match(log, /the AI service answered 400: Missing x-opencode-session header, key \(key\)/, 'the service\'s own message');
     assert.doesNotMatch(log, /oc-test/, 'a key the service repeats is not logged');
@@ -2526,7 +2537,7 @@ test('the fast subagent option sends subagents to the fast model; without it the
   await withOpenCodeKey('oc-test', async () => {
     const oc = setup(pieces());
     await say(oc.ai, 'ann', '/beta ' + PIN_VALUE);
-    await sayTuned(oc.ai, 'ann', 'a piece', {fastSubagent: true});
+    await sayTuned(oc.ai, 'ann', 'a piece', {fastSubagent: true, provider: 'opencode'});
     assert.deepStrictEqual(oc.calls.map(c => [c.url, c.payload.model]), [
       [PROVIDERS.opencode.url, 'step-5-preview-free'],
       [PROVIDERS.opencode.url, 'deepseek-v4.1-flash'],

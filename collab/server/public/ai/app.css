@@ -304,6 +304,9 @@ textarea::placeholder { color: var(--muted); }
 .pick { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; min-width: 0; }
 .pick.fast { cursor: pointer; }
 .pick.fast input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.effort { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); white-space: nowrap; cursor: pointer; }
+.effort input { width: 120px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.effort output { min-width: 52px; font-weight: 600; color: var(--text); }
 .pick select {
   appearance: none; -webkit-appearance: none; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--text);
   max-width: 250px; min-width: 0; padding: 4px 26px 4px 11px; border: 1px solid var(--line); border-radius: 999px;
