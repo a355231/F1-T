@@ -1837,6 +1837,10 @@ class Assistant {
     if (!p || p.userId !== me.userId || p.projectId !== projectId || this.now() - p.at > PROPOSAL_TTL_MS) {
       return json(404, {error: 'That suggestion is no longer available. Ask again.'});
     }
+    // A sync or another change is saving this project: this change waits, and the person asks again.
+    if (this.hub.flushing(projectId)) {
+      return json(409, {error: 'Another save or sync is in progress on this project. Try again in a moment.'});
+    }
     this.proposals.delete(id);
     if (p.full && !this.fullActive(me.userId, projectId)) {
       return json(403, {error: 'Full-app mode has ended, so this change cannot be applied. ' +

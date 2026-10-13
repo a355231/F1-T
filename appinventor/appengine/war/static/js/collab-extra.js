@@ -202,16 +202,23 @@
       case 'freeze':
         if (msg.flush) {
           saveThenFreeze(msg.applyId);
-          banner('restore', 'The AI helper is applying a change. Saving is paused for a moment; this page ' +
-              'reloads when the change is in.');
+          banner('restore', msg.sync
+            ? 'Syncing this project. Saving is paused for a moment; this page reloads when the sync is done.'
+            : 'The AI helper is applying a change. Saving is paused for a moment; this page reloads when the change is in.');
         } else {
           window.AICollab_frozen = true;
           banner('restore', (msg.by || 'A teammate') + ' is going back to an earlier version of ' +
               'this project. Saving is paused; the page reloads in a moment.');
         }
         break;
+      case 'unfreeze':
+        // A sync could not save everything, so nothing was reloaded: this page carries on as it was.
+        window.AICollab_frozen = false;
+        banner('restore');
+        break;
       case 'reload':
-        reloadSoon(msg.by === 'nobody' ? 'The AI helper\'s change could not be added. Reloading the saved project…' :
+        reloadSoon(msg.kind === 'sync' ? 'Syncing this project with the saved copy…' :
+            msg.by === 'nobody' ? 'The AI helper\'s change could not be added. Reloading the saved project…' :
             /AI helper/.test(msg.by || '') ? 'Loading the change the AI helper made…' :
             'Loading the restored version…');
         break;

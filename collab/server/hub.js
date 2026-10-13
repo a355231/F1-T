@@ -332,6 +332,13 @@ function onConnection(ws, me, cookie) {
       case 'cursor':
         hub.cursor(client.id, msg);
         break;
+      case 'sync-all': {
+        // A manual sync of the project (see Hub.syncAll in rooms.js). When it does not go through, the person who asked
+        // is told why; when it does, every page reloads.
+        const result = await hub.syncAll(client.id, String(msg.projectId || ''));
+        if (!result.ok) hub.send(client.id, {t: 'notice', text: result.message});
+        break;
+      }
       case 'flushed':
         // This tab has saved what it had, ready for an AI change (see Assistant.apply in ai.js). ok false means
         // its save failed, so the change must not go in.

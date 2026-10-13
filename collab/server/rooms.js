@@ -6,6 +6,8 @@
 // Each person gets red, blue or yellow (the first one nobody online is using); a fourth person
 // online at the same time would have to share a colour.
 const COLORS = ['#e53935', '#1e88e5', '#fdd835'];
+const crypto = require('crypto');
+
 const CURSOR_MIN_GAP_MS = 1000;
 const NOTICE_MIN_GAP_MS = 5000;
 
@@ -28,6 +30,7 @@ const LOCK_MS = 60 * 1000;
 const SEL_MIN_GAP_MS = 400;
 const DIGEST_FRESH_MS = 90 * 1000;
 const QUIET_MS = 5 * 1000;
+const SYNC_FLUSH_MS = 6 * 1000;   // how long a manual sync waits for every open tab to save what it has
 const RESYNC_MIN_GAP_MS = 60 * 1000;
 
 class Hub {
@@ -470,7 +473,8 @@ class Hub {
 
   // A backup was restored, or an AI change was written: start the project's session over and send everyone's page to
   // reload. Returns how many open tabs were told.
-  restored(projectId, byName) {
+  // kind says why (restore, or sync), so that each page can say so.
+  restored(projectId, byName, kind) {
     this.written(projectId);   // a tab that is not open now sees the new count when it joins
     const room = this.rooms.get(String(projectId));
     if (!room) return 0;
@@ -478,8 +482,39 @@ class Hub {
     room.seq = 0;
     room.backedSeq = 0;
     room.epoch = this.now().toString(36) + Math.random().toString(36).slice(2, 8);
-    for (const m of room.members) this.send(m, {t: 'reload', by: byName});
+    for (const m of room.members) this.send(m, {t: 'reload', by: byName, kind});
     return room.members.size;
+  }
+
+  // Whether a save is waiting on this project: a manual sync or an AI change (see awaitFlush).
+  flushing(projectId) {
+    const pid = String(projectId);
+    return [...this.flushWaits.values()].some(wait => wait.projectId === pid);
+  }
+
+  // A manual sync, asked for by someone who has the project open. Every open tab saves what it has, then every page
+  // reloads from the saved project, so they all show the same thing. It uses the same flush and reload as an AI change.
+  // It is refused while a save is still waiting on this project. A tab that cannot save stops it, and nothing reloads.
+  // Resolves {ok, message} for the person who asked.
+  async syncAll(id, projectId, ms = SYNC_FLUSH_MS) {
+    const pid = String(projectId);
+    const client = this.clients.get(id);
+    const room = this.rooms.get(pid);
+    if (!client || client.projectId !== pid || !room || !room.members.has(id)) {
+      return {ok: false, message: 'Open this project first, then sync it.'};
+    }
+    if (this.flushing(pid)) {
+      return {ok: false, message: 'Another sync or an AI change is still saving. Try again in a moment.'};
+    }
+    const applyId = crypto.randomBytes(6).toString('hex');
+    this.broadcastToProject(pid, {t: 'freeze', by: client.name, flush: true, sync: true, applyId});
+    const flushed = await this.awaitFlush(pid, applyId, ms);
+    if (!flushed.ok) {
+      this.broadcastToProject(pid, {t: 'unfreeze', applyId});
+      return {ok: false, message: 'A tab could not save what it had, so nothing was synced. Fix that tab, then sync again.'};
+    }
+    const told = this.restored(pid, client.name, 'sync');
+    return {ok: true, message: 'Synced. ' + told + ' open tab(s) are reloading from the saved project.'};
   }
 
   // Before an AI change goes in, every open tab saves what it has and says so (ackFlush). Resolves {ok: true} when
@@ -496,7 +531,7 @@ class Hub {
         resolve(result);
       };
       const timer = setTimeout(() => finish({ok: false}), ms);
-      this.flushWaits.set(applyId, {waiting, finish});
+      this.flushWaits.set(applyId, {waiting, finish, projectId: String(projectId)});
     });
   }
 

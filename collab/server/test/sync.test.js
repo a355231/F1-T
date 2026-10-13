@@ -259,3 +259,67 @@ test('selections reach the others, are rate limited and vanish when the person l
   hub.leave(a.id);
   assert.strictEqual(all(b.id, 'sel').pop().blockId, null);
 });
+
+// Two people with the project open, and what each open page was sent.
+function openTwo() {
+  const inbox = {};
+  const hub = new Hub((id, msg) => (inbox[id] = inbox[id] || []).push(msg), () => 1000);
+  const a = hub.addClient({userId: 'u1', email: 'a@team.local'});
+  const b = hub.addClient({userId: 'u2', email: 'b@team.local'});
+  hub.join(a.id, '5', {projectName: 'P', ownerEmail: 'a@team.local'});
+  hub.join(b.id, '5', {projectName: 'P', ownerEmail: 'a@team.local'});
+  return {hub, a, b, inbox};
+}
+
+test('a manual sync: every open page saves first, then all of them reload from the saved project', async () => {
+  const {hub, a, b, inbox} = openTwo();
+  const synced = hub.syncAll(a.id, '5', 5000);
+  const freeze = inbox[a.id].find(m => m.t === 'freeze');
+  assert.ok(freeze && freeze.flush && freeze.sync, 'the pages are asked to save, and told it is a sync');
+  assert.ok(inbox[b.id].some(m => m.t === 'freeze' && m.applyId === freeze.applyId), 'b is asked too');
+  assert.ok(!inbox[a.id].some(m => m.t === 'reload'), 'nothing reloads before the saves are in');
+  hub.ackFlush(a.id, freeze.applyId);
+  hub.ackFlush(b.id, freeze.applyId);
+  const result = await synced;
+  assert.strictEqual(result.ok, true);
+  for (const id of [a.id, b.id]) {
+    assert.deepStrictEqual(inbox[id].filter(m => m.t === 'reload').map(m => m.kind), ['sync'], 'each page reloads once');
+  }
+});
+
+test('a sync stops when a page cannot save: nothing reloads, the pages are unfrozen, and the person is told why', async () => {
+  const {hub, a, b, inbox} = openTwo();
+  const synced = hub.syncAll(a.id, '5', 40);
+  const freeze = inbox[a.id].find(m => m.t === 'freeze');
+  hub.ackFlush(a.id, freeze.applyId);   // b stays silent
+  const result = await synced;
+  assert.strictEqual(result.ok, false);
+  assert.match(result.message, /could not save/);
+  for (const id of [a.id, b.id]) {
+    assert.ok(inbox[id].some(m => m.t === 'unfreeze' && m.applyId === freeze.applyId), 'every page is unfrozen');
+    assert.ok(!inbox[id].some(m => m.t === 'reload'), 'no page reloads');
+  }
+});
+
+test('a sync is refused while a save is waiting on the project, and for someone who does not have it open', async () => {
+  const {hub, a, b, inbox} = openTwo();
+  const first = hub.syncAll(a.id, '5', 5000);
+  const applyId = inbox[a.id].find(m => m.t === 'freeze').applyId;
+  assert.match((await hub.syncAll(b.id, '5', 5000)).message, /still saving/, 'a second sync waits its turn');
+  const outsider = hub.addClient({userId: 'u3', email: 'c@team.local'});
+  assert.match((await hub.syncAll(outsider.id, '5', 5000)).message, /Open this project first/);
+  hub.ackFlush(a.id, applyId);
+  hub.ackFlush(b.id, applyId);
+  assert.strictEqual((await first).ok, true);
+});
+
+test('an AI change and a sync do not overlap: while one is saving, the other is refused', async () => {
+  const {hub, a, b} = openTwo();
+  const aiSave = hub.awaitFlush('5', 'ai1', 5000);
+  assert.strictEqual(hub.flushing('5'), true);
+  assert.match((await hub.syncAll(a.id, '5', 5000)).message, /still saving/);
+  hub.ackFlush(a.id, 'ai1');
+  hub.ackFlush(b.id, 'ai1');
+  await aiSave;
+  assert.strictEqual(hub.flushing('5'), false);
+});

@@ -1138,6 +1138,16 @@
       };
       actions.appendChild(link);
       actions.appendChild(el('br'));
+      // Makes every open page save what it has, then reload from the saved project, so all of them show the same thing.
+      var syncLink = el('a', '', 'Sync everyone on this project');
+      syncLink.title = 'Every open page saves what it has, then reloads from the saved project';
+      syncLink.onclick = function(ev) {
+        ev.stopPropagation();
+        send({t: 'sync-all', projectId: C.joined});
+        showNotice('Syncing everyone on this project…');
+      };
+      actions.appendChild(syncLink);
+      actions.appendChild(el('br'));
     }
     var codeLink = el('a', '', 'Change team code…');
     codeLink.onclick = function(ev) {
