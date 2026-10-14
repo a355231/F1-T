@@ -17,6 +17,7 @@
   var CURSOR_MS = 5000;          // how often your mouse position is shared
   var CURSOR_GLIDE_MS = 1200;    // a teammate's cursor glides to its new spot over this long
   var OPS_PER_TICK = 300;
+  var OUTBOX_MAX = 5000;      // block edits kept while the project is not joined; past this the oldest go first
 
   var C = window.AICollab = {
     me: null,
@@ -33,13 +34,16 @@
     notice: '',
     expanded: false,
     cursors: {},       // client id -> {screen, editor, x, y, fresh}
-    stats: {cursorsSent: 0, cursorsReceived: 0},
+    stats: {cursorsSent: 0, cursorsReceived: 0, outboxSent: 0, outboxDropped: 0, outboxStale: 0},
   };
 
   var ws = null;
   var failures = 0;
   var lastWhere = '';
   var lastCursorKey = 'none';
+  var outbox = [];            // changes made while their project was not joined, in the order they were made
+  var outboxLost = false;     // true once the outbox has had to drop its oldest change, until the next flush
+  var writesSeen = {};        // project id -> the write count the hub gave this page when it last joined that project
 
   // ---- hub connection ----
 
@@ -91,10 +95,13 @@
     setTimeout(connect, Math.min(15000, 1000 * failures));
   }
 
+  // Returns false when the message could not be handed to an open connection, so that the caller can keep it.
   function send(msg) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(msg));
+      return true;
     }
+    return false;
   }
 
   function onMessage(msg) {
@@ -131,6 +138,10 @@
         updateRole();
         (msg.log || []).forEach(enqueue);
         processQueues();
+        if (typeof msg.writes === 'number') {
+          writesSeen[C.joined] = msg.writes;
+        }
+        flushOutbox(C.joined, msg.epoch, msg.writes);
         break;
       case 'cursor':
         C.stats.cursorsReceived++;
@@ -401,6 +412,64 @@
     }
   };
 
+  // A change is sent at once when its project is joined. Otherwise it is kept, in order, and sent when the project is joined
+  // again, so that a dropped connection does not lose what was done while it was down. It is kept with the write count its
+  // project had when this page last joined; flushOutbox uses that to tell whether an AI change or a restore went in since.
+  function sendOrKeep(op) {
+    if (C.isJoined(op.projectId) && send({t: 'op', projectId: op.projectId, screen: op.screen, kind: op.kind,
+        data: op.data, epoch: C.epoch})) {
+      return;
+    }
+    if (outbox.length >= OUTBOX_MAX) {
+      outbox.shift();
+      C.stats.outboxDropped++;
+      outboxLost = true;
+    }
+    outbox.push({projectId: String(op.projectId), screen: op.screen, kind: op.kind, data: op.data,
+        writes: writesSeen[String(op.projectId)]});
+  }
+
+  // Sends the kept changes of the project that has just been joined, in the order they were made. A change whose project
+  // changed meanwhile (an AI change or a restore moved its write count on) would put an old change back, so it is not sent,
+  // and the person is told. If the connection fails part way, the rest stay kept, in order.
+  function flushOutbox(projectId, epoch, writes) {
+    var keep = [];
+    var stale = 0;
+    var sending = true;
+    outbox.forEach(function(op) {
+      if (String(op.projectId) !== String(projectId)) {
+        keep.push(op);
+        return;
+      }
+      if (op.writes !== undefined && writes !== undefined && op.writes !== writes) {
+        stale++;
+        return;
+      }
+      if (sending && send({t: 'op', projectId: op.projectId, screen: op.screen, kind: op.kind, data: op.data,
+          epoch: epoch})) {
+        C.stats.outboxSent++;
+      } else {
+        sending = false;
+        keep.push(op);
+      }
+    });
+    outbox = keep;
+    var notes = [];
+    if (stale) {
+      C.stats.outboxStale += stale;
+      notes.push('Some edits made while the team server was unreachable were not sent, because the project was restored or ' +
+          'changed meanwhile, or the team server started over. The saved project has the current version.');
+    }
+    if (outboxLost) {
+      outboxLost = false;
+      notes.push('Some edits made while the team server was unreachable could not be kept, because there were too many. ' +
+          'The saved project has the rest.');
+    }
+    if (notes.length) {
+      showNotice(notes.join(' '));
+    }
+  }
+
   C.onBlocklyEvent = function(workspace, e) {
     if (C.onUiEvent && e && e.type === 'selected') {
       C.onUiEvent(workspace, e);
@@ -414,7 +483,7 @@
     }
     C.registerWorkspace(workspace);
     var where = splitFormName(workspace.formName);
-    if (!where || !C.isJoined(where.projectId)) {
+    if (!where) {
       return;
     }
     if (workspace.collabHeld) {
@@ -429,19 +498,17 @@
     } catch (err) {
       return;
     }
-    send({t: 'op', projectId: where.projectId, screen: where.screen, kind: 'blocks', data: json, epoch: C.epoch});
+    sendOrKeep({projectId: where.projectId, screen: where.screen, kind: 'blocks', data: json});
   };
 
+  // Designer and tree changes go through the same ordered outbox as block edits: a component rename whose block changes are
+  // kept must have its designer change kept too, or the two copies disagree after the rejoin.
   C.sendDesignerOp = function(projectId, screen, op) {
-    if (C.isJoined(projectId)) {
-      send({t: 'op', projectId: String(projectId), screen: screen, kind: 'designer', data: op, epoch: C.epoch});
-    }
+    sendOrKeep({projectId: String(projectId), screen: screen, kind: 'designer', data: op});
   };
 
   C.sendTreeChanged = function(projectId) {
-    if (C.isJoined(projectId)) {
-      send({t: 'op', projectId: String(projectId), screen: '', kind: 'tree', data: {}, epoch: C.epoch});
-    }
+    sendOrKeep({projectId: String(projectId), screen: '', kind: 'tree', data: {}});
   };
 
   C.send = send;

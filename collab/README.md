@@ -305,6 +305,16 @@ their designer differs, their page reloads from the main client's saved copy. A 
 re-synced more than twice in 10 minutes, so a harmless difference cannot cause a loop. A teammate's
 edits that cannot be applied for 30 seconds are replayed from the hub's log.
 
+The pages stay in step over time because of three rules. A repair keeps the block ids, so that
+later edits still find their blocks (a repair without them made the pages drift apart again). A
+change made while the connection is down (blocks, designer, or a component rename or screen change)
+is kept, in order, and sent when the page rejoins; if an AI change or a restore went in meanwhile,
+the kept changes are not sent, and the person is told. A rename's block changes and its designer
+change always travel together. After an update, reload each open App Inventor tab once: a tab
+opened before the update keeps the old script until it reloads. The rules are tested by
+`collab/server/test/page-sync.test.js`, which runs three pages in headless Chromium (it needs
+`CHROMIUM`, or Chromium at `/opt/pw-browsers/chromium`).
+
 **Backups and going back.** While a project is open, it is backed up **every minute, but only if it
 changed** (a backup is a zip of the project's source files in `/opt/appinventor/backups/<project>/`).
 All of the last hour is kept, then one per 10 minutes for a day, one per hour for a week and one

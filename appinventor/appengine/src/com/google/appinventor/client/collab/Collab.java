@@ -178,9 +178,10 @@ public final class Collab {
     return true;
   }
 
+  // Not only while the project is joined: a change made while it is not is kept by the page and sent on the rejoin (see
+  // collab.js sendOrKeep), so that a rename's block changes and its designer change always travel together.
   private static boolean shouldSend(YaFormEditor editor) {
-    return !applying && editor.isLoadComplete()
-        && isJoined(String.valueOf(editor.getProjectId()));
+    return !applying && editor.isLoadComplete();
   }
 
   private static void send(YaFormEditor editor, String op, String uuid, String a, String b,
@@ -540,10 +541,6 @@ public final class Collab {
 
   private static native void setJsApplying(boolean value)/*-{
     $wnd.AICollab_applying = value;
-  }-*/;
-
-  private static native boolean isJoined(String projectId)/*-{
-    return !!($wnd.AICollab && $wnd.AICollab.isJoined(projectId));
   }-*/;
 
   private static native void sendOp(String projectId, String screen, String op, String uuid,

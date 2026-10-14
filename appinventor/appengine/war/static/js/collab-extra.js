@@ -113,7 +113,7 @@
   // Reloads this page to show a change that is in. Once only. Nothing is saved on the way out: the saves were made
   // before the change went in, and saving now would write the old copy over it.
   var reloading = false;
-  var joinedWrites = null;   // the hub's AI change count when this page joined; null until it first joins
+  var joinedWrites = {};     // project id -> the hub's AI change count when this page last joined that project
   function reloadSoon(text) {
     window.AICollab_frozen = true;
     banner('restore', text);
@@ -140,13 +140,14 @@
   C.onExtra = function(msg) {
     switch (msg.t) {
       case 'joined':
-        // The hub counts the AI changes to the project. A count higher than the one this page joined with means a change
-        // went in while this page was away, so it reloads before it saves anything.
+        // The hub counts the AI changes to each project. A count higher than the one this page joined that project with
+        // means a change went in while this page was away, so it reloads before it saves anything.
         if (typeof msg.writes === 'number') {
-          if (joinedWrites !== null && msg.writes > joinedWrites) {
+          var before = joinedWrites[msg.projectId];
+          if (before !== undefined && msg.writes > before) {
             reloadSoon('Loading the change the AI helper made…');
           }
-          joinedWrites = msg.writes;
+          joinedWrites[msg.projectId] = msg.writes;
         }
         break;
       case 'joined':
@@ -350,7 +351,9 @@
       var ws = C.workspaces[C.joined + '_' + msg.screen];
       if (ws) {
         try {
-          out.blocks = Blockly.Xml.domToText(Blockly.Xml.workspaceToDom(ws, true));
+          // The copy keeps the block ids. Later edits name their blocks by id; a copy without them makes this page
+          // skip those edits as already applied, so the pages drift apart again after every repair.
+          out.blocks = Blockly.Xml.domToText(Blockly.Xml.workspaceToDom(ws));
         } catch (e) {
           out.blocks = null;
         }

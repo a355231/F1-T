@@ -1,0 +1,159 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>sync simulation</title></head>
+<body><pre id="out">starting</pre>
+<script>
+// The hub is the real rooms.js (its Hub class). The routing below mirrors what hub.js does with each message type. The
+// scenario runs in virtual time (Chromium's --virtual-time-budget), so the 30 s syncer and the quiet periods are exact.
+//   normal: bob's edits made while he is offline are kept, and sent when he rejoins.
+//   stale:  an AI change (here: the project's write count moves on) goes in while he is offline, so his kept edits are dropped.
+var params = new URLSearchParams(location.search);
+var PAGE = params.get('page');        // collab.js and collab-extra.js
+var HUB = params.get('hub');          // rooms.js
+var BLOCKLY = params.get('blockly');  // the Blockly bundle
+var SCENARIO = params.get('scenario') || 'normal';
+var PARTS = ['ann', 'bob', 'cy'];
+var PHASES = [[8000, 60000], [120000, 180000]];   // when people edit: before the first repair, and again after it
+var blockedSet = {}, dropNext = {};
+var module = {exports: {}};
+function require() { return {}; }
+</script>
+<script>document.write('<script src="' + HUB + '/rooms.js"><\/script>');</script>
+<script>
+// rooms.js declares Hub at top level
+var out = [];
+function say(s) { out.push(s); document.getElementById('out').textContent = out.join('\n'); }
+var stats = {resyncs: 0, reloads: 0, syncs: 0, digests: 0, snapshots: 0, ops: 0, lost: 0, errors: []};
+window.onerror = function(m, src, line) { stats.errors.push('sim: ' + m + ' (line ' + line + ')'); };
+var byLabel = {}, byClient = {}, frames = {};
+var hub = new Hub(function(clientId, msg) {
+  if (msg.t === 'resync') stats.resyncs++;
+  if (msg.t === 'reload') stats.reloads++;
+  if (msg.t === 'sync') stats.syncs++;
+  var p = byClient[clientId];
+  if (!p) return;
+  setTimeout(function() {
+    if (p.socket.readyState === 1 && p.socket.onmessage) p.socket.onmessage({data: JSON.stringify(msg)});
+  }, 0);
+}, function() { return Date.now(); }, function() { return true; });
+var outageCreates = [];
+window.__sim = {
+  attach: function(label, socket) {
+    var client = hub.addClient({userId: label, email: label + '@test.example'});
+    var p = {label: label, clientId: client.id, socket: socket};
+    byLabel[label] = p;
+    byClient[client.id] = p;
+    hub.welcome(client.id);
+  },
+  route: function(label, data) {
+    var p = byLabel[label];
+    if (!p) return;
+    var msg;
+    try { msg = JSON.parse(data); } catch (e) { return; }
+    if (msg.t === 'op' && dropNext[label] > 0) { dropNext[label]--; stats.lost++; return; }   // lost in transit
+    switch (msg.t) {
+      case 'join': hub.join(p.clientId, String(msg.projectId), {projectName: 'Proj', ownerEmail: 'owner@test.example'}); break;
+      case 'leave': hub.leave(p.clientId); break;
+      case 'presence': hub.presence(p.clientId, msg); break;
+      case 'cursor': hub.cursor(p.clientId, msg); break;
+      case 'op': stats.ops++; hub.op(p.clientId, msg); break;
+      case 'digest': stats.digests++; hub.digest(p.clientId, msg); break;
+      case 'snapshot': stats.snapshots++; hub.snapshot(p.clientId, msg); break;
+      default: break;
+    }
+  },
+  drop: function(label) {
+    var p = byLabel[label];
+    if (!p) return;
+    delete byLabel[label];
+    delete byClient[p.clientId];
+    p.socket.readyState = 2;   // CLOSING: the page still thinks it is connected for a moment
+    hub.removeClient(p.clientId);
+    setTimeout(function() { p.socket.readyState = 3; if (p.socket.onclose) p.socket.onclose(); }, 2000);
+  },
+  blocked: function(l) { return !!blockedSet[l]; },
+  ready: function(label) {
+    readyCount++;
+    if (readyCount < PARTS.length) makeFrame(readyCount); else startScenario();
+  },
+  error: function(m) { stats.errors.push(m); },
+};
+// The pages are made one after another, each when the one before it is ready, and the scenario starts when all of them
+// are. So the order they join in, and therefore the main client, does not depend on how fast the frames load.
+var readyCount = 0;
+function makeFrame(index) {
+  var l = PARTS[index];
+  var f = document.createElement('iframe');
+  f.width = 820; f.height = 500;
+  f.src = 'participant.html?src=' + encodeURIComponent(PAGE) + '&blockly=' + encodeURIComponent(BLOCKLY) + '&label=' + l;
+  document.body.appendChild(f);
+  frames[l] = f;
+}
+makeFrame(0);
+setInterval(function() { hub.syncTick(); }, 30000);   // the hub's persistent syncer, as hub.js runs it
+function P(l) { return frames[l] && frames[l].contentWindow && frames[l].contentWindow.P; }
+function report(tag) {
+  var room = hub.rooms.get('1');
+  var lp = room && room.leader ? byClient[room.leader] : null;
+  var ref = lp ? P(lp.label) : null;
+  say(tag + ': main client ' + (lp ? lp.label : 'none'));
+  PARTS.forEach(function(l) {
+    var p = P(l);
+    if (!p) { say('  ' + l + ': not loaded'); return; }
+    var sameIds = !!ref && p.blocks().join(',') === ref.blocks().join(',');
+    var sameContent = !!ref && p.digest(false) === ref.digest(false);
+    var sameWithIds = !!ref && p.digest(true) === ref.digest(true);
+    say('  ' + l + ': ' + p.blocks().length + ' blocks; same block ids as main: ' + sameIds +
+        '; same content: ' + sameContent + '; same content with ids: ' + sameWithIds +
+        '; connected: ' + (byLabel[l] ? 'yes' : 'no') + '; ' + p.stats());
+  });
+}
+// Everything below is timed from the moment every page is ready.
+var n = 0, t0 = 0, scenarioStarted = false;
+function editing(ms) { return PHASES.some(function(ph) { return ms >= ph[0] && ms < ph[1]; }); }
+function editTick() {
+  var ms = Date.now() - t0;
+  if (editing(ms)) {
+    var l = PARTS[n % PARTS.length];
+    n++;
+    var p = P(l);
+    if (p) {
+      // bob's first edit while he is offline is a new block, so that the outage has something to deliver or drop
+      var outage = !!blockedSet[l];
+      var kind = p.edit(outage && !outageCreates.length);
+      if (outage && kind === 'create') outageCreates.push(p.createdId());
+    }
+  }
+  if (ms < 180000) setTimeout(editTick, 1500);
+}
+function startScenario() {
+  if (scenarioStarted) return;
+  scenarioStarted = true;
+  t0 = Date.now();
+  say('all pages are ready (' + SCENARIO + ')');
+  setTimeout(editTick, 8000);   // after everyone has joined
+  setTimeout(function() { blockedSet.bob = true; window.__sim.drop('bob'); say('bob loses his connection (edits continue)'); }, 20000);
+  setTimeout(function() {
+    delete blockedSet.bob;
+    if (SCENARIO === 'stale') {
+      hub.writes.set('1', (hub.writes.get('1') || 0) + 1);   // an AI change went in while bob was away
+      say('an AI change goes in while bob is away');
+    }
+    say('bob can connect again');
+  }, 35000);
+  setTimeout(function() { dropNext.cy = 2; say("two of cy's edits are lost in transit"); }, 45000);
+  setTimeout(function() { report('at 63s'); }, 63000);
+  setTimeout(function() { report('at 300s'); }, 300000);
+  setTimeout(function() {
+    report('final');
+    var room = hub.rooms.get('1');
+    var delivered = room ? room.log.filter(function(e) {
+      return e.name === 'bob' && e.kind === 'blocks' && e.data && e.data.type === 'create' && outageCreates.indexOf(e.data.blockId) >= 0;
+    }).length : 0;
+    say('bob outage creations: ' + outageCreates.length + '; reached the hub: ' + delivered);
+    say('hub: resyncs ' + stats.resyncs + ', reloads ' + stats.reloads + ', syncs ' + stats.syncs + ', digests ' +
+        stats.digests + ', snapshots ' + stats.snapshots + ', ops ' + stats.ops + ', lost ' + stats.lost);
+    say('page errors: ' + (stats.errors.length ? stats.errors.join(' | ') : 'none'));
+    say('done');
+  }, 420000);
+}
+</script></body></html>

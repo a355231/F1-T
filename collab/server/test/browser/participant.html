@@ -1,0 +1,105 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>participant</title></head>
+<body style="margin:0;font-family:sans-serif"><div id="ws" style="width:800px;height:480px"></div>
+<script>
+// One App Inventor page for the sync test (../page-sync.test.js): the real collab.js and collab-extra.js on the real
+// Blockly bundle. Edits are Blockly events, and reach C.onBlocklyEvent through the same change listener the editor uses.
+// The socket is a stand-in: the parent page's hub answers it.
+var params = new URLSearchParams(location.search);
+var SRC = params.get('src');          // collab.js and collab-extra.js
+var BLOCKLY = params.get('blockly');  // the Blockly bundle
+var LABEL = params.get('label');
+window.onerror = function(m, s, l) { parent.__sim.error(LABEL + ': ' + m + ' (line ' + l + ')'); };
+// The socket that collab.js opens. A blocked network makes the connection fail, and collab.js tries again later.
+function FakeWebSocket(url) {
+  var self = this;
+  this.readyState = 0;
+  if (parent.__sim.blocked(LABEL)) {
+    setTimeout(function() { self.readyState = 3; if (self.onclose) self.onclose(); }, 0);
+    return;
+  }
+  setTimeout(function() { self.readyState = 1; if (self.onopen) self.onopen(); }, 0);
+  parent.__sim.attach(LABEL, this);
+}
+FakeWebSocket.OPEN = 1;
+FakeWebSocket.prototype.send = function(data) { if (this.readyState === 1) parent.__sim.route(LABEL, data); };
+FakeWebSocket.prototype.close = function() { this.readyState = 3; };
+window.WebSocket = FakeWebSocket;
+// The App Inventor side of the page, as collab.js and collab-extra.js call it.
+window.AICollab_getContext = function() { return '1\nProj\nScreen1\nBlocks'; };
+window.AICollab_isScreenReady = function() { return true; };
+window.AICollab_designerContent = function() { return ''; };
+window.AICollab_applyDesignerOp = function() { return 'ok'; };
+window.AICollab_setMain = function() {};
+window.AICollab_saveNow = function() {};
+</script>
+<script>document.write('<script src="' + BLOCKLY + '"><\/script>');</script>
+<script>document.write('<script src="' + SRC + '/collab.js"><\/script><script src="' + SRC + '/collab-extra.js"><\/script>');</script>
+<script>
+Blockly.Blocks['repro_text'] = {init: function() {
+  this.appendDummyInput().appendField(new Blockly.FieldTextInput('a'), 'TXT');
+}};
+var ws = Blockly.inject('ws', {});
+ws.formName = '1_Screen1';
+var C = window.AICollab;
+C.registerWorkspace(ws);
+ws.addChangeListener(function(e) { C.onBlocklyEvent(ws, e); });   // the editor's own listener
+// Random edits, seeded by the label so that every run makes the same ones. A local edit is reported to the page at once,
+// in the same turn: Blockly's own events for it are switched off while the edit is made, so that none is reported twice,
+// and its timing does not depend on the browser's event queue. Changes applied from a teammate still go through Blockly's
+// events and the change listener above, so the page's echo guard is exercised too.
+var seed = 0;
+for (var i = 0; i < LABEL.length; i++) seed = (seed * 31 + LABEL.charCodeAt(i)) >>> 0;
+function rnd() { seed = (seed * 1103515245 + 12345) >>> 0; return (seed >>> 8) / 16777216; }
+var counter = 0, lastCreated = null;
+function edit(forceCreate) {
+  var blocks = ws.getAllBlocks(false);
+  var r = rnd();
+  var kind, ev, b;
+  Blockly.Events.disable();
+  try {
+    if (forceCreate || !blocks.length || (r < 0.4 && blocks.length < 40)) {
+      var created = ws.newBlock('repro_text');
+      created.setFieldValue(LABEL + (++counter), 'TXT');
+      lastCreated = created.id;
+      ev = new Blockly.Events.BlockCreate(created);
+      kind = 'create';
+    } else {
+      b = blocks[Math.floor(rnd() * blocks.length)];
+      if (r < 0.75) {
+        var old = b.getFieldValue('TXT');
+        b.setFieldValue(LABEL + (++counter), 'TXT');
+        ev = new Blockly.Events.BlockChange(b, 'field', 'TXT', old, b.getFieldValue('TXT'));
+        kind = 'change';
+      } else if (r < 0.9) {
+        ev = new Blockly.Events.BlockMove(b);
+        b.moveBy(10, 10);
+        ev.recordNew();
+        kind = 'move';
+      } else {
+        ev = new Blockly.Events.BlockDelete(b);
+        b.dispose(false);
+        kind = 'delete';
+      }
+    }
+  } finally {
+    Blockly.Events.enable();
+  }
+  C.onBlocklyEvent(ws, ev);
+  return kind;
+}
+window.P = {
+  edit: edit,
+  createdId: function() { return lastCreated; },
+  hasBlock: function(id) { return !!ws.getBlockById(id); },
+  blocks: function() { return ws.getAllBlocks(false).map(function(b) { return b.id; }).sort(); },
+  digest: function(withIds) {
+    var dom = Blockly.Xml.workspaceToDom(ws, !withIds), parts = [];
+    for (var n = dom.firstChild; n; n = n.nextSibling) parts.push(Blockly.Xml.domToText(n));
+    parts.sort();
+    return parts.join('\n');
+  },
+  stats: function() { return JSON.stringify(C.stats); },
+};
+parent.__sim.ready(LABEL);
+</script></body></html>
