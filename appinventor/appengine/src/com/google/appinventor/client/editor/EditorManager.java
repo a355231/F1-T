@@ -254,11 +254,14 @@ public final class EditorManager {
       return;
     }
 
-    // Collect the files that need to be saved.
+    // Collect the files that need to be saved. A file that is not saved here stays dirty: it is saved when this client
+    // is main for the project, rather than being forgotten along with the rest.
     List<FileDescriptorWithContent> filesToSave = new ArrayList<FileDescriptorWithContent>();
+    Set<FileEditor> notSaved = new HashSet<FileEditor>();
     for (FileEditor fileEditor : dirtyFileEditors) {
       if (!Collab.mayAutoSave(fileEditor.getProjectId())) {
-        continue;  // a teammate's client is main for this project and saves it
+        notSaved.add(fileEditor);  // a teammate's client is main for this project and saves it
+        continue;
       }
       FileDescriptorWithContent fileContent = new FileDescriptorWithContent(
           fileEditor.getProjectId(), fileEditor.getFileId(), fileEditor.getRawFileContent());
@@ -266,6 +269,7 @@ public final class EditorManager {
       pendingFileEditors.put(fileEditor.getFileId(), fileEditor); // pending save
     }
     dirtyFileEditors.clear();
+    dirtyFileEditors.addAll(notSaved);
 
     // Collect the project settings that need to be saved.
     List<ProjectSettings> projectSettingsToSave = new ArrayList<ProjectSettings>();

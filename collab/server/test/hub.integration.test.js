@@ -15,10 +15,19 @@ const os = require('node:os');
 let dataDir;
 
 let upstream, hubProcess, hubPort, externalPort, lastCodeChange;
+let hubLog = '';   // what the hub wrote to its error output
 const backupCalls = [];
 const kicked = [];
 const hits = {};
+const accessCalls = {};
 const BIG = 'function f(){return 1;}\n'.repeat(2000);
+
+// Sends the start of a reply and then cuts the connection, as App Inventor does when it restarts part way through.
+function cutReply(res, start) {
+  res.writeHead(200, {'content-type': 'application/json', 'content-length': String(start.length + 1000)});
+  res.write(start);
+  setTimeout(() => res.destroy(), 50);
+}
 
 function listen(server) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
@@ -37,15 +46,32 @@ test.before(async () => {
       return res.end('{}');
     }
     if (url.pathname === '/ode/collab/whoami') {
+      if (name === 'slow') return setTimeout(() => res.end(JSON.stringify({userId: 'u-slow', email: 'slow@team.local'})), 1500);
+      if (name === 'cut') return cutReply(res, '{"userId":"u-cut"');
       return res.end(JSON.stringify({userId: 'u-' + name, email: name + '@team.local'}));
     }
     if (url.pathname === '/ode/collab/access') {
+      const pid = url.searchParams.get('projectId');
+      accessCalls[pid] = (accessCalls[pid] || 0) + 1;
+      if (pid === '501') return setTimeout(() => res.end(JSON.stringify({ok: true, projectName: 'Slow', ownerEmail: ''})), 800);
+      if (pid === '503' && accessCalls[pid] === 1) {
+        res.statusCode = 500;
+        return res.end('{"error":"busy"}');
+      }
+      if (pid === '504') {
+        res.statusCode = 403;
+        return res.end('{"error":"no access to project"}');
+      }
       return res.end(JSON.stringify({ok: true, projectName: 'Pong', ownerEmail: 'ann@team.local'}));
     }
     if (url.pathname === '/ode/collab/backup' && req.method === 'POST') {
-      backupCalls.push({project: url.searchParams.get('projectId'), user: name});
+      const project = url.searchParams.get('projectId');
+      backupCalls.push({project, user: name});
+      if (project === '999') return res.end(JSON.stringify({ok: true, enabled: false, id: null}));
       return res.end(JSON.stringify({ok: true, enabled: true, id: '1-aaaaaaaa'}));
     }
+    if (url.pathname === '/ode/cut') return cutReply(res, '{"rows":"');
+    if (url.pathname === '/ode/stall') return;   // never answers
     if (url.pathname === '/ode/collab/kick' && req.method === 'POST') {
       kicked.push(url.searchParams.get('name'));
       return res.end(JSON.stringify({ok: true, userId: 'u-' + url.searchParams.get('name')}));
@@ -80,10 +106,11 @@ test.before(async () => {
   externalPort = hubPort + 10000;
   hubProcess = spawn('node', [path.join(__dirname, '..', 'hub.js')], {
     env: Object.assign({}, process.env, {PORT: String(hubPort), HOST: '127.0.0.1',
-      EXTERNAL_PORT: String(externalPort), BACKUP_MS: '300', AI_DATA_DIR: dataDir,
+      EXTERNAL_PORT: String(externalPort), BACKUP_MS: '300', HEALTH_MS: '300', AI_DATA_DIR: dataDir,
       AI_UPSTREAM: 'http://127.0.0.1:' + upstreamPort}),
-    stdio: ['ignore', 'pipe', 'inherit'],
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
+  hubProcess.stderr.on('data', d => { hubLog += String(d); });
   await new Promise((resolve, reject) => {
     hubProcess.stdout.on('data', d => String(d).includes('collaboration hub') && resolve());
     hubProcess.on('exit', code => reject(new Error('hub exited with ' + code)));
@@ -310,6 +337,167 @@ test('a restored backup moves the write count, so a tab that joins afterwards kn
   bob.send({t: 'join', projectId: '81'});
   assert.ok(await until(() => bob.has('joined')), 'bob joined');
   assert.ok(bob.last('joined').writes > before, 'the count moved up');
+  ann.ws.close();
+  bob.ws.close();
+});
+
+// Fails a test that waits too long, rather than letting the whole file hang.
+function within(promise, ms) {
+  return Promise.race([promise, new Promise((resolve, reject) => setTimeout(() => reject(new Error('no answer in time')), ms))]);
+}
+
+test('the Pi-only pages stay closed to a tunnel however their path is spelled', async () => {
+  const spellings = ['/%5Fah/admin', '/%5fah/admin', '/%255Fah/admin', '/_AH/admin', '/x/../_ah/admin',
+    '/%2F_ah/admin', '/_ah;x/admin', '/%5Cx/..%2F_ah/admin', '/login/%67oogle', '/login/%67oogle?x=1'];
+  for (const p of spellings) {
+    assert.strictEqual((await get(externalPort, p)).status, 403, p);
+  }
+  assert.strictEqual((await get(externalPort, '/%ZZ')).status, 400, 'a path that does not decode is refused');
+  assert.notStrictEqual((await get(hubPort, '/%5Fah/admin', {cookie: 'AppInventor=ann'})).status, 403, 'the Pi itself may');
+});
+
+test('a frame that is too big ends its own connection; the hub and everyone else carry on', async () => {
+  const ann = await connect('ann');
+  const bob = await connect('bob' + Date.now().toString(36));
+  assert.ok(await until(() => ann.has('hello') && bob.has('hello')));
+  ann.ws.send(JSON.stringify({t: 'chat', text: 'x'.repeat(5 * 1024 * 1024)}));
+  assert.ok(await until(() => ann.ws.readyState === WebSocket.CLOSED), 'the oversize connection is closed');
+  assert.strictEqual(hubProcess.exitCode, null, 'the hub process is still running');
+  const carol = await connect('carol' + Date.now().toString(36));
+  assert.ok(await until(() => carol.has('hello')), 'a new person can still connect');
+  bob.ws.close();
+  carol.ws.close();
+});
+
+test('a connection reset while its sign-in is being checked does not end the hub', async () => {
+  const net = require('node:net');
+  const sock = net.connect(hubPort, '127.0.0.1', () => {
+    sock.write('GET /collab/ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+      'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nCookie: AppInventor=slow\r\n\r\n');
+    setTimeout(() => sock.resetAndDestroy(), 300);
+  });
+  sock.on('error', () => {});
+  await new Promise(resolve => setTimeout(resolve, 600));
+  assert.strictEqual(hubProcess.exitCode, null, 'the hub process is still running');
+  assert.strictEqual((await get(hubPort, '/collab/status')).status, 200);
+});
+
+test('a sign-in whose App Inventor reply is cut off part way is refused, not left waiting', async () => {
+  const started = Date.now();
+  await assert.rejects(within(connect('cut'), 3000), /rejected 401/);
+  assert.ok(Date.now() - started < 3000, 'refused at once');
+});
+
+test('a browser whose reply from App Inventor is cut off part way is told that the reply ended', async () => {
+  const outcome = await new Promise(resolve => {
+    const req = http.get({host: '127.0.0.1', port: hubPort, path: '/ode/cut', headers: {cookie: 'AppInventor=ann'}}, res => {
+      res.on('data', () => {});
+      res.on('end', () => resolve('ended'));
+      res.on('aborted', () => resolve('aborted'));
+      res.on('error', () => resolve('error'));
+      res.on('close', () => resolve('closed'));
+    });
+    req.on('error', () => resolve('error'));
+    setTimeout(() => resolve('still waiting'), 3000).unref();
+  });
+  assert.notStrictEqual(outcome, 'still waiting');
+  assert.notStrictEqual(outcome, 'ended', 'an incomplete reply must not look complete');
+});
+
+test('a join overtaken by a later join does not put the student in the earlier project', async () => {
+  const ann = await connect('ann');
+  assert.ok(await until(() => ann.has('hello')));
+  ann.send({t: 'join', projectId: '501'});   // App Inventor is slow to check this one
+  ann.send({t: 'join', projectId: '502'});
+  assert.ok(await until(() => ann.has('joined', m => m.projectId === '502')), 'project 502 is joined');
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  assert.ok(!ann.has('joined', m => m.projectId === '501'), 'the late answer for 501 is ignored');
+  ann.ws.close();
+});
+
+test('a failed project check is tried again; only App Inventor\'s refusal is reported as no access', async () => {
+  const ann = await connect('ann');
+  assert.ok(await until(() => ann.has('hello')));
+  ann.send({t: 'join', projectId: '503'});   // App Inventor fails the first check
+  assert.ok(await until(() => ann.has('joined', m => m.projectId === '503'), 4000), 'the second check lets the join through');
+  ann.send({t: 'join', projectId: '504'});   // App Inventor refuses
+  assert.ok(await until(() => ann.has('error', m => m.error === 'no-access' && m.projectId === '504')), 'a refusal is reported');
+  assert.ok(!ann.has('error', m => m.error === 'no-access' && m.projectId === '503'), 'a failure is not reported as a refusal');
+  ann.ws.close();
+});
+
+test('stalled replies from App Inventor do not stop anyone from signing in', async () => {
+  const stalled = [];
+  for (let i = 0; i < 70; i++) {
+    const req = http.get({host: '127.0.0.1', port: hubPort, path: '/ode/stall', headers: {cookie: 'AppInventor=ann'}});
+    req.on('error', () => {});
+    stalled.push(req);
+  }
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const bob = await within(connect('bob' + Date.now().toString(36)), 5000);
+  assert.ok(await until(() => bob.has('hello')), 'sign-in completes while the proxy is stuck');
+  for (const req of stalled) req.destroy();
+  bob.ws.close();
+});
+
+test('when App Inventor is down, the page is told so without its internal address', async () => {
+  const port = hubPort + 2000;
+  const down = spawn('node', [path.join(__dirname, '..', 'hub.js')], {
+    env: Object.assign({}, process.env, {PORT: String(port), HOST: '127.0.0.1', AI_DATA_DIR: dataDir,
+      AI_UPSTREAM: 'http://127.0.0.1:1'}),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      down.stdout.on('data', d => String(d).includes('collaboration hub') && resolve());
+      down.on('exit', code => reject(new Error('hub exited with ' + code)));
+    });
+    const r = await get(port, '/anything');
+    assert.strictEqual(r.status, 502);
+    assert.match(r.body, /not reachable/);
+    assert.doesNotMatch(r.body, /ECONNREFUSED|127\.0\.0\.1/);
+  } finally {
+    down.kill();
+  }
+});
+
+test('a message that is the JSON value null is ignored, and is not logged as an error', async () => {
+  const ann = await connect('ann');
+  assert.ok(await until(() => ann.has('hello')));
+  ann.ws.send('null');
+  ann.send({t: 'join', projectId: '42'});
+  assert.ok(await until(() => ann.has('joined')), 'the next message still works');
+  assert.doesNotMatch(hubLog, /Unhandled rejection/);
+  ann.ws.close();
+});
+
+// Last: once App Inventor says it keeps no backups, the hub stops asking for the rest of its life.
+test('a Pi that keeps no backups says so, and asks for no more', async () => {
+  const ann = await connect('ann');
+  assert.ok(await until(() => ann.has('hello')));
+  ann.send({t: 'join', projectId: '999'});
+  assert.ok(await until(() => ann.has('joined')), 'ann joined');
+  ann.send({t: 'op', projectId: '999', screen: 'Screen1', kind: 'blocks', data: {type: 'create'}});
+  assert.ok(await until(() => backupCalls.some(c => c.project === '999')), 'a backup was asked for');
+  assert.ok(await until(async () => JSON.parse((await get(hubPort, '/collab/status')).body).alerts
+    .some(a => /Backups are switched off/.test(a)), 3000), 'the status page says backups are off');
+  const asked = backupCalls.length;
+  await new Promise(resolve => setTimeout(resolve, 800));
+  assert.strictEqual(backupCalls.length, asked, 'no more asks until the hub restarts');
+  ann.ws.close();
+});
+
+test('a restore that fails tells the other open pages to carry on', async () => {
+  const ann = await connect('ann');
+  const bob = await connect('bob' + Date.now().toString(36));
+  assert.ok(await until(() => ann.has('hello') && bob.has('hello')));
+  ann.send({t: 'join', projectId: '83'});
+  bob.send({t: 'join', projectId: '83'});
+  assert.ok(await until(() => ann.has('joined') && bob.has('joined')), 'both joined');
+  ann.send({t: 'restoring', projectId: '83'});
+  assert.ok(await until(() => bob.has('freeze')), 'bob is frozen while the restore runs');
+  ann.send({t: 'restored', projectId: '83', failed: true});
+  assert.ok(await until(() => bob.has('unfreeze')), 'bob is unfrozen when the restore did not go through');
   ann.ws.close();
   bob.ws.close();
 });

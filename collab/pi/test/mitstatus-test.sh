@@ -39,7 +39,7 @@ MS="$HERE/mitstatus.sh"
 out="$(bash "$MS" --show 2>&1)"
 check "status shows the link" "printf '%s' \"\$out\" | grep -q 'https://gen1.trycloudflare.com'"
 check "status shows the access code" "printf '%s' \"\$out\" | grep -q 'Access code:        k7qm-2xwd-9fha'"
-check "status shows the override code" "printf '%s' \"\$out\" | grep -q 'Override code:      Qx7mR2pL'"
+check "status shows that the override code is set, and never the code itself" "printf '%s' \"\$out\" | grep -q 'Override code:      set' && ! printf '%s' \"\$out\" | grep -q Qx7mR2pL"
 check "status shows the Smart model" "printf '%s' \"\$out\" | grep -q 'anthropic/claude-haiku-5.5 *(built in)'"
 check "status shows the Balanced model" "printf '%s' \"\$out\" | grep -q 'inclusionai/ling-3.1-flash *(built in)'"
 check "status shows the Fast override from ai.env" "printf '%s' \"\$out\" | grep -q 'mistralai/example-model *(set in ai.env)'"
@@ -119,13 +119,18 @@ check "both permanent links are shown" "printf '%s' \"\$out15\" | grep -q '(Clou
 rm -f "$T/base/stable-link"
 
 # 12. stable-link.sh records the link when Funnel is on, and removes it when Funnel is off (with a stand-in tailscale)
-printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in "funnel status") echo "https://pi-test.example.ts.net" ;; esac' 'exit 0' > "$T/bin/tailscale"
+# The stand-in keeps Funnel on until it is turned off; FAKE_FUNNEL_STUCK makes turning it off fail.
+printf '%s\n' '#!/usr/bin/env bash' "flag=\"$T/funnel-off\"" 'case "$*" in' '"funnel status") [ -e "$flag" ] || echo "https://pi-test.example.ts.net" ;;' '"funnel --https=443 off") [ -n "${FAKE_FUNNEL_STUCK:-}" ] || touch "$flag" ;;' 'esac' 'exit 0' > "$T/bin/tailscale"
 chmod +x "$T/bin/tailscale"
 printf 'EXTERNAL_PORT=8081\n' > "$T/hub.service"
 STABLE_LINK_FILE="$T/base/stable-link" HUB_UNIT="$T/hub.service" bash "$HERE/stable-link.sh" > "$T/sl-on.out" 2>&1
 check "turning Funnel on records the link" "grep -qx 'https://pi-test.example.ts.net' '$T/base/stable-link'"
 STABLE_LINK_FILE="$T/base/stable-link" HUB_UNIT="$T/hub.service" bash "$HERE/stable-link.sh" --off > /dev/null 2>&1
 check "turning Funnel off removes the record" "[ ! -e '$T/base/stable-link' ]"
+rm -f "$T/funnel-off"
+printf '%s\n' 'https://pi-test.example.ts.net' > "$T/base/stable-link"
+FAKE_FUNNEL_STUCK=1 STABLE_LINK_FILE="$T/base/stable-link" HUB_UNIT="$T/hub.service" bash "$HERE/stable-link.sh" --off > "$T/sl-stuck.out" 2>&1; stuck_rc=$?
+check "a Funnel that stays on is reported as still on, and its record is kept" "[ '$stuck_rc' = 1 ] && [ -e '$T/base/stable-link' ] && grep -q 'still on' '$T/sl-stuck.out'"
 
 # 13. The update: up to date, a newer version declined, accepted (started as a unit of its own), an update already running,
 # and a failed check. The update.sh here is a stand-in: its --check reports from the test folder, and nothing else runs.

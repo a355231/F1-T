@@ -9,6 +9,7 @@ import com.google.appinventor.server.flags.Flag;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
@@ -94,10 +95,13 @@ final class TeamLogin {
     if (!stamp.equals(lastStamp)) {
       try {
         fileCode = new String(Files.readAllBytes(file), StandardCharsets.UTF_8).trim();
+        lastStamp = stamp;
+      } catch (NoSuchFileException e) {
+        fileCode = "";   // the file was removed: sign-in is off
+        lastStamp = stamp;
       } catch (IOException e) {
-        fileCode = "";
+        // A read that fails (the SD card, say) keeps the code in use. The stamp is not recorded, so it is tried again.
       }
-      lastStamp = stamp;
     }
     return fileCode;
   }
@@ -184,12 +188,12 @@ final class TeamLogin {
       signedOutCheckedAt = now;
       String stamp = fileStamp(file);
       if (!stamp.equals(signoutStamp)) {
-        signoutStamp = stamp;
         try {
           signedOutBefore = Math.max(signedOutBefore,
               Long.parseLong(new String(Files.readAllBytes(file), StandardCharsets.UTF_8).trim()));
+          signoutStamp = stamp;
         } catch (IOException | NumberFormatException e) {
-          // no usable record: keep what we have
+          // no usable record: keep what we have, and look again on the next check
         }
       }
     }

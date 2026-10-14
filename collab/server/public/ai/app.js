@@ -85,9 +85,10 @@
       var copy = el('button', 'copy', 'Copy');
       copy.type = 'button';
       copy.onclick = function () {
-        if (navigator.clipboard) navigator.clipboard.writeText(pre.innerText);
-        copy.textContent = 'Copied';
-        setTimeout(function () { copy.textContent = 'Copy'; }, 1400);
+        copyText(pre.innerText, function (ok) {
+          copy.textContent = ok ? 'Copied' : 'Copy failed';
+          setTimeout(function () { copy.textContent = 'Copy'; }, 1400);
+        });
       };
       head.appendChild(copy);
       pre.parentNode.insertBefore(box, pre);
@@ -288,7 +289,9 @@
       copy.type = 'button';
       copy.title = 'Copy the answer';
       copy.innerHTML = COPY;
-      copy.onclick = function () { if (navigator.clipboard) navigator.clipboard.writeText(api.full); };
+      copy.onclick = function () {
+        copyText(api.full, function (ok) { flash(ok ? 'Copied the answer.' : 'The answer could not be copied here.'); });
+      };
       acts.appendChild(copy);
       if (api.full) turn.appendChild(acts);
       api.acts = acts;
@@ -652,7 +655,9 @@
       return r.json().catch(function () { return {}; }).then(function (d) {
         var err = new Error(r.status === 404 ? 'The answer was lost (the server may have restarted). Please ask again.'
           : d.error || 'The helper could not answer.');
-        err.fatal = true;   // the server has answered; asking again would not change that
+        // A client error (the answer is lost, or the request was refused) will not change if it is asked again. A gateway or
+        // server error may pass, and the answer is still being written on the server, so it is tried again.
+        err.fatal = r.status >= 400 && r.status < 500;
         throw err;
       });
     }
@@ -744,16 +749,37 @@
 
   // ---- sending ----
 
+  // Copies text to the clipboard. A plain http page has no clipboard, and the browser can refuse the text: done(false)
+  // says so, so that the person is not told it was copied.
+  function copyText(text, done) {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) return done(false);
+    navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+  }
+
+  var storageWarned = false;
   function save() {
+    var rows = [];
     try {
-      var rows = [];
       list.querySelectorAll('.msg').forEach(function (row) {
         if (row.classList.contains('user')) rows.push({role: 'user', text: row.textContent});
         else if (row.dataset.text) rows.push({role: 'assistant', text: row.dataset.text});
       });
-      sessionStorage.setItem(STORE, JSON.stringify({rows: rows.slice(-40), history: history.slice(-40)}));
     } catch (e) {
-      // no storage here: the window still works
+      return;
+    }
+    // The browser keeps about 5 MB for the page. A long conversation is kept in a shorter copy, and the person is told
+    // once when even that does not fit, so that a reload is not a surprise.
+    var stored = function (keep) {
+      try {
+        sessionStorage.setItem(STORE, JSON.stringify({rows: rows.slice(-keep), history: history.slice(-keep)}));
+        return true;
+      } catch (e) {
+        return false;
+      }
+    };
+    if (!stored(40) && !stored(10) && !storageWarned) {
+      storageWarned = true;
+      flash('This conversation is too long to be kept if the page is reloaded.');
     }
   }
 
@@ -973,6 +999,7 @@
 
   function setReasoning(level) {
     reasoning = level;
+    keptReasoning = level;   // what the person picked; the server lists are applied again after each answer
     store('aihelper.reasoning', level);
     syncPickers();
   }
@@ -980,6 +1007,7 @@
   // Returns true when Max was given up because the model changed away from Smart: High is used instead.
   function setPreset(id) {
     preset = id;
+    keptPreset = id;
     store('aihelper.model', id);
     var clamped = !reasonAllowed(reasoning);
     if (clamped) setReasoning(fallbackReasoning());
@@ -992,6 +1020,7 @@
   // when the service does not offer the one in use.
   function setProvider(id) {
     provider = id;
+    keptProvider = id;
     store('aihelper.provider', id);
     var p = providerOf(id);
     serviceName = p ? p.name : '';
@@ -1108,6 +1137,9 @@
       showLocal('Wait for the answer to finish, or press Stop, before you start a new conversation.');
       return;
     }
+    // Picture previews are blob addresses, which the browser keeps until they are revoked.
+    list.querySelectorAll('img').forEach(function (img) { if (/^blob:/.test(img.src)) URL.revokeObjectURL(img.src); });
+    pending.forEach(function (p) { if (p.url) URL.revokeObjectURL(p.url); });
     list.innerHTML = '';
     history = [];
     pending = [];
@@ -1304,6 +1336,9 @@
   // "Try again": drop the last exchange and ask again.
   function retryFrom(userRow) {
     if (controller) return;
+    // Only the newest question can be asked again: the history holds the newest exchange last.
+    var userRows = list.querySelectorAll('.msg.user');
+    if (!userRows.length || userRows[userRows.length - 1] !== userRow) return;
     var last = history.length >= 2 ? history[history.length - 2] : null;
     if (!last || last.role !== 'user') return;
     var assistantRow = userRow.nextElementSibling;
@@ -1534,7 +1569,12 @@
       return;
     }
     fetch('/collab/ai/status?projectId=' + encodeURIComponent(projectId), {credentials: 'same-origin'})
-      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (r) {
+        // Only a refusal for want of a sign-in means "sign in"; a gateway or server problem is tried again below.
+        if (r.status === 401) return null;
+        if (!r.ok) throw new Error('status ' + r.status);
+        return r.json();
+      })
       .then(function (s) {
         if (!s) {
           $('sub').textContent = 'Sign in to App Inventor first';
@@ -1545,7 +1585,10 @@
         if (!s.configured) $('notSet').hidden = false;
         if (s.running) attachRun(s.question);
       })
-      .catch(function () { $('sub').textContent = 'Could not reach the team server'; });
+      .catch(function () {
+        $('sub').textContent = 'Could not reach the team server';
+        setTimeout(loadStatus, 5000);   // the page was opened while the team server was briefly unavailable
+      });
   }
 
   // ---- start ----

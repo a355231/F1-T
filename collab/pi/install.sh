@@ -32,9 +32,9 @@ echo "Java: $JAVA_HOME"
 echo "== Google Cloud SDK with the App Engine Java dev server"
 if [ ! -x /opt/google-cloud-sdk/bin/java_dev_appserver.sh ]; then
   tmp="$(mktemp -d)"
-  curl -fsSL -o "$tmp/gcloud.tgz" \
-    https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-arm.tar.gz
-  tar -xzf "$tmp/gcloud.tgz" -C /opt
+  curl -fsSL --retry 3 --retry-delay 10 --max-time 900 -o "$tmp/gcloud.tgz" \
+    https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-arm.tar.gz || { rm -rf "$tmp"; exit 1; }
+  tar -xzf "$tmp/gcloud.tgz" -C /opt || { rm -rf "$tmp"; exit 1; }
   rm -rf "$tmp"
   /opt/google-cloud-sdk/bin/gcloud components install app-engine-java --quiet
 fi
@@ -42,9 +42,9 @@ fi
 echo "== cloudflared"
 if ! command -v cloudflared >/dev/null; then
   tmp="$(mktemp -d)"
-  curl -fsSL -o "$tmp/cloudflared.deb" \
-    https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb
-  dpkg -i "$tmp/cloudflared.deb"
+  curl -fsSL --retry 3 --retry-delay 10 --max-time 900 -o "$tmp/cloudflared.deb" \
+    https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb || { rm -rf "$tmp"; exit 1; }
+  dpkg -i "$tmp/cloudflared.deb" || { rm -rf "$tmp"; exit 1; }
   rm -rf "$tmp"
 fi
 
@@ -55,8 +55,8 @@ install -m 755 "$HERE/apply-config.sh" "$HERE/set-team-code.sh" "$HERE/tunnel-ur
   "$HERE/update.sh" "$HERE/stable-link.sh" "$HERE/set-build-server.sh" "$HERE/set-ai.sh" /opt/appinventor/
 install -m 755 "$HERE/mitstatus.sh" /usr/local/bin/MITSTATUS
 echo "$(cd "$HERE/../.." && pwd)" > /opt/appinventor/repo
-REPO_ROOT="$(cd "$HERE/../.." && pwd)"
-git -c safe.directory="$REPO_ROOT" -C "$HERE" rev-parse --short HEAD > /opt/appinventor/version 2>/dev/null || true
+# The version is written by build-on-pi.sh once the new code is in place, not here: written before a build, it would name a
+# version that is not running if the build were interrupted.
 [ -f /opt/appinventor/update-mode ] || echo install > /opt/appinventor/update-mode
 chown -R "$RUN_AS:$RUN_AS" /opt/appinventor
 
@@ -95,7 +95,8 @@ if [ "$BUILD_HERE" = 1 ]; then
   done
   echo
   echo "App Inventor is running and will start again on every boot."
-  /opt/appinventor/show-info.sh
+  # The access code is not printed here: this output goes to the update log. MITSTATUS shows it.
+  echo "Run MITSTATUS to see the access code and the links."
   exit 0
 fi
 

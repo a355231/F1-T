@@ -209,3 +209,81 @@ test('a team code change is announced to everyone else by name, and not spammabl
   assert.ok(hub.codeChanged(a.id, false));
   assert.ok(!/signed everyone out/.test(all(b.id, 'notice')[1].text));
 });
+
+test('the edit log is cut to a byte cap, oldest first, even when the edits are young', () => {
+  const {hub} = setup();
+  const a = hub.addClient({userId: 'u1', email: 'a@school.org'});
+  hub.join(a.id, '42', ACCESS);
+  const big = 'x'.repeat(1000);
+  for (let i = 0; i < 20000; i++) {
+    hub.op(a.id, {projectId: '42', screen: 'Screen1', kind: 'blocks', data: {type: 'create', big}});
+  }
+  const room = hub.rooms.get('42');
+  assert.ok(room.logBytes <= 8 * 1024 * 1024, 'the log is within its byte cap');
+  assert.ok(room.log.length < 20000, 'some of the oldest edits were cut');
+  assert.strictEqual(room.log[room.log.length - 1].seq, 20000, 'the newest edit is kept');
+  assert.strictEqual(room.log[0].seq, 20000 - room.log.length + 1, 'what is left is the newest run of edits');
+  assert.strictEqual(room.logSizes.length, room.log.length);
+});
+
+test('a long screen name in presence is kept short, so it is not sent to everyone in full', () => {
+  const {hub, all} = setup();
+  const a = hub.addClient({userId: 'u1', email: 'a@school.org'});
+  const b = hub.addClient({userId: 'u2', email: 'b@school.org'});
+  hub.join(a.id, '42', ACCESS);
+  hub.join(b.id, '42', ACCESS);
+  hub.presence(a.id, {screen: 'S'.repeat(2 * 1024 * 1024), editor: 'blocks', companion: false});
+  assert.strictEqual(hub.clients.get(a.id).screen.length, 100);
+  const roster = all(b.id, 'roster').pop();
+  assert.ok(JSON.stringify(roster).length < 2000, 'the roster stays small');
+});
+
+test('a client keeps fingerprints for at most 16 screens, however many names it sends', () => {
+  const {hub} = setup();
+  const a = hub.addClient({userId: 'u1', email: 'a@school.org'});
+  hub.join(a.id, '42', ACCESS);
+  for (let i = 0; i < 100; i++) hub.digest(a.id, {screen: 'Screen' + i, blocks: 'abc', designer: 'def'});
+  assert.strictEqual(hub.clients.get(a.id).digests.size, 16);
+  assert.ok(hub.clients.get(a.id).digests.has('Screen0'), 'the first screens are the ones kept');
+});
+
+test('a manual sync is refused for a short time after the pages of a project were reloaded', () => {
+  const {hub, advance} = setup();
+  const a = hub.addClient({userId: 'u1', email: 'a@school.org'});
+  hub.join(a.id, '42', ACCESS);
+  assert.strictEqual(hub.reloadTooSoon('42'), false, 'nothing has been reloaded yet');
+  assert.strictEqual(hub.reloadTooSoon('99'), false, 'a project nobody has open is not too soon');
+  hub.restored('42', 'a', 'restore');
+  assert.strictEqual(hub.reloadTooSoon('42'), true);
+  advance(19 * 1000);
+  assert.strictEqual(hub.reloadTooSoon('42'), true);
+  advance(1000);
+  assert.strictEqual(hub.reloadTooSoon('42'), false);
+});
+
+test('a restore freezes the open pages until it is reported, and unfreezes them by itself if it never is', async () => {
+  const {hub, last} = setup();
+  const a = hub.addClient({userId: 'u1', email: 'a@school.org'});
+  const b = hub.addClient({userId: 'u2', email: 'b@school.org'});
+  hub.join(a.id, '42', ACCESS);
+  hub.join(b.id, '42', ACCESS);
+  hub.freezeForRestore('42', 'ann', 20);
+  assert.strictEqual(last(b.id, 'freeze').by, 'ann');
+  assert.strictEqual(last(b.id, 'freeze').projectId, '42', 'the message names its project');
+  assert.strictEqual(hub.restoreFrozen(hub.rooms.get('42')), true);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.ok(last(b.id, 'unfreeze'), 'the page is unfrozen when nothing reported the restore');
+  assert.strictEqual(hub.restoreFrozen(hub.rooms.get('42')), false);
+});
+
+test('a page that rejoins is told whether a restore or a save is still going on', () => {
+  const {hub, last} = setup();
+  const a = hub.addClient({userId: 'u1', email: 'a@school.org'});
+  hub.join(a.id, '42', ACCESS);
+  assert.strictEqual(last(a.id, 'joined').frozen, false);
+  assert.strictEqual(last(a.id, 'joined').flushing, false);
+  hub.freezeForRestore('42', 'ann');
+  const b = hub.addClient({userId: 'u2', email: 'b@school.org'});
+  hub.join(b.id, '42', ACCESS);
+  assert.strictEqual(last(b.id, 'joined').frozen, true);
+});

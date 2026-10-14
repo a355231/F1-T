@@ -74,3 +74,34 @@ test('the encoding a browser asks for is the one used', () => {
   assert.strictEqual(chooseEncoding({headers: {'accept-encoding': 'gzip'}}), 'gzip');
   assert.strictEqual(chooseEncoding({headers: {}}), null);
 });
+
+test('the cache keeps a fixed number of files, so many tiny ones cannot use up its memory', () => {
+  const cache = new StaticCache();
+  for (let i = 0; i < 2500; i++) {
+    cache.put('/static/js/f' + i + '.js', {'content-type': 'application/javascript'}, Buffer.alloc(10, 1), 0);
+  }
+  assert.ok(cache.entries.size <= 2000, 'at most 2000 entries');
+  assert.ok(cache.entries.has('/static/js/f2499.js'), 'the newest is kept');
+  assert.ok(!cache.entries.has('/static/js/f0.js'), 'the oldest went first');
+});
+
+test('two requests for the same encoding at once share one compression, and the bytes are counted once', async () => {
+  const cache = new StaticCache();
+  const body = Buffer.alloc(50 * 1024, 'a');
+  const entry = cache.put('/static/js/g.js', {'content-type': 'application/javascript'}, body, 0);
+  const [x, y] = await Promise.all([cache.variant(entry, 'gzip'), cache.variant(entry, 'gzip')]);
+  assert.strictEqual(x, y, 'both get the same copy');
+  assert.strictEqual(cache.bytes, body.length + x.length, 'the copy is counted once');
+  assert.strictEqual(entry.size, body.length + x.length);
+  assert.deepStrictEqual(entry.pending, {}, 'nothing is left in progress');
+});
+
+test('a copy compressed after its file was replaced is not counted against the cache', async () => {
+  const cache = new StaticCache();
+  const body = Buffer.alloc(50 * 1024, 'b');
+  const old = cache.put('/static/js/h.js', {'content-type': 'application/javascript'}, body, 0);
+  const pending = cache.variant(old, 'gzip');
+  cache.put('/static/js/h.js', {'content-type': 'application/javascript'}, body, 0);   // replaced meanwhile
+  await pending;
+  assert.strictEqual(cache.bytes, body.length, 'only the new copy of the file is counted');
+});

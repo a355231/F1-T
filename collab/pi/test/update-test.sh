@@ -27,6 +27,14 @@ cat > "$T/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 echo "systemctl $*" >> "$AI_BASE/calls.log"
 STUB
+# A restore copies with --delete. FAKE_RSYNC_DELETE_FAIL makes those copies fail, as a full card would.
+cat > "$T/bin/rsync" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${FAKE_RSYNC_DELETE_FAIL:-}" ] && [[ " $* " == *" --delete "* ]]; then exit 1; fi
+exec /usr/bin/rsync "$@"
+STUB
+chmod +x "$T/bin/rsync"
+
 cat > "$T/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 url="${*: -1}"
@@ -236,6 +244,23 @@ check "nine is held after going back from it" [ "$(sed -n 's/^held=//p' "$AI_BAS
 run --now; rc=$?
 check "--now installs the held version by hand" [ "$rc" = 0 ] && grep -qx nine "$AI_BASE/war/marker.txt"
 check "and that clears the hold" [ -z "$(sed -n 's/^held=//p' "$AI_BASE/update-state" | tail -n 1)" ]
+
+# 12. A refused fast-forward (the downloaded copy has a commit of its own) changes nothing, and keeps the version to go back to.
+publish ten
+git -C "$REPO" -c user.name=test -c user.email=test@example.org commit -q --allow-empty -m "a local commit"
+saved="$(cat "$AI_BASE/rollback/commit" 2>/dev/null)"
+run --now; rc=$?
+check "a refused fast-forward is an error, and says so" [ "$rc" = 1 ] && grep -q "Could not fast-forward" "$T/out"
+check "the version to go back to is kept" [ -n "$saved" ] && [ "$(cat "$AI_BASE/rollback/commit" 2>/dev/null)" = "$saved" ]
+git -C "$REPO" reset -q --hard origin/main
+
+# 13. A restore that cannot copy the old version back in full is reported as one, not as a return to the old version.
+publish eleven
+export FAKE_INSTALL_RC=1 FAKE_RSYNC_DELETE_FAIL=1
+run --now; rc=$?
+unset FAKE_INSTALL_RC FAKE_RSYNC_DELETE_FAIL
+check "a restore that fails is an error" [ "$rc" = 1 ]
+check "the notice says the old version could not be put back in full" grep -q "could not be put back in full" "$AI_BASE/update-failed"
 
 echo "$pass passed, $failed failed"
 [ "$failed" = 0 ]

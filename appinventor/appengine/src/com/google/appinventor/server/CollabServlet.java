@@ -396,6 +396,9 @@ public class CollabServlet extends OdeServlet {
     StringBuilder body = new StringBuilder();
     char[] buf = new char[8192];
     int n;
+    // The body is JSON, which is UTF-8. Without this the container reads it as ISO-8859-1, and accented or other
+    // non-ASCII text in an AI change would be saved as garbled characters.
+    req.setCharacterEncoding("UTF-8");
     java.io.Reader reader = req.getReader();
     while ((n = reader.read(buf)) > 0) {
       body.append(buf, 0, n);
@@ -540,6 +543,7 @@ public class CollabServlet extends OdeServlet {
     StringBuilder body = new StringBuilder();
     char[] buf = new char[8192];
     int n;
+    req.setCharacterEncoding("UTF-8");
     java.io.Reader reader = req.getReader();
     while ((n = reader.read(buf)) > 0) {
       body.append(buf, 0, n);

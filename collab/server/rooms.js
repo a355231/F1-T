@@ -32,6 +32,18 @@ const DIGEST_FRESH_MS = 90 * 1000;
 const QUIET_MS = 5 * 1000;
 const SYNC_FLUSH_MS = 6 * 1000;   // how long a manual sync waits for every open tab to save what it has
 const RESYNC_MIN_GAP_MS = 60 * 1000;
+const RELOAD_MIN_GAP_MS = 20 * 1000;    // after the pages of a project are reloaded, a manual sync waits this long
+const DIGEST_KEEP = 16;                 // the screens whose fingerprints one client may have kept at once
+const SCREEN_MAX_CHARS = 100;
+// The edit log is cut to this many bytes, oldest first, whatever the age of the edits. Keeps a flood of edits (and the
+// reply every joining or reconnecting page gets) from growing without limit.
+const LOG_MAX_BYTES = 8 * 1024 * 1024;
+const LOG_ENTRY_OVERHEAD = 200;         // the bytes an edit takes beyond its data, counted for the cap
+// A restore freezes every open page until the restored copy is in. If it is never reported (the person who started it
+// lost their connection, or the restore failed), the pages are unfrozen after this long.
+const RESTORE_FREEZE_MS = 60 * 1000;
+// A queue of a screen that no page has opened is kept to this many changes; the syncer fixes what is older.
+const SCREEN_QUEUE_MAX = 2000;
 
 class Hub {
   // isOpen(id) says whether a client's socket can take a message right now.
@@ -52,7 +64,7 @@ class Hub {
     const name = (email || 'user').split('@')[0];
     const client = {id, userId, email, name, color, projectId: null, projectName: '',
       screen: '', editor: '', companion: false, joinedAt: 0, cursor: null,
-      cursorAt: -Infinity, noticeAt: -Infinity, digests: {}, strikes: {}, counted: {},
+      cursorAt: -Infinity, noticeAt: -Infinity, digests: new Map(), strikes: new Map(), counted: new Map(),
       resyncAt: -Infinity, selAt: -Infinity, chatAt: -Infinity, sel: null};
     this.clients.set(id, client);
     return client;
@@ -100,8 +112,9 @@ class Hub {
     let room = this.rooms.get(projectId);
     if (!room) {
       room = {projectId, projectName: access.projectName || '', ownerEmail: access.ownerEmail || '',
-        members: new Set(), leader: null, log: [], seq: 0, emptySince: null, lastOpAt: -Infinity,
-        backedSeq: 0, chat: [], activity: [], locks: new Map(),
+        members: new Set(), leader: null, log: [], logSizes: [], logBytes: 0, seq: 0, emptySince: null,
+        lastOpAt: -Infinity, backedSeq: 0, chat: [], activity: [], locks: new Map(), reloadAt: -Infinity,
+        frozenAt: 0,
         epoch: this.now().toString(36) + Math.random().toString(36).slice(2, 8)};
       this.rooms.set(projectId, room);
     }
@@ -112,9 +125,9 @@ class Hub {
     client.joinedAt = this.now();
     client.screen = '';
     client.editor = '';
-    client.digests = {};
-    client.strikes = {};
-    client.counted = {};
+    client.digests = new Map();
+    client.strikes = new Map();
+    client.counted = new Map();
     this.electLeader(room, id);
     this.send(id, this.joinedMessage(room, id));
     this.broadcastRoster();
@@ -124,7 +137,10 @@ class Hub {
     return {t: 'joined', projectId: room.projectId, epoch: room.epoch, leaderId: room.leader,
       log: room.log, cursors: this.cursorsInRoom(room, id), chat: room.chat,
       activity: room.activity, locks: this.lockList(room), sels: this.selsInRoom(room, id),
-      writes: this.writes.get(room.projectId) || 0};
+      writes: this.writes.get(room.projectId) || 0,
+      // A page that was frozen before it lost its connection may unfreeze only when neither a save for an AI change or
+      // a sync, nor a restore, is still going on.
+      flushing: this.flushing(room.projectId), frozen: this.restoreFrozen(room)};
   }
 
   leave(id, rosterUpdate = true) {
@@ -177,7 +193,9 @@ class Hub {
   presence(id, {screen, editor, companion}) {
     const client = this.clients.get(id);
     if (!client) return;
-    const next = {screen: String(screen || ''), editor: String(editor || ''), companion: !!companion};
+    // Names go to everyone in the project, every time the roster changes, so they are kept short.
+    const next = {screen: String(screen || '').slice(0, SCREEN_MAX_CHARS), editor: String(editor || '').slice(0, 20),
+      companion: !!companion};
     if (next.screen === client.screen && next.editor === client.editor &&
         next.companion === client.companion) {
       return;
@@ -248,8 +266,11 @@ class Hub {
     // Made on a copy from before the last restore or AI change: it would put an old change into the new log.
     if (epoch !== undefined && epoch !== room.epoch) return;
     const entry = {seq: ++room.seq, from: id, name: client.name, color: client.color,
-      screen: String(screen), kind, data, at: this.now()};
+      screen: String(screen).slice(0, SCREEN_MAX_CHARS), kind, data, at: this.now()};
     room.log.push(entry);
+    const size = JSON.stringify(data === undefined ? null : data).length + LOG_ENTRY_OVERHEAD;
+    room.logSizes.push(size);
+    room.logBytes += size;
     room.lastOpAt = entry.at;
     this.recordActivity(room, client, entry);
     this.trim(room);
@@ -279,11 +300,13 @@ class Hub {
     if (!client || !client.projectId || typeof msg.screen !== 'string') return;
     const room = this.rooms.get(client.projectId);
     if (!room) return;
-    const screen = msg.screen.slice(0, 100);
+    const screen = msg.screen.slice(0, SCREEN_MAX_CHARS);
     const clip = v => (typeof v === 'string' ? v.slice(0, 64) : '');
     const entry = {blocks: clip(msg.blocks), designer: clip(msg.designer), at: this.now()};
     if (!entry.blocks && !entry.designer) return;
-    client.digests[screen] = entry;
+    // A page only reports the few screens the hub lists, so a client that names more screens than that is ignored.
+    if (!client.digests.has(screen) && client.digests.size >= DIGEST_KEEP) return;
+    client.digests.set(screen, entry);
     this.compare(room, screen);
   }
 
@@ -291,26 +314,27 @@ class Hub {
   // report, when both come from the same round and nothing was being edited.
   compare(room, screen) {
     const leader = this.clients.get(room.leader);
-    const ld = leader && leader.digests[screen];
+    const ld = leader && leader.digests.get(screen);
     if (!ld) return;
     for (const m of room.members) {
       const f = this.clients.get(m);
-      const fd = f && m !== room.leader && f.digests[screen];
-      if (!fd || f.counted[screen] === fd.at || Math.abs(fd.at - ld.at) > 2 * QUIET_MS ||
+      const fd = f && m !== room.leader && f.digests.get(screen);
+      if (!fd || f.counted.get(screen) === fd.at || Math.abs(fd.at - ld.at) > 2 * QUIET_MS ||
           this.now() - Math.max(fd.at, ld.at) > DIGEST_FRESH_MS) {
         continue;
       }
       if (this.now() - room.lastOpAt < QUIET_MS) continue;  // try again with the next report
-      f.counted[screen] = fd.at;
+      f.counted.set(screen, fd.at);
       const blocksDiffer = !!(fd.blocks && ld.blocks && fd.blocks !== ld.blocks);
       const designerDiffer = !!(fd.designer && ld.designer && fd.designer !== ld.designer);
       if (!blocksDiffer && !designerDiffer) {
-        f.strikes[screen] = 0;
+        f.strikes.set(screen, 0);
         continue;
       }
-      f.strikes[screen] = (f.strikes[screen] || 0) + 1;
-      if (f.strikes[screen] >= 2 && this.now() - f.resyncAt >= RESYNC_MIN_GAP_MS) {
-        f.strikes[screen] = 0;
+      const strikes = (f.strikes.get(screen) || 0) + 1;
+      f.strikes.set(screen, strikes);
+      if (strikes >= 2 && this.now() - f.resyncAt >= RESYNC_MIN_GAP_MS) {
+        f.strikes.set(screen, 0);
         f.resyncAt = this.now();
         this.send(room.leader, {t: 'snapshot-request', screen, forId: m, blocks: blocksDiffer,
           designer: designerDiffer});
@@ -460,15 +484,17 @@ class Hub {
     const due = [];
     for (const room of this.rooms.values()) {
       if (room.members.size > 0 && room.leader && room.seq !== room.backedSeq) {
-        due.push({projectId: room.projectId, clientId: room.leader, seq: room.seq});
+        due.push({projectId: room.projectId, clientId: room.leader, seq: room.seq, epoch: room.epoch});
       }
     }
     return due;
   }
 
-  backedUp(projectId, seq) {
+  // A report of the backup made for the project's state at seq, in the session with this epoch. A restore starts a new
+  // session, so a report that comes back after one does not mark the restored content as backed up.
+  backedUp(projectId, seq, epoch) {
     const room = this.rooms.get(String(projectId));
-    if (room) room.backedSeq = seq;
+    if (room && room.epoch === epoch) room.backedSeq = seq;
   }
 
   // A backup was restored, or an AI change was written: start the project's session over and send everyone's page to
@@ -479,11 +505,44 @@ class Hub {
     const room = this.rooms.get(String(projectId));
     if (!room) return 0;
     room.log = [];
+    room.logSizes = [];
+    room.logBytes = 0;
     room.seq = 0;
     room.backedSeq = 0;
     room.epoch = this.now().toString(36) + Math.random().toString(36).slice(2, 8);
-    for (const m of room.members) this.send(m, {t: 'reload', by: byName, kind});
+    room.reloadAt = this.now();
+    room.frozenAt = 0;
+    for (const m of room.members) this.send(m, {t: 'reload', by: byName, kind, projectId: room.projectId});
     return room.members.size;
+  }
+
+  // Everyone with the project open stops saving while someone puts an older backup back. Stops by itself after
+  // RESTORE_FREEZE_MS, unless the restore is reported first (restored, or unfreezeProject for one that failed).
+  freezeForRestore(projectId, byName, ms = RESTORE_FREEZE_MS) {
+    const room = this.rooms.get(String(projectId));
+    if (!room) return;
+    const stamp = this.now();
+    room.frozenAt = stamp;
+    this.broadcastToProject(room.projectId, {t: 'freeze', by: byName});
+    const timer = setTimeout(() => {
+      if (room.frozenAt === stamp) this.unfreezeProject(room.projectId);
+    }, ms);
+    if (timer.unref) timer.unref();
+  }
+
+  restoreFrozen(room) {
+    return !!room.frozenAt && this.now() - room.frozenAt < RESTORE_FREEZE_MS;
+  }
+
+  // A restore that did not go through: everyone with the project open carries on as before.
+  unfreezeProject(projectId) {
+    this.broadcastToProject(String(projectId), {t: 'unfreeze'});
+  }
+
+  // Whether the project's pages were reloaded less than RELOAD_MIN_GAP_MS ago.
+  reloadTooSoon(projectId) {
+    const room = this.rooms.get(String(projectId));
+    return !!room && this.now() - room.reloadAt < RELOAD_MIN_GAP_MS;
   }
 
   // Whether a save is waiting on this project: a manual sync or an AI change (see awaitFlush).
@@ -556,20 +615,34 @@ class Hub {
     return next;
   }
 
-  // Tell everyone in a project something that makes their page start over (a restored backup).
+  // Tell everyone in a project something about its open pages (freeze, unfreeze, or reload). The project id is in the
+  // message, so that a page that has moved on to another project can ignore it.
   broadcastToProject(projectId, msg) {
     const room = this.rooms.get(String(projectId));
     if (!room) return 0;
-    for (const m of room.members) this.send(m, msg);
+    if (msg.t === 'unfreeze' || msg.t === 'reload') room.frozenAt = 0;
+    const out = Object.assign({projectId: room.projectId}, msg);
+    for (const m of room.members) this.send(m, out);
     return room.members.size;
   }
 
+  // Past LOG_SOFT_LIMIT entries, the oldest that are at least LOG_MIN_AGE_MS old go. Past LOG_MAX_BYTES the oldest go
+  // whatever their age.
   trim(room) {
-    if (room.log.length <= LOG_SOFT_LIMIT) return;
     const cutoff = this.now() - LOG_MIN_AGE_MS;
     let drop = 0;
-    while (drop < room.log.length - LOG_SOFT_LIMIT && room.log[drop].at < cutoff) drop++;
-    if (drop) room.log.splice(0, drop);
+    let bytes = room.logBytes;
+    while (drop < room.log.length) {
+      const tooMany = room.log.length - drop > LOG_SOFT_LIMIT && room.log[drop].at < cutoff;
+      if (!tooMany && bytes <= LOG_MAX_BYTES) break;
+      bytes -= room.logSizes[drop];
+      drop++;
+    }
+    if (drop) {
+      room.log.splice(0, drop);
+      room.logSizes.splice(0, drop);
+      room.logBytes = bytes;
+    }
   }
 
   sweep() {

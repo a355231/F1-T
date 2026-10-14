@@ -856,3 +856,18 @@ test('(u) the full-app pill and the picture button follow the status', async () 
   assert.strictEqual(page.document.getElementById('attach').hidden, false, 'the model takes pictures');
   assert.strictEqual(page.document.getElementById('sub').textContent, 'Signed in as Ana');
 });
+
+test('(v) a model picked during the session is kept when the lists are read again after an answer', async () => {
+  const page = openPage({presets: OPENROUTER, local: {'aihelper.model': 'balanced'}});
+  await flush();
+  const pickModel = page.document.getElementById('pickModel');
+  pickModel.value = 'fast';
+  pickModel.onchange();
+  const first = startAnswer(page, 'First');
+  await first.end();
+  await flush();   // the lists are read again after the answer, and must keep the pick
+  const second = startAnswer(page, 'Second');
+  await second.end();
+  assert.strictEqual(page.sent[0].preset, 'fast');
+  assert.strictEqual(page.sent[1].preset, 'fast', 'the second question still uses the pick');
+});

@@ -25,11 +25,15 @@ if [ "${1:-}" = "--undo" ]; then
     fi
   done
   stop
+  trap 'start' EXIT   # App Inventor comes back whether or not the copy works
   for link in "$GEN" "$BAK"; do
     if [ -L "$link" ]; then
       target="$(readlink -f "$link")"
+      # Copied beside the link and checked before the link is replaced: a copy that fails leaves the drive in use.
+      cp -a "$target" "$link.restore"
+      diff -rq "$target" "$link.restore" >/dev/null
       rm "$link"
-      cp -a "$target" "$link"
+      mv "$link.restore" "$link"
     fi
   done
   start

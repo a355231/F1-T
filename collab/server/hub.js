@@ -19,6 +19,16 @@ const perf = require('./perf');
 const staticCache = new perf.StaticCache();
 const {Assistant} = require('./ai');
 
+// The hub's own calls to App Inventor (sign-in, project access, backups) use their own connections, so that
+// slow downloads through the proxy cannot starve them.
+const askAgent = new http.Agent({keepAlive: true, maxSockets: 16, keepAliveMsecs: 30000});
+const ASK_MS = 30 * 1000;   // an answer that takes longer than this counts as no answer
+// A backup zips the whole project, which can take minutes on a Pi.
+const BACKUP_ASK_MS = parseInt(process.env.BACKUP_TIMEOUT_MS || String(5 * 60 * 1000), 10);
+// A proxied reply from App Inventor that sends nothing for this long is given up.
+const PROXY_IDLE_MS = 2 * 60 * 1000;
+const BACKUP_FAILS_ALERT = 3;   // this many failed backups in a row are reported to the team
+
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 // A second listener for tunnels that connect from this machine (Tailscale Funnel). Everything that
@@ -43,8 +53,18 @@ function socketOpen(id) {
   const ws = sockets.get(id);
   return !!ws && ws.readyState === ws.OPEN;
 }
+// A message to several people is the same object each time, so it is turned into text once, not once per person.
+let lastMsg = null;
+let lastText = '';
+function encode(msg) {
+  if (msg !== lastMsg) {
+    lastMsg = msg;
+    lastText = JSON.stringify(msg);
+  }
+  return lastText;
+}
 const hub = new Hub((id, msg) => {
-  if (socketOpen(id)) sockets.get(id).send(JSON.stringify(msg));
+  if (socketOpen(id)) sockets.get(id).send(encode(msg));
 }, Date.now, socketOpen);
 setInterval(() => hub.sweep(), 10 * 1000).unref();
 
@@ -131,10 +151,14 @@ function proxy(req, res) {
     path: req.url,
     headers,
   }, upstreamRes => {
+    // A reply cut off part way (App Inventor restarting) must end the browser's reply too, not leave it waiting.
+    upstreamRes.on('close', () => { if (!upstreamRes.complete) res.destroy(); });
     const outHeaders = Object.assign({}, upstreamRes.headers);
     if (outHeaders.location) outHeaders.location = fixLocation(outHeaders.location, req);
+    // Only a reply with a known length is kept; a chunked one would be held whole in memory first.
     if (cacheable && upstreamRes.statusCode === 200 && !outHeaders['set-cookie'] &&
-        parseInt(outHeaders['content-length'] || '0', 10) <= perf.MAX_ENTRY_BYTES) {
+        outHeaders['content-length'] !== undefined &&
+        parseInt(outHeaders['content-length'], 10) <= perf.MAX_ENTRY_BYTES) {
       // Keep it for next time, and answer from the copy.
       staticCache.misses++;
       const chunks = [];
@@ -180,19 +204,44 @@ function proxy(req, res) {
       upstreamRes.pipe(res);
     }
   });
-  upstreamReq.on('error', err => {
-    if (!res.headersSent) {
+  // App Inventor that stops answering is given up on, and so is a browser that has gone (a download closed part way),
+  // so neither keeps a connection to App Inventor open for nothing.
+  upstreamReq.setTimeout(PROXY_IDLE_MS, () => upstreamReq.destroy(new Error('App Inventor stopped answering')));
+  res.on('close', () => { if (!res.writableFinished) upstreamReq.destroy(); });
+  upstreamReq.on('error', () => {
+    if (res.destroyed || res.writableEnded) return;   // the browser has already gone
+    if (res.headersSent) {
+      res.destroy();
+    } else {
       res.writeHead(502, {'content-type': 'text/plain'});
+      res.end('App Inventor is not reachable. It may be restarting.');
     }
-    res.end('App Inventor server is not reachable: ' + err.message);
   });
   req.pipe(upstreamReq);
 }
 
-function askAppInventor(path, cookie, method = 'GET', body = null, extraHeaders = {}) {
+// One call from the hub to App Inventor. Resolves to:
+//   * the JSON reply, for a 200;
+//   * for any other status with a JSON body, that body plus {ok: false, status} (so a 403 "no access to project" is
+//     told apart from a failure);
+//   * null when App Inventor did not answer: no reply, a reply cut off part way, unreadable JSON, or no answer
+//     within ms (the wait for a free connection counts too).
+function askAppInventor(path, cookie, method = 'GET', body = null, extraHeaders = {}, ms = ASK_MS) {
   return new Promise(resolve => {
-    const req = http.request({
-      agent: perf.agent,
+    let req = null;
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      resolve(value);
+    };
+    const deadline = setTimeout(() => {
+      finish(null);
+      if (req) req.destroy();
+    }, ms);
+    req = http.request({
+      agent: askAgent,
       hostname: UPSTREAM.hostname,
       port: UPSTREAM.port || 80,
       method,
@@ -201,22 +250,26 @@ function askAppInventor(path, cookie, method = 'GET', body = null, extraHeaders 
         method === 'GET' ? {} : body === null ? {'content-length': '0'} :
           {'content-length': Buffer.byteLength(body), 'content-type': 'application/json'},
         extraHeaders),
-      timeout: 30000,
+      timeout: ms,
     }, res => {
-      let body = '';
+      let text = '';
       res.setEncoding('utf8');
-      res.on('data', chunk => { body += chunk; });
+      res.on('data', chunk => { text += chunk; });
+      // A reply cut off part way never reaches 'end', but it does close.
+      res.on('close', () => finish(null));
       res.on('end', () => {
-        if (res.statusCode !== 200) return resolve(null);
+        let data = null;
         try {
-          resolve(JSON.parse(body));
+          data = JSON.parse(text);
         } catch (e) {
-          resolve(null);
+          return finish(null);
         }
+        if (res.statusCode === 200) return finish(data);
+        finish(data && typeof data === 'object' ? Object.assign({}, data, {ok: false, status: res.statusCode}) : null);
       });
     });
     req.on('timeout', () => req.destroy());
-    req.on('error', () => resolve(null));
+    req.on('error', () => finish(null));
     req.end(body === null ? undefined : body);
   });
 }
@@ -230,16 +283,45 @@ function isFromPiItself(req) {
     !req.headers['x-forwarded-for'];
 }
 
-function isPiOnlyPath(url) {
-  const path = url.split('?')[0].toLowerCase();
-  return path.startsWith('/_ah/') || path === '/_ah' || path.startsWith('/login/google');
+// The path as the App Engine dev server will route it: percent-escapes decoded (it decodes them before it matches a
+// servlet path), ';' parameters and dot segments removed, repeated slashes folded, lower-cased. The Pi-only checks
+// test this, not the raw URL, so /%5Fah/admin is refused just like /_ah/admin. null when the escapes do not decode.
+function routedPath(url) {
+  let path = url.split('?')[0];
+  try {
+    for (let i = 0; i < 3; i++) {
+      const decoded = decodeURIComponent(path);
+      if (decoded === path) break;
+      path = decoded;
+    }
+  } catch (e) {
+    return null;
+  }
+  const parts = [];
+  for (const segment of path.split(/[?#]/)[0].replace(/\\/g, '/').split('/')) {
+    const name = segment.split(';')[0];
+    if (name === '' || name === '.') continue;
+    if (name === '..') parts.pop();
+    else parts.push(name);
+  }
+  return ('/' + parts.join('/')).toLowerCase();
+}
+
+function isPiOnlyPath(path) {
+  return path === '/_ah' || path.startsWith('/_ah/') || path.startsWith('/login/google');
 }
 
 const ai = new Assistant({ask: askAppInventor, hub});
 
 const server = http.createServer((req, res) => {
   req.socket.setNoDelay(true);
-  if (isPiOnlyPath(req.url) && !isFromPiItself(req)) {
+  const path = routedPath(req.url);
+  if (path === null) {
+    res.writeHead(400, {'content-type': 'text/plain'});
+    res.end('Bad request.');
+    return;
+  }
+  if (isPiOnlyPath(path) && !isFromPiItself(req)) {
     res.writeHead(403, {'content-type': 'text/plain'});
     res.end('This page is only available on the Raspberry Pi itself.');
     return;
@@ -280,12 +362,16 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({noServer: true, maxPayload: MAX_MESSAGE_BYTES});
 
 async function onUpgrade(req, socket, head) {
+  // Until ws takes the socket, nothing else listens for its errors: a connection reset while it waits for App
+  // Inventor's answer must close that socket, not end the hub.
+  socket.on('error', () => socket.destroy());
   if (!req.url.startsWith('/collab/ws')) {
     socket.destroy();
     return;
   }
   const cookie = req.headers.cookie || '';
   const me = await askAppInventor('/ode/collab/whoami', cookie);
+  if (socket.destroyed) return;
   if (!me || !me.userId) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
@@ -298,12 +384,19 @@ server.on('upgrade', onUpgrade);
 function onConnection(ws, me, cookie) {
   const client = hub.addClient({userId: me.userId, email: me.email});
   client.restoreAt = 0;
+  client.joinAttempt = 0;   // counts joins and leaves, so that a slow answer to an old join is ignored
   sockets.set(client.id, ws);
   cookies.set(client.id, cookie);
   hub.welcome(client.id);
   ws.send(JSON.stringify({t: 'alerts', list: alerts}));
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
+  // A frame that is too big or breaks the protocol is an error on this socket only. Without a listener it would
+  // end the whole hub, and with it everyone's live connection.
+  ws.on('error', err => {
+    console.error('Connection error:', err.message);
+    ws.terminate();
+  });
   ws.on('message', async raw => {
     let msg;
     try {
@@ -311,12 +404,31 @@ function onConnection(ws, me, cookie) {
     } catch (e) {
       return;
     }
+    if (!msg || typeof msg !== 'object') return;
     switch (msg.t) {
       case 'join': {
         const projectId = String(msg.projectId || '');
         if (!/^\d+$/.test(projectId)) return;
-        const access = await askAppInventor('/ode/collab/access?projectId=' + projectId, cookie);
-        if (!access || !access.ok) {
+        const attempt = ++client.joinAttempt;
+        const stale = () => attempt !== client.joinAttempt;   // a later join or a leave has overtaken this one
+        // A check that did not go through (no answer, or a failure other than a refusal) is tried once more.
+        const failed = a => !a || (!a.ok && a.status !== 403);
+        const check = () => askAppInventor('/ode/collab/access?projectId=' + projectId, cookie);
+        let access = await check();
+        if (stale()) return;
+        if (failed(access)) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          if (stale()) return;
+          access = await check();
+          if (stale()) return;
+          if (failed(access)) {
+            // The page tries again in a few seconds (see tick in collab.js).
+            ws.send(JSON.stringify({t: 'error', error: 'retry', projectId}));
+            return;
+          }
+        }
+        // 403 is App Inventor saying this person has no access to the project.
+        if (!access.ok) {
           ws.send(JSON.stringify({t: 'error', error: 'no-access', projectId}));
           return;
         }
@@ -324,6 +436,7 @@ function onConnection(ws, me, cookie) {
         break;
       }
       case 'leave':
+        client.joinAttempt++;
         hub.leave(client.id);
         break;
       case 'presence':
@@ -334,8 +447,14 @@ function onConnection(ws, me, cookie) {
         break;
       case 'sync-all': {
         // A manual sync of the project (see Hub.syncAll in rooms.js). When it does not go through, the person who asked
-        // is told why; when it does, every page reloads.
-        const result = await hub.syncAll(client.id, String(msg.projectId || ''));
+        // is told why; when it does, every page reloads. Two in quick succession would reload everyone twice, so the
+        // second waits. (A restore is not limited: a refused restore would leave the other tabs out of date.)
+        const projectId = String(msg.projectId || '');
+        if (hub.reloadTooSoon(projectId)) {
+          hub.send(client.id, {t: 'notice', text: 'Everyone on this project was just reloaded. Try again in a moment.'});
+          break;
+        }
+        const result = await hub.syncAll(client.id, projectId);
         if (!result.ok) hub.send(client.id, {t: 'notice', text: result.message});
         break;
       }
@@ -386,7 +505,10 @@ function onConnection(ws, me, cookie) {
         if (!access || !access.ok) return;
         if (msg.t === 'restoring') {
           client.restoreAt = now();
-          hub.broadcastToProject(projectId, {t: 'freeze', by: client.name});
+          hub.freezeForRestore(projectId, client.name);
+        } else if (msg.failed) {
+          // The restore did not go through (the page that asked says so): everyone carries on as before.
+          hub.unfreezeProject(projectId);
         } else {
           hub.restored(projectId, client.name);
         }
@@ -511,17 +633,28 @@ async function handleAdmin(req, res) {
 setInterval(() => hub.syncTick(), SYNC_MS).unref();
 
 let backingUp = false;
+let backupsOff = false;          // App Inventor keeps no backups here: stop asking until a restart
+const backupFails = new Map();   // projectId -> backups that failed in a row
 async function runBackups() {
-  if (backingUp) return;
+  if (backingUp || backupsOff) return;
   backingUp = true;
   try {
     for (const due of hub.backupsDue()) {
       const cookie = cookies.get(due.clientId);
       if (!cookie) continue;
       const result = await askAppInventor('/ode/collab/backup?projectId=' + due.projectId, cookie,
-        'POST');
-      // enabled=false means this server keeps no backups: stop asking until a restart.
-      if (result && result.ok) hub.backedUp(due.projectId, due.seq);
+        'POST', null, {}, BACKUP_ASK_MS);
+      // enabled=false means this server keeps no backups. Recording that as a backup would be a lie.
+      if (result && result.ok && result.enabled === false) {
+        backupsOff = true;
+        break;
+      }
+      if (result && result.ok) {
+        backupFails.delete(due.projectId);
+        hub.backedUp(due.projectId, due.seq, due.epoch);
+      } else {
+        backupFails.set(due.projectId, (backupFails.get(due.projectId) || 0) + 1);
+      }
     }
   } finally {
     backingUp = false;
@@ -560,6 +693,12 @@ async function checkHealth() {
   if (!(await portOpen(UPSTREAM.port || 80, UPSTREAM.hostname))) {
     list.push('App Inventor is not answering. It may be restarting; saving is paused.');
   }
+  if (backupsOff) {
+    list.push('Backups are switched off on this Pi, so changes are not being kept. Whoever runs the Pi should set the backup folder.');
+  }
+  if ([...backupFails.values()].some(n => n >= BACKUP_FAILS_ALERT)) {
+    list.push('Project backups keep failing, so recent changes may not be kept. Whoever runs the Pi should check it.');
+  }
   try {
     const upd = fs.readFileSync(DATA_DIR + '/update-available', 'utf8').trim();
     if (upd) list.push('A newer version is available (' + upd + '). Whoever runs the Pi can update it.');
@@ -571,7 +710,7 @@ async function checkHealth() {
     }
   }
 }
-setInterval(checkHealth, 30 * 1000).unref();
+setInterval(checkHealth, parseInt(process.env.HEALTH_MS || '30000', 10)).unref();
 setTimeout(checkHealth, 3000).unref();
 
 if (EXTERNAL_PORT) {

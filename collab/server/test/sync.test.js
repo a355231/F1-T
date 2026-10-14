@@ -82,8 +82,21 @@ test('backups are due only for projects with changes since the last backup', () 
   const due = hub.backupsDue();
   assert.strictEqual(due.length, 1);
   assert.strictEqual(due[0].clientId, a.id);      // made with the main client's account
-  hub.backedUp('5', due[0].seq);
+  hub.backedUp('5', due[0].seq, due[0].epoch);
   assert.deepStrictEqual(hub.backupsDue(), []);
+});
+
+test('a backup reported after a restore does not mark the restored content as backed up', () => {
+  const {hub, pair} = setup();
+  const {b} = pair();
+  for (let i = 0; i < 50; i++) hub.op(b.id, {projectId: '5', screen: 'Screen1', kind: 'blocks', data: {}});
+  const [before] = hub.backupsDue();
+  hub.restored('5', 'a');   // a backup was put back: a new session starts, with no edits yet
+  for (let i = 0; i < 50; i++) hub.op(b.id, {projectId: '5', screen: 'Screen1', kind: 'blocks', data: {}});
+  hub.backedUp('5', before.seq, before.epoch);   // the report for the old session comes back late
+  const due = hub.backupsDue();
+  assert.strictEqual(due.length, 1, 'the restored project is still due a backup');
+  assert.strictEqual(due[0].seq, 50);
 });
 
 test('an AI change waits until every open tab has saved; a tab that stays silent stops it after the wait', async () => {

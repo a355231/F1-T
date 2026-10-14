@@ -204,3 +204,12 @@ test('yes/no and colour values are stored the way App Inventor writes them', () 
   assert.strictEqual(r.node.BackgroundColor, '&HFFFF0000');
   assert.strictEqual(r.node.Text, 'true', 'a text property keeps what was written');
 });
+
+test('a comment or processing instruction that is never closed is refused at once, not scanned to the end again and again', () => {
+  const started = Date.now();
+  const problems = proj.checkProject({'src/a/Screen1.bky': '<xml>' + '<?'.repeat(20000)});
+  assert.ok(Date.now() - started < 1000, 'refused quickly');
+  assert.ok(problems.some(p => /does not read/.test(p.message)));
+  const closed = proj.checkProject({'src/a/Screen1.bky': '<xml><!-- a note --></xml>'});
+  assert.ok(closed.every(p => !/does not read/.test(p.message)), 'a closed comment is fine');
+});

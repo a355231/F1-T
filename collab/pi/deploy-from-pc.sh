@@ -23,11 +23,13 @@ rsync -az "$ROOT/appinventor/lib/keyczar/KeyczarTool.jar" "$TARGET:/opt/appinven
 rsync -az --chmod=F755 "$ROOT/collab/pi/apply-config.sh" "$ROOT/collab/pi/set-team-code.sh" \
   "$ROOT/collab/pi/tunnel-url.sh" "$ROOT/collab/pi/show-info.sh" "$ROOT/collab/pi/protect-sd.sh" \
   "$ROOT/collab/pi/move-data.sh" "$ROOT/collab/pi/watchdog.sh" "$ROOT/collab/pi/update.sh" \
-  "$ROOT/collab/pi/stable-link.sh" "$ROOT/collab/pi/set-build-server.sh" "$ROOT/collab/pi/set-ai.sh" "$TARGET:/opt/appinventor/"
+  "$ROOT/collab/pi/stable-link.sh" "$ROOT/collab/pi/set-build-server.sh" "$ROOT/collab/pi/set-ai.sh" \
+  "$ROOT/collab/pi/mitstatus.sh" "$TARGET:/opt/appinventor/"
 
 echo "== Applying the Pi's team code and restarting"
 # The team code stays on the Pi; apply-config.sh copies it into the new build without printing it.
-ssh "$TARGET" '/opt/appinventor/apply-config.sh &&
+ssh "$TARGET" 'sudo install -m 755 /opt/appinventor/mitstatus.sh /usr/local/bin/MITSTATUS &&
+  /opt/appinventor/apply-config.sh &&
   cd /opt/appinventor/hub && npm install --omit=dev --no-audit --no-fund &&
   sudo systemctl restart appinventor collab-hub && sudo systemctl start cloudflared-quick'
 

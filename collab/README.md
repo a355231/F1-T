@@ -109,7 +109,7 @@ The status shows what an update is doing and how long it has left: while a build
 the last build on this Pi took (45 minutes until one has finished). It also shows how the last update went if it failed,
 a newer version that is waiting, and the previous version that option 10 goes back to.
 The OpenCode Go options work whichever service is in use. The status shows the service in use, whether each service's key
-is set (never the keys), and, for OpenCode Go, that its models are offered in the companion only after `/beta`. It is
+is set (never the keys), and whether the override code is set (never the code itself), and, for OpenCode Go, that its models are offered in the companion only after `/beta`. It is
 `/usr/local/bin/MITSTATUS`, installed by the install and the update from `collab/pi/mitstatus.sh`. Its model lists are read
 from the hub's own preset tables, so it shows the models the hub is running with. On a Pi whose hub is older than those
 tables, it reads the project folder's copy and says the models take effect once the hub is updated.

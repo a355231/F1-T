@@ -238,8 +238,10 @@ const TOOLS = [
       if (!query || query.length > 120) throw new Error('give a search of 1 to 120 characters');
       // A pattern with a repeated group (or a back-reference) can take exponential time on a long line, and the
       // search runs on the thread that serves everyone's editor. Only simple patterns are allowed.
-      if (a.regex && /\)[*+{]|\\[1-9]|\(\?[=!<]/.test(query)) {
-        throw new Error('that pattern is too complicated; search for plain text, or use a simple pattern without repeated groups');
+      // Two wildcards in a row already make the matching slow on a long line, so a pattern has at most two of * + {, and
+      // each line is tested in short windows, with a time budget for the whole search.
+      if (a.regex && (/\)[*+{]|\\[1-9]|\(\?[=!<]/.test(query) || (query.match(/[*+{]/g) || []).length > 2)) {
+        throw new Error('that pattern is too complicated; search for plain text, or use a simpler pattern (at most two of * + {, no repeated groups)');
       }
       let re = null;
       if (a.regex) {
@@ -250,13 +252,23 @@ const TOOLS = [
         }
       }
       const hits = [];
+      const started = Date.now();
+      const tooLong = () => Date.now() - started > 1500;
+      // A designer file can be one very long line. Tested in windows, a line cannot take long on its own.
+      const lineMatches = line => {
+        if (!re) return line.toLowerCase().includes(query.toLowerCase());
+        for (let at = 0; at < Math.max(line.length, 1); at += 300) {
+          if (re.test(line.slice(at, at + 400))) return true;
+          if (tooLong()) break;
+        }
+        return false;
+      };
       for (const [path, text] of await ctx.draft.merged()) {
-        String(text).split('\n').forEach((line, i) => {
-          if (hits.length >= 80) return;
-          if (re ? re.test(line) : line.toLowerCase().includes(query.toLowerCase())) {
-            hits.push(path + ':' + (i + 1) + ': ' + line.trim().slice(0, 160));
-          }
-        });
+        const lines = String(text).split('\n');
+        for (let i = 0; i < lines.length && hits.length < 80; i++) {
+          if (tooLong()) throw new Error('that search took too long; try a simpler one');
+          if (lineMatches(lines[i])) hits.push(path + ':' + (i + 1) + ': ' + lines[i].trim().slice(0, 160));
+        }
       }
       return {text: hits.join('\n') || 'No matches.', detail: hits.length + ' matches'};
     }},

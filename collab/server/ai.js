@@ -60,9 +60,17 @@ function savePin(value) {
 }
 const SEARCH_KEY = () => process.env.BRAVE_API_KEY || '';
 const PER_MINUTE = 12;
-const DAILY = () => parseInt(process.env.AI_DAILY_LIMIT || '300', 10);
+// The team's questions a day. A setting that is not a whole number of zero or more keeps the default: a NaN limit
+// would never be reached, so the limit would be off.
+const DAILY = () => {
+  const n = Number(process.env.AI_DAILY_LIMIT || '300');
+  return Number.isInteger(n) && n >= 0 ? n : 300;
+};
 const MAX_TOOL_RESULT = 60000;
 const SMALL_STEPS = 14;
+// Full-app mode has no time limit, but each step is a paid model call, so a runaway answer is stopped at this many.
+const FULL_STEPS = 200;
+const SUB_STEPS_MAX = 40;           // the model calls one subagent may make
 const SMALL_MS = 4 * 60 * 1000;
 const GOAL_STEPS = 40;
 const GOAL_MS = 20 * 60 * 1000;
@@ -72,6 +80,7 @@ const FULL_TTL_MS = 60 * 60 * 1000;
 const ARTIFACT_TTL_MS = 60 * 60 * 1000;
 const ARTIFACTS_PER_USER = 20;
 const SCRATCH_TTL_MS = 60 * 60 * 1000;
+const PURGE_MS = 10 * 60 * 1000;
 const VISION_TTL_MS = 6 * 60 * 60 * 1000;
 const VISION_RETRY_MS = 5 * 60 * 1000;
 const IMAGES_PER_ANSWER = 6;       // pictures the model is shown in one answer
@@ -222,6 +231,7 @@ const REPORT_EVENT_MAX = 2000;
 const TASK_EVENT_MAX = 200;
 const SUB_LOOPING = 'The subagent kept repeating the same step, so it has stopped. Do this piece yourself, or hand it over ' +
   'again with a clearer task.';
+const SUB_TOO_MANY = 'The subagent has taken as many steps as it may, so it has stopped. Hand over a smaller piece of the job.';
 const SUB_PAUSED = 'The subagent paused, because its answers kept running past their length. Hand over a smaller piece of the job.';
 const SUBAGENT_NOTE = 'You are a subagent. The AI helper of App Inventor Team Edition has handed you one piece of work on ' +
   'the open project. Do that piece with the project tools, and check your changes with check_project. You cannot talk to ' +
@@ -675,6 +685,7 @@ class Assistant {
     this.runs = new Map();            // "user|project" -> the answer being worked on, or just finished
     this.drafts = new Map();          // "user|project" -> {draft, at}: full-app drafts kept between messages
     this.proposals = new Map();
+    this.applying = new Set();        // project ids with a change being applied (see apply)
     this.artifacts = new Map();       // id -> {owner, kind, data|svg, mime, width, height, at, title}
     this.scratch = new Map();         // "user|project" -> {notes: Map, at}
     this.recent = new Map();          // user -> timestamps
@@ -684,6 +695,18 @@ class Assistant {
     this.pinLockedUntil = 0;
     this.betaUntil = new Map();       // user id -> time OpenCode Go ends for them, see /beta
     this.infoCache = new Map();       // model -> {vision, context, until}
+    // Each kind of state is also checked when it is next used, but a person who has left would otherwise keep their
+    // drafts, proposals and pictures in memory until someone else asked for the same thing.
+    this.purgeTimer = setInterval(() => this.purgeStale(), PURGE_MS);
+    if (this.purgeTimer.unref) this.purgeTimer.unref();
+  }
+
+  purgeStale() {
+    const now = this.now();
+    for (const [k, v] of this.drafts) if (now - v.at > FULL_TTL_MS) this.drafts.delete(k);
+    for (const [k, p] of this.proposals) if (now - p.at > PROPOSAL_TTL_MS) this.proposals.delete(k);
+    for (const [id, a] of this.artifacts) if (now - a.at > ARTIFACT_TTL_MS) this.artifacts.delete(id);
+    for (const [k, v] of this.scratch) if (now - v.at > SCRATCH_TTL_MS) this.scratch.delete(k);
   }
 
   // The model of each request comes from its preset, so only the key is needed here.
@@ -965,11 +988,16 @@ class Assistant {
     }
     if (req.method !== 'POST') return json(404, {error: 'unknown'});
     const limit = path_ === '/collab/ai/stream' ? STREAM_BODY_MAX : BODY_MAX;
-    let body = '';
+    // The bytes are joined before they are read as text: a character split between two chunks would otherwise be garbled.
+    const chunks = [];
+    let size = 0;
     for await (const chunk of req) {
-      body += chunk;
-      if (body.length > limit) return json(413, {error: 'too long'});
+      const piece = Buffer.from(chunk);
+      size += piece.length;
+      if (size > limit) return json(413, {error: 'too long'});
+      chunks.push(piece);
     }
+    const body = Buffer.concat(chunks).toString('utf8');
     let data;
     try {
       data = JSON.parse(body);
@@ -1119,6 +1147,22 @@ class Assistant {
       res.end();
       return Promise.resolve();
     }
+    // Nobody is watching the answer: it stops after orphanMs unless a browser comes back.
+    const leftAlone = () => {
+      if (run.done || run.watchers.size !== 0) return;
+      this.log(run.by + ': nobody is watching the answer; it stops in ' + Math.round(this.orphanMs / 1000) + ' s unless a browser comes back');
+      clearTimeout(run.orphanTimer);
+      run.orphanTimer = setTimeout(() => {
+        this.log(run.by + ': nobody came back, so the answer was stopped');
+        run.controller.abort();
+      }, this.orphanMs);
+      if (run.orphanTimer.unref) run.orphanTimer.unref();
+    };
+    if (res.destroyed || res.writableEnded) {
+      // The browser left while the request was being checked (see handle), so its 'close' has already come and gone.
+      leftAlone();
+      return Promise.resolve();
+    }
     // A ping at once, and then every pingMs: bytes keep flowing, so a tunnel does not close the connection
     // as idle, and the page can tell a dead connection from a quiet answer.
     this.send(res, 'data: {"type":"ping"}\n\n');
@@ -1133,14 +1177,7 @@ class Assistant {
         clearInterval(ping);
         if (!run.watchers.delete(res)) return;
         resolve();
-        if (!run.done && run.watchers.size === 0) {
-          this.log(run.by + ': nobody is watching the answer; it stops in ' + Math.round(this.orphanMs / 1000) + ' s unless a browser comes back');
-          run.orphanTimer = setTimeout(() => {
-            this.log(run.by + ': nobody came back, so the answer was stopped');
-            run.controller.abort();
-          }, this.orphanMs);
-          if (run.orphanTimer.unref) run.orphanTimer.unref();
-        }
+        leftAlone();
       });
     });
   }
@@ -1237,7 +1274,7 @@ class Assistant {
     }
     // Full-app mode has no step or time limit: it goes on until the app is complete, or the person presses Stop.
     // Any other answer is kept to a number of steps and a time, so that one question cannot run for ever.
-    const limit = full ? Infinity : goal ? this.goalSteps : SMALL_STEPS;
+    const limit = full ? FULL_STEPS : goal ? this.goalSteps : SMALL_STEPS;
     let deadline = full ? Infinity : this.now() + (goal ? this.goalMs : SMALL_MS);
     let cutOff = 0;           // answers in a row that ran out of room
     let nudges = 0;           // full-app mode: answers in a row that stopped with the app unfinished
@@ -1330,6 +1367,7 @@ class Assistant {
       }
       emit({type: 'status', text: goal
         ? 'Stopped: the step limit for this goal was reached. Ask again to keep going.'
+        : full ? 'Stopped: the step limit for this app was reached. Ask again to keep going.'
         : 'That took too many steps. Try asking for something smaller.'});
     } finally {
       // In full-app mode the app is offered for Apply only once it is complete; until then, say so.
@@ -1389,6 +1427,7 @@ class Assistant {
       for (;;) {
         if (ctx.signal && ctx.signal.aborted) throw stoppedError();
         steps++;
+        if (steps > SUB_STEPS_MAX) return end('failed', {text: SUB_TOO_MANY, detail: 'too many steps'}, {detail: 'too many steps'});
         const list = registry.definitions(sub);
         const compacted = await compactor.compactContext(messages, {
           window: await this.contextWindow(info.model, service), maxOutput: maxTokensOf(info.reasoning),
@@ -1557,6 +1596,8 @@ class Assistant {
       clearTimeout(idle);
       clearTimeout(cap);
       if (signal) signal.removeEventListener('abort', quit);
+      // However the answer ended, the request to the service is closed. A failed try would otherwise keep its socket open.
+      guard.abort();
     }
   }
 
@@ -1758,6 +1799,13 @@ class Assistant {
         throw new Error('not proposed: ' + after.length + ' problem(s) remain: ' +
           after.slice(0, 5).map(p => p.file + ': ' + p.message).join('; ') + '. Fix them, then propose again');
       }
+    } else {
+      // A small change is not checked against the whole project (the draft may hold only part of it). A file that does
+      // not read at all is broken whatever the rest holds, and is refused.
+      const unread = proj.checkProject(Object.fromEntries(picked)).filter(p => /does not read/.test(p.message));
+      if (unread.length) {
+        throw new Error('not proposed: ' + unread.map(p => p.file + ': ' + p.message).join('; ') + '. Fix it, then propose again');
+      }
     }
     if (mediaIn.length > MEDIA_MAX) throw new Error('at most ' + MEDIA_MAX + ' pictures at a time');
     const pictures = mediaIn.map(m => {
@@ -1832,6 +1880,19 @@ class Assistant {
   // save, since a teammate's edit can land meanwhile. Any refusal after the tabs were frozen tells them to reload, which
   // also unfreezes them.
   async apply(json, me, cookie, projectId, data) {
+    // One change at a time per project: a second would read the project before the first is written, and overwrite it.
+    if (this.applying.has(projectId)) {
+      return json(409, {error: 'Another change to this project is being applied. Try again in a moment.'});
+    }
+    this.applying.add(projectId);
+    try {
+      return await this.applyNow(json, me, cookie, projectId, data);
+    } finally {
+      this.applying.delete(projectId);
+    }
+  }
+
+  async applyNow(json, me, cookie, projectId, data) {
     const id = String(data.id || '');
     const p = this.proposals.get(id);
     if (!p || p.userId !== me.userId || p.projectId !== projectId || this.now() - p.at > PROPOSAL_TTL_MS) {
@@ -1870,8 +1931,13 @@ class Assistant {
       this.hub.broadcastToProject(projectId, {t: 'reload', by: 'nobody'});   // unfreeze by reloading
       return json(400, {error: failure});
     };
-    // A tab that could not save what it had says so (ok false) when it answers the freeze.
-    if (flushed && flushed.ok === false) return refuse(APPLY_SAVE_FAILED);
+    // A tab that could not save what it had says so (ok false) when it answers the freeze. The tabs are unfrozen but not
+    // reloaded: a reload would throw away the unsaved edits of the tab that could not save.
+    if (flushed && flushed.ok === false) {
+      logRefusal(APPLY_SAVE_FAILED);
+      this.hub.broadcastToProject(projectId, {t: 'unfreeze', applyId});
+      return json(400, {error: APPLY_SAVE_FAILED});
+    }
     let checked;
     try {
       checked = await this.applyReason(projectId, cookie, p);

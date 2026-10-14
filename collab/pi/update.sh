@@ -84,14 +84,14 @@ answers() {
 
 # True once the version given answers, and still does STABLE_SECONDS later.
 healthy() {
-  local waited=0
-  while [ "$waited" -lt "$HEALTH_SECONDS" ]; do
+  # The time is counted from the clock, so that the stability wait counts toward the limit too.
+  local deadline=$(( $(date +%s) + HEALTH_SECONDS ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
     if answers "$1"; then
       sleep "$STABLE_SECONDS"
       answers "$1" && return 0
     fi
     sleep "$HEALTH_STEP"
-    waited=$((waited + HEALTH_STEP))
   done
   return 1
 }
@@ -118,8 +118,9 @@ snapshot() {
 restore_previous() {
   [ -f "$ROLL/commit" ] || { log "There is no saved version to go back to."; return 1; }
   systemctl stop collab-hub appinventor 2>/dev/null
-  rsync -a --delete --exclude 'WEB-INF/appengine-generated' "$ROLL/war/" "$BASE/war/"
-  rsync -a --delete --exclude node_modules "$ROLL/hub/" "$BASE/hub/"
+  # A copy that fails leaves the old version only partly back: that is reported (fail), not called a success.
+  rsync -a --delete --exclude 'WEB-INF/appengine-generated' "$ROLL/war/" "$BASE/war/" || return 1
+  rsync -a --delete --exclude node_modules "$ROLL/hub/" "$BASE/hub/" || return 1
   cp -p "$ROLL"/scripts/*.sh "$BASE/" 2>/dev/null
   cp -p "$ROLL"/units/* "$UNITS/" 2>/dev/null
   cp -p "$ROLL/version" "$BASE/version" 2>/dev/null
@@ -139,9 +140,10 @@ fail() {  # stage, reason
     tail -n 25 "$BUILD_LOG" | sed 's/^/    /' >> "$LOG"
   fi
   progress restoring "$(cat "$ROLL/version" 2>/dev/null || echo unknown)"
-  restore_previous
   local back
-  if healthy "$(cat "$ROLL/version" 2>/dev/null)"; then
+  if ! restore_previous; then
+    back="The previous version could not be put back in full, so App Inventor may be down. Please ask whoever runs the Raspberry Pi."
+  elif healthy "$(cat "$ROLL/version" 2>/dev/null)"; then
     back="The previous version is running again."
   else
     back="The previous version did not start either, so App Inventor may be down. Please ask whoever runs the Raspberry Pi."
@@ -219,7 +221,8 @@ main() {
 
   branch="$(as_owner git -C "$REPO" rev-parse --abbrev-ref HEAD)"
   # Downloading is not news for the team: if GitHub cannot be reached, the next half hour tries again.
-  if ! as_owner git -C "$REPO" fetch -q origin "$branch"; then
+  # A connection that stalls is given up on, rather than holding the update lock for ever.
+  if ! as_owner git -C "$REPO" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=120 fetch -q origin "$branch"; then
     log "Could not reach GitHub; I will try again at the next half hour."
     exit 1
   fi
@@ -271,14 +274,15 @@ main() {
   state_set last_day "$(date +%F)"
   log "Updating from $(cat "$BASE/version" 2>/dev/null || echo unknown) to $NEW_SHORT."
   progress preparing "$NEW_SHORT"
-  if ! snapshot; then
-    rm -f "$PROGRESS"
-    log "Could not save the current version, so nothing was changed."
-    exit 1
-  fi
   if ! as_owner git -C "$REPO" merge -q --ff-only "origin/$branch"; then
     rm -f "$PROGRESS"
     log "Could not fast-forward the downloaded copy, so nothing was changed."
+    exit 1
+  fi
+  # The version to go back to is saved only once the update is certain to go on: a refused merge must not replace it.
+  if ! snapshot; then
+    rm -f "$PROGRESS"
+    log "Could not save the current version, so nothing was changed."
     exit 1
   fi
 

@@ -306,8 +306,15 @@ test('two model calls in one answer may give the same provider id: their tool st
   assert.strictEqual(texts(evs), 'Let me look. All fine.');
 });
 
+// The screen with one label changed: a real change for a small proposal. Such a file must read, see makeProposal.
+function editedScreen() {
+  const o = proj.parseScm(SCM);
+  o.Properties.$Components[0].Text = 'Points';
+  return proj.writeScm(o);
+}
+
 test('a proposal is applied only by the person who got it, once', async () => {
-  const t = setup([toolTurn('propose_change', {summary: 'Rename a label', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')]);
+  const t = setup([toolTurn('propose_change', {summary: 'Rename a label', files: {'src/a/Screen1.scm': editedScreen()}}), textTurn('Press Apply.')]);
   const evs = await say(t.ai, 'ann', 'fix it');
   const proposal = evs.find(e => e.type === 'proposal');
   assert.deepStrictEqual(proposal.files, [{path: 'src/a/Screen1.scm', isNew: false}]);
@@ -315,7 +322,7 @@ test('a proposal is applied only by the person who got it, once', async () => {
   assert.strictEqual((await apply(t.ai, 'bob', proposal.id)).status, 404, 'bob cannot apply it');
   assert.strictEqual((await apply(t.ai, 'ann', proposal.id)).status, 200);
   const write = t.asked.find(a => a.path.startsWith('/ode/collab/writefiles'));
-  assert.deepStrictEqual(JSON.parse(write.body), {files: {'src/a/Screen1.scm': 'new'}});
+  assert.deepStrictEqual(JSON.parse(write.body), {files: {'src/a/Screen1.scm': editedScreen()}});
   assert.strictEqual((await apply(t.ai, 'ann', proposal.id)).status, 404, 'only once');
 });
 
@@ -730,7 +737,7 @@ test('an AI change waits until every open tab has saved, then goes in, and the o
   assert.ok(sent.some(s => s.msg.t === 'reload' && s.id === ann.id), 'the open tab reloads to show the change');
 });
 
-test('a tab that does not answer holds an AI change only for the wait, then the change is not made and the tabs reload', async () => {
+test('a tab that does not answer holds an AI change only for the wait, then the change is not made and the tabs are unfrozen', async () => {
   const t = setup([
     toolTurn('draft_replace', BIG_SCREEN_EDIT, 'r1'),
     toolTurn('propose_draft', {summary: 'A block'}, 'p1'),
@@ -747,7 +754,8 @@ test('a tab that does not answer holds an AI change only for the wait, then the 
   assert.match(JSON.parse(res.body).error, /could not save what it had/);
   assert.ok(Date.now() - started < 2000, 'it gave up after the wait, not after a minute');
   assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'nothing was written');
-  assert.ok(sent.some(s => s.msg.t === 'reload' && s.id === ann.id), 'the open tab reloads, which also unfreezes it');
+  assert.ok(sent.some(s => s.msg.t === 'unfreeze' && s.id === ann.id), 'the open tab is unfrozen and not reloaded, so what it had unsaved is kept');
+  assert.ok(!sent.some(s => s.msg.t === 'reload'), 'no tab is reloaded for a change that did not go in');
 });
 
 test('/goal with nothing after it asks for the goal', async () => {
@@ -773,7 +781,7 @@ test('web search is offered only when a search key is set, and is used through t
 test('applying a full-app change sends the header that allows it; a small change does not', async () => {
   const t = setup([
     toolTurn('scm_new_screen', {name: 'Screen2'}, 'n1'), toolTurn('propose_draft', {summary: 'New screen', complete: true}, 'p1'), textTurn('Press Apply.'),
-    toolTurn('propose_change', {summary: 'Small', files: {'src/a/Screen1.scm': 'y'}}), textTurn('Press Apply.'),
+    toolTurn('propose_change', {summary: 'Small', files: {'src/a/Screen1.scm': editedScreen()}}), textTurn('Press Apply.'),
   ]);
   await say(t.ai, 'ann', '/override ' + PIN_VALUE);
   const full = (await say(t.ai, 'ann', 'add a screen')).find(e => e.type === 'proposal');
@@ -2474,7 +2482,7 @@ test('a file whose text is the project\'s own is left out of a proposal, and the
 });
 
 test('Apply refuses a change when the file has moved on since the suggestion was made, and writes nothing', async () => {
-  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')]);
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': editedScreen()}}), textTurn('Press Apply.')]);
   const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
   const ann = t.hub.addClient({userId: 'u-ann', email: 'ann@team.local'});
   t.hub.join(ann.id, '5', {projectName: 'Pong', ownerEmail: 'ann@team.local'});
@@ -2489,13 +2497,13 @@ test('Apply refuses a change when the file has moved on since the suggestion was
 });
 
 test('Apply makes no change, and says so, when the project already has the text', async () => {
-  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')]);
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': editedScreen()}}), textTurn('Press Apply.')]);
   const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
   const ann = t.hub.addClient({userId: 'u-ann', email: 'ann@team.local'});
   t.hub.join(ann.id, '5', {projectName: 'Pong', ownerEmail: 'ann@team.local'});
   const sent = [];
   t.hub.send = (id, msg) => sent.push(msg);
-  t.store['src/a/Screen1.scm'] = 'new';   // the same change was saved by someone else
+  t.store['src/a/Screen1.scm'] = editedScreen();   // the same change was saved by someone else
   const res = await apply(t.ai, 'ann', proposal.id);
   assert.strictEqual(res.status, 400, 'not reported as applied');
   assert.match(JSON.parse(res.body).error, /already has this text, so nothing was changed/);
@@ -2504,7 +2512,7 @@ test('Apply makes no change, and says so, when the project already has the text'
 });
 
 test('Apply does not report a change as done when the project does not hold it when it is read back', async () => {
-  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')],
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': editedScreen()}}), textTurn('Press Apply.')],
     {writeIgnored: true});
   const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
   const res = await apply(t.ai, 'ann', proposal.id);
@@ -2514,8 +2522,8 @@ test('Apply does not report a change as done when the project does not hold it w
   assert.strictEqual(t.store['src/a/Screen1.scm'], SCM, 'the project still has its old text');
 });
 
-test('Apply makes no change when an open tab could not save what it had, and frees the tabs by a reload', async () => {
-  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')]);
+test('Apply makes no change when an open tab could not save what it had, and unfreezes the tabs without reloading them', async () => {
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': editedScreen()}}), textTurn('Press Apply.')]);
   const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
   t.hub.awaitFlush = async () => ({ok: false});
   const res = await apply(t.ai, 'ann', proposal.id);
@@ -2547,7 +2555,7 @@ test('the fast subagent option sends subagents to the fast model; without it the
 });
 
 test('Apply tries a read of the project once more, and when the project still cannot be read it changes nothing', async () => {
-  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': 'new'}}), textTurn('Press Apply.')]);
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': editedScreen()}}), textTurn('Press Apply.')]);
   const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
   const ask = t.ai.ask;
   t.ai.ask = async (path, ...rest) => {
@@ -2560,4 +2568,86 @@ test('Apply tries a read of the project once more, and when the project still ca
   assert.match(JSON.parse(res.body).error, /could not be read just now/);
   assert.strictEqual(t.asked.filter(a => a.path.startsWith('/ode/collab/file?')).length, 2, 'the read was tried twice');
   assert.ok(!t.asked.some(a => a.path.startsWith('/ode/collab/writefiles')), 'nothing was written');
+});
+
+test('a second Apply on the same project waits its turn, so one change never overwrites another', async () => {
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': editedScreen()}}), textTurn('Press Apply.')]);
+  const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
+  t.hub.awaitFlush = () => new Promise(resolve => setTimeout(() => resolve({ok: true}), 100));
+  const first = apply(t.ai, 'ann', proposal.id);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const second = await apply(t.ai, 'ann', proposal.id);
+  assert.strictEqual(second.status, 409);
+  assert.match(JSON.parse(second.body).error, /being applied/);
+  assert.strictEqual((await first).status, 200, 'the first Apply goes in');
+  assert.strictEqual(t.ai.applying.size, 0, 'the lock is released afterwards');
+});
+
+test('a tab that could not save what it had is unfrozen, and no tab is reloaded for a change that did not go in', async () => {
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': editedScreen()}}), textTurn('Press Apply.')]);
+  const proposal = (await say(t.ai, 'ann', 'fix it')).find(e => e.type === 'proposal');
+  const ann = t.hub.addClient({userId: 'u-ann', email: 'ann@team.local'});
+  t.hub.join(ann.id, '5', {projectName: 'Pong', ownerEmail: 'ann@team.local'});
+  const sent = [];
+  t.hub.send = (id, msg) => sent.push(msg);
+  t.hub.awaitFlush = async () => ({ok: false});
+  const res = await apply(t.ai, 'ann', proposal.id);
+  assert.strictEqual(res.status, 400);
+  assert.match(JSON.parse(res.body).error, /could not save what it had/);
+  assert.ok(sent.some(m => m.t === 'unfreeze'), 'the tabs are unfrozen');
+  assert.ok(!sent.some(m => m.t === 'reload'), 'no tab is reloaded, so nothing unsaved is lost');
+});
+
+test('a small change to a file that does not read is refused, and the problem is named', async () => {
+  const t = setup([toolTurn('propose_change', {summary: 'Broken', files: {'src/a/Screen1.scm': 'not a designer file'}}), textTurn('Sorry.')]);
+  const evs = await say(t.ai, 'ann', 'break it');
+  assert.ok(!evs.some(e => e.type === 'proposal'), 'nothing is proposed');
+  const err = evs.find(e => e.type === 'tool' && e.name === 'propose_change' && e.state === 'error');
+  assert.ok(err, 'the tool reports the problem');
+  assert.match(JSON.stringify(err), /does not read/);
+});
+
+test('a browser that left before its answer was attached leaves the answer set to stop, as one that leaves later does', async () => {
+  const t = setup([]);
+  const run = {events: [], done: false, watchers: new Map(), by: 'ann', controller: new AbortController(), orphanTimer: null};
+  const res = fakeRes();
+  res.destroyed = true;
+  await t.ai.attach(run, res, 0);
+  assert.ok(run.orphanTimer, 'the orphan timer is armed');
+  clearTimeout(run.orphanTimer);
+});
+
+test('a model call that fails is closed at once, so its connection is not left open', async () => {
+  const t = setup([{premature: [{choices: [{delta: {content: 'Hel'}}]}]}, textTurn('Hello.')]);
+  const evs = await say(t.ai, 'ann', 'hi');
+  assert.ok(evs.some(e => e.type === 'done'), 'the answer still arrives');
+  assert.ok(t.calls.length >= 2, 'the failed try was tried again');
+  assert.ok(t.calls[0].signal.aborted, 'the failed try was closed');
+});
+
+test('state of people who have left is dropped by the periodic purge, not only when it is next used', async () => {
+  const t = setup([toolTurn('propose_change', {summary: 'Rename', files: {'src/a/Screen1.scm': editedScreen()}}), textTurn('Press Apply.')]);
+  await say(t.ai, 'ann', 'fix it');
+  assert.strictEqual(t.ai.proposals.size, 1);
+  t.advance(31 * 60 * 1000);   // past the life of a proposal
+  t.ai.purgeStale();
+  assert.strictEqual(t.ai.proposals.size, 0);
+});
+
+test('a question with a character that is split between two pieces of the request arrives whole', async () => {
+  const t = setup([textTurn('Hola.')]);
+  const question = 'Qué pasa ✓';
+  const bytes = Buffer.from(JSON.stringify({projectId: '5', messages: [{role: 'user', content: question}]}), 'utf8');
+  const split = bytes.indexOf(Buffer.from('✓', 'utf8')) + 1;   // one byte into the three-byte check mark
+  const req = {url: '/collab/ai/stream', method: 'POST', headers: {cookie: 'AppInventor=ann'}};
+  req[Symbol.asyncIterator] = async function* () {
+    yield bytes.subarray(0, split);
+    yield bytes.subarray(split);
+  };
+  const res = fakeRes();
+  await t.ai.handle(req, res);
+  assert.ok(t.calls.length >= 1);
+  const sent = JSON.stringify(t.calls[0].payload.messages);
+  assert.match(sent, /Qué pasa ✓/, 'the question reached the model as it was written');
+  assert.doesNotMatch(sent, /�/, 'no replacement character was put in its place');
 });

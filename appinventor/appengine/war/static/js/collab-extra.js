@@ -113,6 +113,7 @@
   // Reloads this page to show a change that is in. Once only. Nothing is saved on the way out: the saves were made
   // before the change went in, and saving now would write the old copy over it.
   var reloading = false;
+  var frozenByHub = false;   // frozen by a freeze the team server sent (a save for an AI change, a sync or a restore)
   var joinedWrites = {};     // project id -> the hub's AI change count when this page last joined that project
   function reloadSoon(text) {
     window.AICollab_frozen = true;
@@ -140,6 +141,11 @@
   C.onExtra = function(msg) {
     switch (msg.t) {
       case 'joined':
+        // Only the project this page wants. A late answer for a project it has left must not reset the chat, activity,
+        // locks or selections shown here.
+        if (String(msg.projectId) !== C.wanted) {
+          break;
+        }
         // The hub counts the AI changes to each project. A count higher than the one this page joined that project with
         // means a change went in while this page was away, so it reloads before it saves anything.
         if (typeof msg.writes === 'number') {
@@ -149,8 +155,13 @@
           }
           joinedWrites[msg.projectId] = msg.writes;
         }
-        break;
-      case 'joined':
+        // Frozen before the connection was lost, and the team server says nothing is still being saved or restored: the
+        // page may save again. (Whatever was changed meanwhile came with the reload above.)
+        if (frozenByHub && !msg.flushing && !msg.frozen) {
+          frozenByHub = false;
+          window.AICollab_frozen = false;
+          banner('restore');
+        }
         C.activity = msg.activity || [];
         C.chat = msg.chat || [];
         C.locks = msg.locks || [];
@@ -201,6 +212,9 @@
         onResync(msg);
         break;
       case 'freeze':
+        // A message about another project (this page has moved on) is not for this page.
+        if (msg.projectId !== undefined && String(msg.projectId) !== String(C.joined)) break;
+        frozenByHub = true;
         if (msg.flush) {
           saveThenFreeze(msg.applyId);
           banner('restore', msg.sync
@@ -214,10 +228,14 @@
         break;
       case 'unfreeze':
         // A sync could not save everything, so nothing was reloaded: this page carries on as it was.
+        if (msg.projectId !== undefined && String(msg.projectId) !== String(C.joined)) break;
+        frozenByHub = false;
         window.AICollab_frozen = false;
         banner('restore');
         break;
       case 'reload':
+        if (msg.projectId !== undefined && String(msg.projectId) !== String(C.joined)) break;
+        frozenByHub = false;
         reloadSoon(msg.kind === 'sync' ? 'Syncing this project with the saved copy…' :
             msg.by === 'nobody' ? 'The AI helper\'s change could not be added. Reloading the saved project…' :
             /AI helper/.test(msg.by || '') ? 'Loading the change the AI helper made…' :
@@ -514,8 +532,9 @@
     now.onclick = function() {
       closeMenu();
       postJson('/ode/collab/backup?projectId=' + projectId).then(function(r) {
-        toast(r && r.enabled === false ? 'Backups are not set up on this server.' :
-            r && r.id ? 'Backed up ' + name + '.' : name + ' has not changed since its last backup.');
+        toast(r.failed ? 'Could not back up ' + name + '. Try again.' :
+            r.enabled === false ? 'Backups are not set up on this server.' :
+            r.id ? 'Backed up ' + name + '.' : name + ' has not changed since its last backup.');
       });
     };
     menu.appendChild(back);
@@ -523,10 +542,12 @@
     document.body.appendChild(menu);
   }, true);
 
+  // The reply, or {failed: true} when the request did not go through (so that a failure is not taken for "no change").
   function postJson(url) {
     return fetch(url, {method: 'POST', credentials: 'same-origin'}).then(function(r) {
-      return r.json().catch(function() { return null; });
-    }).catch(function() { return null; });
+      if (!r.ok) return {failed: true};
+      return r.json().catch(function() { return {failed: true}; });
+    }).catch(function() { return {failed: true}; });
   }
 
   function ago(ms) {
@@ -601,6 +622,8 @@
           dialog.remove();
         }).catch(function(e) {
           window.AICollab_frozen = false;
+          // The other open pages were frozen for this restore: they are told it did not go through.
+          C.send({t: 'restored', projectId: projectId, failed: true});
           error.textContent = 'Could not restore: ' + e.message;
         });
   }
@@ -928,9 +951,13 @@
         input.onkeydown = function(ev) {
           ev.stopPropagation();
           if (ev.key === 'Enter' && input.value.trim()) {
-            C.send({t: 'chat', text: input.value});
-            chatDraft = '';
-            input.value = '';
+            // Cleared only once it has gone: when the connection is down, the text stays in the box.
+            if (C.send({t: 'chat', text: input.value})) {
+              chatDraft = '';
+              input.value = '';
+            } else {
+              toast('Not connected: your message was not sent.');
+            }
           }
         };
         chat.appendChild(input);

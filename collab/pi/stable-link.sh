@@ -24,7 +24,12 @@ case "${1:-}" in
   --url) url; exit 0 ;;
   --off)
     [ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
-    tailscale funnel --https=443 off 2>/dev/null || tailscale funnel reset
+    tailscale funnel --https=443 off >/dev/null 2>&1 || tailscale funnel reset >/dev/null 2>&1 || true
+    # Only when Funnel really is off is the record removed and the link reported off.
+    if [ -n "$(url)" ]; then
+      echo "The stable link is still on: Tailscale did not turn Funnel off. Try again, or run: sudo tailscale funnel reset" >&2
+      exit 1
+    fi
     rm -f "$STATE"
     echo "The stable link is off."
     exit 0 ;;

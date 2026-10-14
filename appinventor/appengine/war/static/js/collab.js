@@ -39,6 +39,10 @@
 
   var ws = null;
   var failures = 0;
+  var takeoverTimer = null;  // set when the hub connection drops: a page that was not the main client takes over later
+  var OPEN_MS = 15000;       // a socket that has not opened by then is given up
+  var STABLE_MS = 10000;     // a connection that has lasted this long clears the count of failures
+  var TAKEOVER_MS = 30000;   // how long a page waits offline before it saves its own work as the main client
   var lastWhere = '';
   var lastCursorKey = 'none';
   var outbox = [];            // changes made while their project was not joined, in the order they were made
@@ -49,16 +53,27 @@
 
   function connect() {
     var url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/collab/ws';
+    var socket = null;
     try {
-      ws = new WebSocket(url);
+      socket = ws = new WebSocket(url);
     } catch (e) {
       scheduleReconnect();
       return;
     }
+    // A socket that never opens (the server accepted the TCP connection but not the upgrade) gets no close event, and
+    // nothing else would try again.
+    var giveUp = setTimeout(function() {
+      if (socket.readyState === WebSocket.CONNECTING) socket.close();
+    }, OPEN_MS);
     ws.onopen = function() {
-      failures = 0;
+      clearTimeout(giveUp);
       C.connected = true;
       C.notice = '';
+      // The count of failures is cleared only once the connection has lasted: one that opens and drops at once must not
+      // make every retry quick.
+      setTimeout(function() {
+        if (ws === socket && C.connected) failures = 0;
+      }, STABLE_MS);
       render();
     };
     ws.onmessage = function(ev) {
@@ -72,10 +87,17 @@
     };
     ws.onclose = function() {
       var wasJoined = C.joined;
+      clearTimeout(giveUp);
       C.connected = false;
       ws = null;
       if (wasJoined) {
-        setMain(wasJoined, true);  // without the hub, save your own work again
+        // Without the hub, this page saves its own work again, but not at once. A connection that is back within a little
+        // while (the usual case) must not let a copy that is behind the leader's save over the leader's changes.
+        clearTimeout(takeoverTimer);
+        takeoverTimer = setTimeout(function() {
+          takeoverTimer = null;
+          if (!C.connected && !C.joined) setMain(wasJoined, true);
+        }, TAKEOVER_MS);
       }
       C.joined = null;
       C.wanted = null;
@@ -90,9 +112,11 @@
     };
   }
 
+  // The wait grows with each failure, with a random part, so that every page does not knock on the team server at the same
+  // moment after a restart.
   function scheduleReconnect() {
     failures++;
-    setTimeout(connect, Math.min(15000, 1000 * failures));
+    setTimeout(connect, Math.min(15000, 1000 * failures) * (0.5 + Math.random()));
   }
 
   // Returns false when the message could not be handed to an open connection, so that the caller can keep it.
@@ -130,6 +154,8 @@
           return;
         }
         C.joined = C.wanted;
+        clearTimeout(takeoverTimer);   // back with the hub: the leader decides who saves
+        takeoverTimer = null;
         C.epoch = msg.epoch;
         C.mainId = msg.leaderId;
         C.queues = {};
@@ -166,6 +192,9 @@
       case 'error':
         if (msg.error === 'no-access') {
           C.notice = 'The team server could not confirm your access to this project.';
+        } else if (msg.error === 'retry' && String(msg.projectId) === C.wanted) {
+          // The team server could not reach App Inventor to check access. Ask again in a few seconds (see tick).
+          C.retryJoinAt = Date.now() + 5000;
         }
         break;
       default:
@@ -224,9 +253,15 @@
         C.cursors = {};
         lastCursorKey = 'none';
         C.wanted = projectId;
+        C.retryJoinAt = 0;
         if (projectId) {
           send({t: 'join', projectId: projectId});
         }
+      }
+      // The team server could not reach App Inventor to check access when this page asked to join. Ask again.
+      if (C.wanted && !C.joined && C.retryJoinAt && Date.now() >= C.retryJoinAt) {
+        C.retryJoinAt = 0;
+        send({t: 'join', projectId: C.wanted});
       }
       var presence = ctx ? [ctx.screen, ctx.editor, companionConnected()].join('|') : '';
       if (C.joined && presence !== C.presence) {

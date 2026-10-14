@@ -16,6 +16,8 @@ const agent = new http.Agent({keepAlive: true, maxSockets: 64, keepAliveMsecs: 3
 
 const MAX_ENTRY_BYTES = 40 * 1024 * 1024;
 const MAX_CACHE_BYTES = parseInt(process.env.STATIC_CACHE_MB || '120', 10) * 1024 * 1024;
+// Small replies count against the byte cap too, but each one also costs memory of its own, so the number is capped.
+const MAX_CACHE_ENTRIES = 2000;
 // How long a file that is not named by a hash is kept here. A deploy always restarts the hub (see
 // deploy-from-pc.sh and build-on-pi.sh), which empties this cache, so the copy kept here cannot outlive the
 // build it came from. Keeping it longer means a big file such as the font is not fetched again from App
@@ -83,8 +85,8 @@ class StaticCache {
     this.drop(url);
     const hashed = isHashed(url);
     const etag = '"' + crypto.createHash('sha1').update(body).digest('base64').slice(0, 22) + '"';
-    const entry = {headers, body, etag, at: now, forever: hashed,
-      ttl: /\.nocache\.js/.test(url) ? NOCACHE_TTL_MS : STATIC_TTL_MS, variants: {}, size: body.length};
+    const entry = {url, headers, body, etag, at: now, forever: hashed,
+      ttl: /\.nocache\.js/.test(url) ? NOCACHE_TTL_MS : STATIC_TTL_MS, variants: {}, pending: {}, size: body.length};
     if (this.bytes + entry.size > MAX_CACHE_BYTES) {
       for (const [k, e] of this.entries) if (!e.forever) this.drop(k);
       if (this.bytes + entry.size > MAX_CACHE_BYTES) {
@@ -92,6 +94,8 @@ class StaticCache {
         this.bytes = 0;
       }
     }
+    // The oldest go first (a Map keeps insertion order) so that many small files cannot push out the rest forever.
+    while (this.entries.size >= MAX_CACHE_ENTRIES) this.drop(this.entries.keys().next().value);
     this.entries.set(url, entry);
     this.bytes += entry.size;
     return entry;
@@ -103,14 +107,29 @@ class StaticCache {
       return entry.body;
     }
     if (!entry.variants[enc]) {
-      entry.variants[enc] = enc === 'br'
+      // Requests that arrive together share one compression, so the bytes are counted once.
+      if (!entry.pending[enc]) entry.pending[enc] = this.compress(entry, enc);
+      await entry.pending[enc];
+    }
+    return entry.variants[enc];
+  }
+
+  async compress(entry, enc) {
+    try {
+      const out = enc === 'br'
         ? await brotli(entry.body, {params: {[zlib.constants.BROTLI_PARAM_QUALITY]: 5,
           [zlib.constants.BROTLI_PARAM_SIZE_HINT]: entry.body.length}})
         : await gzip(entry.body, {level: 6});
-      entry.size += entry.variants[enc].length;
-      this.bytes += entry.variants[enc].length;
+      entry.variants[enc] = out;
+      // An entry dropped while it was compressing is no longer counted, so its copy is not counted either.
+      if (this.entries.get(entry.url) === entry) {
+        entry.size += out.length;
+        this.bytes += out.length;
+      }
+      return out;
+    } finally {
+      delete entry.pending[enc];
     }
-    return entry.variants[enc];
   }
 
   // Answers req from an entry: 304 if the browser already has it, else the best encoding.

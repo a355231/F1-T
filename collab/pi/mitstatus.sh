@@ -218,7 +218,8 @@ show_status() {
   echo
   link_lines
   echo "  Access code:        ${code:-not set}"
-  echo "  Override code:      ${pin:-not set}"
+  # Only whether it is set: the code itself is never printed (CLAUDE.md).
+  echo "  Override code:      $([ -n "$pin" ] && echo set || echo "not set")"
   case "$service" in
     opencode) echo "  AI provider:        OpenCode Go (in the companion its models need /beta; OpenRouter is used until then)" ;;
     *) echo "  AI provider:        OpenRouter" ;;

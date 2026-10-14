@@ -228,3 +228,19 @@ test('the subagent tool takes a task only, and a subagent is offered pictures on
   const without = registry.definitions(Object.assign(ctx(), {inSubagent: true, vision: false})).map(d => d.function.name);
   assert.ok(!without.includes('view_picture'));
 });
+
+test('a screen cannot be renamed through its own name, and a search takes at most two wildcards', async () => {
+  const c = ctx();
+  assert.match((await run('scm_rename_component', {screen: 'Screen1', component: 'Screen1', new_name: 'Start'}, c)).text, /cannot be renamed/);
+  assert.match((await run('search_project', {query: 'a.*b.*c.*d', regex: true}, c)).text, /too complicated/);
+});
+
+test('a statement written as a self-closing block keeps the statements after it in its event handler', async () => {
+  const c = ctx();
+  const added = await run('bky_add_event_handler', {screen: 'Screen1', component: 'Button1', event: 'LongClick',
+    body: ['<block type="controls_closeScreen" />', '<block type="controls_closeScreen"></block>']}, c);
+  assert.match(added.text, /Added/);
+  const bky = (await c.draft.merged()).get('src/a/Screen1.bky');
+  assert.strictEqual((bky.match(/controls_closeScreen/g) || []).length, 2, 'both statements are kept');
+  assert.strictEqual((bky.match(/<next>/g) || []).length, 1, 'the second is chained after the first');
+});

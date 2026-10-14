@@ -20,12 +20,13 @@ if [ ! -x "$JDK/bin/javac" ]; then
     x86_64) arch=x64 ;;
     *) echo "Unsupported CPU: $(uname -m)" >&2; exit 1 ;;
   esac
-  meta="$(curl -fsSL "https://api.adoptium.net/v3/assets/latest/11/hotspot?architecture=$arch&image_type=jdk&os=linux")"
+  meta="$(curl -fsSL --max-time 60 "https://api.adoptium.net/v3/assets/latest/11/hotspot?architecture=$arch&image_type=jdk&os=linux")"
   link="$(printf '%s' "$meta" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["binary"]["package"]["link"])')"
   sum="$(printf '%s' "$meta" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["binary"]["package"]["checksum"])')"
   tmp="$(mktemp -d)"
-  curl -fsSL -o "$tmp/jdk.tgz" "$link"
-  echo "$sum  $tmp/jdk.tgz" | sha256sum -c --quiet
+  # A download that fails, or a file that does not match its checksum, leaves no folder behind.
+  curl -fsSL --retry 3 --retry-delay 10 --max-time 900 -o "$tmp/jdk.tgz" "$link" || { rm -rf "$tmp"; exit 1; }
+  echo "$sum  $tmp/jdk.tgz" | sha256sum -c --quiet || { rm -rf "$tmp"; exit 1; }
   mkdir -p "$JDK"
   tar -xzf "$tmp/jdk.tgz" -C "$JDK" --strip-components=1
   rm -rf "$tmp"
@@ -37,23 +38,25 @@ apt-get install -y ant rsync librsvg2-bin
 mem_mb=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1024 ))
 heap=4g
 swapfile=""
-if [ "$mem_mb" -lt 6000 ]; then
-  heap=2500m
-  swapfile=/var/tmp/appinventor-build.swap
-  if ! swapon --show=NAME --noheadings | grep -qx "$swapfile"; then
-    fallocate -l 2G "$swapfile"
-    chmod 600 "$swapfile"
-    mkswap "$swapfile" >/dev/null
-    swapon "$swapfile"
-  fi
-fi
 cleanup() {
   if [ -n "$swapfile" ]; then
     swapoff "$swapfile" 2>/dev/null || true
     rm -f "$swapfile"
   fi
 }
+# Set before the swap file is made, so that the file is removed however this script ends.
 trap cleanup EXIT
+if [ "$mem_mb" -lt 6000 ]; then
+  heap=2500m
+  swapfile=/var/tmp/appinventor-build.swap
+  # A file left by a build that was stopped (a power cut) would keep 2 GB off the card for good: it goes first.
+  swapoff "$swapfile" 2>/dev/null || true
+  rm -f "$swapfile"
+  fallocate -l 2G "$swapfile"
+  chmod 600 "$swapfile"
+  mkswap "$swapfile" >/dev/null
+  swapon "$swapfile"
+fi
 
 echo "== Building App Inventor (this takes a while on a Pi)"
 chown -R "$RUN_AS:$RUN_AS" "$ROOT"

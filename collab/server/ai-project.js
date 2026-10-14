@@ -166,6 +166,8 @@ function removeComponent(obj, component) {
 
 function renameComponent(obj, oldName, newName) {
   if (!NAME_RE.test(newName || '')) return {error: 'component names are letters, digits and underscores, starting with a letter'};
+  // The screen's own name is its file's name: renaming it here would leave the designer file disagreeing with it.
+  if (oldName === obj.Properties.$Name) return {error: 'the screen itself cannot be renamed this way'};
   if (componentNames(obj).includes(newName)) return {error: 'a component named ' + newName + ' already exists'};
   const found = findNode(obj, oldName);
   if (!found) return {error: 'there is no component named ' + oldName + ' on this screen'};
@@ -215,6 +217,11 @@ function unescapeXml(s) {
 // its text in the source (start to end). Throws if the document is not well formed.
 function parseXml(text) {
   const src = String(text || '');
+  // A comment or processing instruction that is never closed makes the scan below run to the end of the text, once for
+  // each such marker (the time grows with the square of the file). Such a document is not well formed anyway.
+  if (src.lastIndexOf('<!--') > src.lastIndexOf('-->') || src.lastIndexOf('<?') > src.lastIndexOf('?>')) {
+    throw new Error('a comment or processing instruction is never closed');
+  }
   const root = {tag: '#document', attrs: {}, children: [], start: 0, end: src.length};
   const stack = [root];
   // The attributes of a tag cannot hold < or > (XML does not allow them there), so each match stops at the
@@ -294,7 +301,8 @@ function freshIds(xml) {
 function chain(blocks) {
   let inner = '';
   for (let i = blocks.length - 1; i >= 0; i--) {
-    const b = blocks[i].trim();
+    // A block written as <block ... /> has no closing tag to hang the next statement on, so it is opened and closed.
+    const b = blocks[i].trim().replace(/^(<block\b[^>]*?)\/>$/, '$1></block>');
     inner = inner ? b.replace(/<\/block>\s*$/, '<next>' + inner + '</next></block>') : b;
   }
   return inner;
