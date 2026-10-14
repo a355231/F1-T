@@ -14,6 +14,12 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
     ant '-Dclient.dev.flags=-style obfuscated -optimize 9' noplay)
 fi
 
+echo "== Checking that no update is running on the Pi"
+if ! ssh "$TARGET" 'flock -n /run/collab-update.lock true'; then
+  echo "An update is running on the Pi. Deploy again when it is done." >&2
+  exit 1
+fi
+
 echo "== Copying to $TARGET"
 rsync -az --delete --exclude 'WEB-INF/appengine-generated' \
   "$ROOT/appinventor/appengine/build/war/" "$TARGET:/opt/appinventor/war/"

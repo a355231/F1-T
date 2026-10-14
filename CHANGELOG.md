@@ -159,7 +159,7 @@ the update keeps the old scripts until it is reloaded.
   environment variables; the tests use them. The defaults are unchanged.
 
 ### Tests
-- `collab/server`: `node --test test/*.test.js` runs 335 tests (297 before this update). They include the hub over real
+- `collab/server`: `node --test test/*.test.js` runs 342 tests (297 before the first pass). They include the hub over real
   WebSockets against a stand-in for App Inventor (including cut-off replies, stalled requests, a frame over the limit, a
   reset during sign-in, a failed restore), the room logic, the cache, the companion (`ai*.test.js`), the companion page
   (`client-reset.test.js`), the team page's join and freeze handling in a VM (`collab-extra.test.js`), and the browser
@@ -171,52 +171,60 @@ the update keeps the old scripts until it is reloaded.
 - The App Inventor Java changes (`EditorManager`, `CollabServlet`, `TeamLogin`) compile against the built libraries.
   The full client build (GWT) was not run for this change, and the Java has no tests in this repository.
 
+### Second pass (same release)
+
+These were open in the first pass, and are fixed now.
+
+- **Files:** a Cloud Storage object that is missing now fails the read (it used to read as empty, and a save could write
+  the empty file over the real one). A read that finds the object shorter or longer than it was when it started fails
+  too; the loop that could run for ever is gone (`ObjectifyStorageIo`).
+- **Saves and AI changes:** a page whose save fails tells the hub, and the change is refused (the tabs are unfrozen). It
+  used to be told the save worked (`EditorManager`, `Collab`, `collab-extra.js`).
+- **Team code:** the sign-out marker is written before the new code is saved, so a failed marker leaves the old code in
+  place (`CollabServlet`).
+- **Backups:** a project too big to back up is reported as not backed up (the hub alerts after three tries). A restore
+  goes ahead only with a copy of the project as it is now. AI changes still go ahead on a big project, without a copy,
+  and the failure is logged.
+- **Per project:** AI writes, picture writes and restores of one project take turns (`CollabServlet`).
+- **Apply:** when App Inventor's reply is lost or a write stops part way, the project is read back. A change that is
+  all there is applied; a part is reported as only partly made, with the files named.
+- **Renames in small mode:** the designer and blocks files are checked together, so a limit on the second file leaves
+  the first unchanged (`ai-registry`).
+- **Companion page:** a question the server did not take goes back in the box, with its pictures. A server that does
+  not start its answer within the silence limit is given up on, and the question goes back in the box.
+- **Day count:** the team's day count is kept in `ai-daily.json` in the data folder, so a restart of the hub does not
+  give a new day.
+- **Edits:** one person may send 400 edits at once, then 100 a second. Edits past that are not shared, and the person is
+  told (`rooms.js`).
+- **Pi:** install and deploy wait for an update that is running (they refuse, and say so). A request made by hand while
+  an update runs exits with code 75. The rollback point keeps the hub's packages and the menu (MITSTATUS) too.
+
 ### Known issues, not fixed in this update
 These were found while reviewing, and are not fixed here. Some need a design decision.
 
 *Team page and the App Inventor client*
-- An AI change or a sync can go in over a page's unsaved edits, when that page's save fails but still reports success
-  (`saveNow` in `Collab.java` acknowledges every flush). The page's edits are then lost at its next reload.
 - A teammate's designer change that fails to apply on the main client is acknowledged, and lost at the next save of that
   screen.
-- Reading a Cloud Storage object that is missing returns zero bytes, which can save an empty `.bky` over a large one
-  (the "50 KB" symptom). A large `.bky` that shrinks is not guarded, and a read can spin while the object changes under
-  it.
-- A backup over 64 MB is recorded as taken, but was not made; a restore can then run without a safety copy.
+- A large `.bky` that shrinks is not guarded against a save that empties it.
 - A restore writes files one at a time, with no rollback, and an AI change to two screens can be left half applied.
-  Nothing locks a project between restores, AI changes and picture writes.
-- Team-code changes save the new code before the sign-out marker is written, so a failed marker reports an error after
-  the change went in.
+- Restores are not limited: a member who repeats the restore message reloads everyone each time.
 
 *The companion helper*
-- A Send or Apply whose response never starts has no timeout (the window stays "Still working" until Stop or reload).
+- A Send or Apply whose response never starts has a timeout for Send only. Apply still waits until Stop or reload.
 - A reload drops the Apply card of a finished answer, and an answer still being written after a reload.
-- A question is cleared from the box when the send fails before the server takes it.
-- The model's daily limit counts a whole answer, including its subagents, as one question. Each answer now has its own
-  cap, but the daily count still charges one question for it.
-- The daily count is kept in memory, so a restart of the hub resets it.
-- A rename of a component in small mode can change the designer file and then fail on the blocks file, leaving a
-  half-renamed draft.
-- A partly applied change that App Inventor reports as refused is not read back, so the person is told "refused" while
-  the project holds some of the change.
+- The model's daily limit counts a whole answer, including its subagents, as one question. Each answer has its own cap.
 - Streamed answers are rendered again on every frame, which slows down long answers.
 
 *The hub*
-- A student's edit rate is not limited (the log is capped by size now).
-- Restores are not limited: a member who repeats the restore message reloads everyone each time. A refused restore would
-  leave the other tabs out of date, so the limit was left for a later change.
 - A restart of the hub resets the write count, so the pages' kept edits are dropped (they are told).
 - Operations are not acknowledged, so an edit in flight when a connection drops is not known to have arrived.
 - A stalled App Inventor request still holds one connection for up to two minutes.
 
 *The Raspberry Pi*
-- A rollback restores the old hub code but keeps the new packages (`node_modules`).
-- Install, setup, deploy and MITSTATUS's restart do not respect the update lock.
 - A systemd restart loop has no limit (a start limit would also stop a fault that clears by itself; this needs a decision).
 - Stale GWT output accumulates on the card with each build.
-- A rollback leaves the new MITSTATUS script.
-- `--now`, `--rollback` and `--check` exit with success when another update holds the lock.
-- The build that failed at compile on `fabd525` is still unexplained. The update now keeps the end of the build's output
+- MITSTATUS's restart options do not wait for an update that is running.
+- The build that failed at compile on `fabd525` is still unexplained. The update keeps the end of the build's output
   in its log. To find the cause, send the output of `journalctl -u collab-update.service -u collab-update-now.service`
   from that night.
 

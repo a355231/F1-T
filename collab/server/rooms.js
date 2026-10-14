@@ -39,6 +39,11 @@ const SCREEN_MAX_CHARS = 100;
 // reply every joining or reconnecting page gets) from growing without limit.
 const LOG_MAX_BYTES = 8 * 1024 * 1024;
 const LOG_ENTRY_OVERHEAD = 200;         // the bytes an edit takes beyond its data, counted for the cap
+// How many edits one person may send at once, and how fast that allowance comes back. Typing and dragging stay far
+// below it; a script or a broken page that floods the hub does not.
+const OP_BURST = 400;
+const OP_PER_SECOND = 100;
+const OP_NOTICE_MIN_GAP_MS = 10 * 1000;
 // A restore freezes every open page until the restored copy is in. If it is never reported (the person who started it
 // lost their connection, or the restore failed), the pages are unfrozen after this long.
 const RESTORE_FREEZE_MS = 60 * 1000;
@@ -258,6 +263,18 @@ class Hub {
     return true;
   }
 
+  // Takes one edit from the person's allowance; false when there is none left.
+  takeOpAllowance(client) {
+    const now = this.now();
+    const last = client.opAt === undefined ? now : client.opAt;
+    const tokens = client.opTokens === undefined ? OP_BURST : client.opTokens;
+    client.opAt = now;
+    client.opTokens = Math.min(OP_BURST, tokens + Math.max(0, now - last) * OP_PER_SECOND / 1000);
+    if (client.opTokens < 1) return false;
+    client.opTokens -= 1;
+    return true;
+  }
+
   op(id, {projectId, screen, kind, data, epoch}) {
     const client = this.clients.get(id);
     if (!client || !client.projectId || client.projectId !== String(projectId)) return;
@@ -265,6 +282,14 @@ class Hub {
     const room = this.rooms.get(client.projectId);
     // Made on a copy from before the last restore or AI change: it would put an old change into the new log.
     if (epoch !== undefined && epoch !== room.epoch) return;
+    if (!this.takeOpAllowance(client)) {
+      // Not shared. The person is told (now and then), and the syncer brings the screens back into step.
+      if (this.now() - (client.opNoticeAt || -Infinity) >= OP_NOTICE_MIN_GAP_MS) {
+        client.opNoticeAt = this.now();
+        this.send(id, {t: 'notice', text: 'Too many changes at once. Some were not shared; they will be brought back into step shortly.'});
+      }
+      return;
+    }
     const entry = {seq: ++room.seq, from: id, name: client.name, color: client.color,
       screen: String(screen).slice(0, SCREEN_MAX_CHARS), kind, data, at: this.now()};
     room.log.push(entry);

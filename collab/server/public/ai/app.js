@@ -584,6 +584,7 @@
     var lost = false;
     var conn = null;
     var quiet = null;
+    var silent = false;      // the watchdog gave up on the server (no answer at all, or silence)
 
     function aborted() {
       var e = new Error('aborted');
@@ -602,7 +603,7 @@
 
     function listen() {
       clearTimeout(quiet);
-      quiet = setTimeout(function () { if (conn) conn.abort(); }, SILENCE_MS);
+      quiet = setTimeout(function () { silent = true; if (conn) conn.abort(); }, SILENCE_MS);
     }
 
     function handle(block) {
@@ -664,12 +665,16 @@
 
     function first() {
       conn = new AbortController();
+      silent = false;
+      listen();   // a server that never starts its answer is given up on too
       return fetch('/collab/ai/stream', {method: 'POST', credentials: 'same-origin', signal: conn.signal,
         headers: {'content-type': 'application/json'}, body: JSON.stringify(body)}).then(check);
     }
 
     function resume() {
       conn = new AbortController();
+      silent = false;
+      listen();
       return fetch('/collab/ai/resume?projectId=' + encodeURIComponent(projectId) + '&after=' + lastSeq,
         {credentials: 'same-origin', signal: conn.signal}).then(check);
     }
@@ -696,7 +701,13 @@
       }, function (e) {
         if (signal.aborted) throw aborted();
         if (finished) return undefined;
-        if ((e && e.fatal) || !started) throw e;
+        if (!started) {
+          // The server has not taken the question, so nothing was done and it can be sent again.
+          var notTaken = silent ? new Error('The helper did not answer. Please try again.') : e;
+          if (notTaken) notTaken.notStarted = true;
+          throw notTaken;
+        }
+        if (e && e.fatal) throw e;
         return again();
       });
     }
@@ -1264,7 +1275,9 @@
       fastSubagent: fastSub,
       messages: hidesPin ? [{role: 'user', content: text}] : history.slice(-20)};
     if (images.length) body.images = images.map(function (p) { return {name: p.name, mime: p.mime, data: p.data}; });
-    runStream(api, body, {goal: isGoal, secret: hidesPin, row: row});
+    // A question that does not reach the server goes back in the box, unless it started a goal (which keeps its own state).
+    var restore = isGoal || hidesPin ? null : {text: text, question: question, images: images};
+    runStream(api, body, {goal: isGoal, secret: hidesPin, row: row, restore: restore});
   }
 
   // Shows an answer as its events arrive, and keeps the window busy until the answer is over. With no body,
@@ -1278,6 +1291,16 @@
     }, linkChanged).catch(function (e) {
       if (e && e.name === 'AbortError') {
         notice(api, 'Stopped.', false);
+      } else if (e && e.notStarted && opts.restore) {
+        // The question did not reach the server: it goes back in the box, with its pictures, and its row goes.
+        if (opts.row) opts.row.remove();
+        var last = history[history.length - 1];
+        if (last && last.role === 'user' && last.content === opts.restore.question) history.pop();
+        input.value = opts.restore.text;
+        pending = opts.restore.images.concat(pending);
+        renderThumbs();
+        autosize();
+        notice(api, 'The helper could not be reached, so your question was not sent. It is back in the box.', true);
       } else {
         notice(api, (e && e.message) || 'The helper could not answer.', true);
       }

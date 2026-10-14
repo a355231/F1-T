@@ -96,12 +96,12 @@
   // ---- messages from the hub ----
 
   // Before the AI helper's change goes in: save what is open, then stop saving until the page reloads. Without the
-  // save, an edit made a moment before would be lost in the reload. The answer comes only when the save has finished.
-  // A save that fails never answers, so the hub waits for it to time out, and then refuses the change.
+  // save, an edit made a moment before would be lost in the reload. The answer comes when the save has finished, and says
+  // whether every file was saved: when one was not, the hub refuses the change (ok false).
   function saveThenFreeze(applyId) {
-    function answer() {
+    function answer(saved) {
       window.AICollab_frozen = true;
-      C.send({t: 'flushed', applyId: applyId});
+      C.send({t: 'flushed', applyId: applyId, ok: saved !== false});
     }
     if (window.AICollab_saveNow) {
       window.AICollab_saveNow(answer);

@@ -147,7 +147,8 @@ function setup(script, options = {}) {
   if (options.vision !== undefined) process.env.AI_VISION = options.vision;
   else delete process.env.AI_VISION;
   // respond(payload) answers every model call instead of the script, when a test needs to tell the helper from its subagents.
-  const {models, vision, files: projectFiles, bundleFailures: failures = 0, respond, writeIgnored = false, ...rest} = options;
+  const {models, vision, files: projectFiles, bundleFailures: failures = 0, respond, writeIgnored = false,
+    writeReply = null, writeOnly = null, ...rest} = options;
   let bundleFailures = failures;
   const modelList = models || [{id: 'some/model', architecture: {input_modalities: ['text']}}];
   let now = 1000000000000;
@@ -181,8 +182,10 @@ function setup(script, options = {}) {
     }
     if (path.startsWith('/ode/collab/rawfile')) return {ok: true, path: 'assets/logo.png', mime: 'image/png', bytes: 40, data: PNG_B64};
     if (path.startsWith('/ode/collab/writefiles')) {
-      if (!writeIgnored) Object.assign(store, JSON.parse(body).files);
-      return {ok: true};
+      // writeOnly: only these files reach the project (a write that stopped part way); writeReply: what App Inventor answers.
+      const files = JSON.parse(body).files;
+      if (!writeIgnored) Object.assign(store, writeOnly ? Object.fromEntries(Object.entries(files).filter(([k]) => writeOnly.includes(k))) : files);
+      return writeReply || {ok: true};
     }
     if (path.startsWith('/ode/collab/writemedia')) {
       for (const m of JSON.parse(body).media) pictures['assets/' + m.name] = Buffer.from(m.data, 'base64').length;
@@ -2650,4 +2653,35 @@ test('a question with a character that is split between two pieces of the reques
   const sent = JSON.stringify(t.calls[0].payload.messages);
   assert.match(sent, /Qué pasa ✓/, 'the question reached the model as it was written');
   assert.doesNotMatch(sent, /�/, 'no replacement character was put in its place');
+});
+
+test('the day\'s question count is kept in its file, so a restart of the hub does not give the team a new day', () => {
+  process.env.AI_DAILY_LIMIT = '5';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-'));
+  const file = path.join(dir, 'ai-daily.json');
+  const make = () => new Assistant({ask: async () => null, hub: {}, fetchImpl: null, now: () => 1000000000000,
+    log: () => {}, dailyFile: file});
+  const first = make();
+  for (let i = 0; i < 3; i++) assert.ok(first.allow('ann'));
+  const restarted = make();
+  assert.strictEqual(restarted.day.count, 3, 'the count was kept');
+  assert.ok(restarted.allow('ann'));
+  assert.ok(restarted.allow('ann'));
+  assert.ok(!restarted.allow('ann'), 'the team\'s limit of five still applies after the restart');
+  delete process.env.AI_DAILY_LIMIT;
+});
+
+test('Apply says when a change went in only part of the way, and names the files that did; a lost answer with the change in is applied', async () => {
+  const bothFiles = {'src/a/Screen1.scm': editedScreen(), 'src/a/Screen1.bky': BKY + '\n'};
+  const part = setup([toolTurn('propose_change', {summary: 'Two', files: bothFiles}), textTurn('Press Apply.')],
+    {writeOnly: ['src/a/Screen1.scm'], writeReply: {}});
+  const proposal = (await say(part.ai, 'ann', 'two files')).find(e => e.type === 'proposal');
+  const partRes = await apply(part.ai, 'ann', proposal.id);
+  assert.strictEqual(partRes.status, 400);
+  assert.match(JSON.parse(partRes.body).error, /only partly made: src\/a\/Screen1\.scm changed/);
+
+  const lost = setup([toolTurn('propose_change', {summary: 'Two', files: bothFiles}), textTurn('Press Apply.')],
+    {writeReply: {}});
+  const proposal2 = (await say(lost.ai, 'ann', 'two files')).find(e => e.type === 'proposal');
+  assert.strictEqual((await apply(lost.ai, 'ann', proposal2.id)).status, 200, 'the change is all there, so it is applied');
 });

@@ -75,3 +75,17 @@ test('a page frozen by the team server that loses its connection unfreezes when 
   window.AICollab.onExtra({t: 'joined', projectId: '42', epoch: 'e1', writes: 0, frozen: false, flushing: false});
   assert.ok(!window.AICollab_frozen, 'nothing is pending: the page may save again');
 });
+
+test('a page whose save fails tells the hub so, and the hub refuses the AI change; one that saved says so', () => {
+  const {C, window} = loadPage();
+  window.AICollab_saveNow = function(done) { done(false); };
+  window.AICollab.onExtra({t: 'freeze', projectId: '42', flush: true, applyId: 'a1'});
+  const failed = C.sent.filter(m => m.t === 'flushed').pop();
+  assert.strictEqual(failed.applyId, 'a1');
+  assert.strictEqual(failed.ok, false);
+  window.AICollab_saveNow = function(done) { done(true); };
+  window.AICollab.onExtra({t: 'freeze', projectId: '42', flush: true, applyId: 'a2'});
+  const saved = C.sent.filter(m => m.t === 'flushed').pop();
+  assert.strictEqual(saved.applyId, 'a2');
+  assert.strictEqual(saved.ok, true);
+});

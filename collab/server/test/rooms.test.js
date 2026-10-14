@@ -211,12 +211,13 @@ test('a team code change is announced to everyone else by name, and not spammabl
 });
 
 test('the edit log is cut to a byte cap, oldest first, even when the edits are young', () => {
-  const {hub} = setup();
+  const {hub, advance} = setup();
   const a = hub.addClient({userId: 'u1', email: 'a@school.org'});
   hub.join(a.id, '42', ACCESS);
   const big = 'x'.repeat(1000);
   for (let i = 0; i < 20000; i++) {
     hub.op(a.id, {projectId: '42', screen: 'Screen1', kind: 'blocks', data: {type: 'create', big}});
+    if (i % 400 === 399) advance(10 * 1000);   // the allowance comes back between bursts
   }
   const room = hub.rooms.get('42');
   assert.ok(room.logBytes <= 8 * 1024 * 1024, 'the log is within its byte cap');
@@ -286,4 +287,20 @@ test('a page that rejoins is told whether a restore or a save is still going on'
   const b = hub.addClient({userId: 'u2', email: 'b@school.org'});
   hub.join(b.id, '42', ACCESS);
   assert.strictEqual(last(b.id, 'joined').frozen, true);
+});
+
+test('one person\'s edits are shared up to a burst, then only as their allowance comes back; they are told', () => {
+  const {hub, last, advance} = setup();
+  const a = hub.addClient({userId: 'u1', email: 'a@school.org'});
+  hub.join(a.id, '42', ACCESS);
+  for (let i = 0; i < 500; i++) {
+    hub.op(a.id, {projectId: '42', screen: 'Screen1', kind: 'blocks', data: {type: 'create', i}});
+  }
+  assert.strictEqual(hub.rooms.get('42').log.length, 400, 'the burst is shared, the rest is not');
+  assert.match(last(a.id, 'notice').text, /Too many changes/, 'the person is told');
+  advance(1000);   // a second later, 100 more edits are allowed
+  for (let i = 0; i < 200; i++) {
+    hub.op(a.id, {projectId: '42', screen: 'Screen1', kind: 'blocks', data: {type: 'create', i}});
+  }
+  assert.strictEqual(hub.rooms.get('42').log.length, 500);
 });

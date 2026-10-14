@@ -29,6 +29,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 
@@ -248,6 +249,15 @@ public final class EditorManager {
    *                     settings and file editors are saved successfully
    */
   public void saveDirtyEditors(final Command afterSaving) {
+    saveDirtyEditors(afterSaving, null);
+  }
+
+  /**
+   * Like saveDirtyEditors(afterSaving), but when a file could not be saved, afterFailure runs instead of afterSaving.
+   * A file that failed is dirty again, as before. (A file left unsaved because a teammate's client is main is not a
+   * failure: that client saves it.)
+   */
+  public void saveDirtyEditors(final Command afterSaving, final Command afterFailure) {
     // Note, We don't do any saving if we are in read only mode
     if (Ode.getInstance().isReadOnly()) {
       afterSaving.execute();
@@ -286,6 +296,7 @@ public final class EditorManager {
     // projectSettingsToSave plus 1.
     final AtomicInteger pendingSaveOperations = new AtomicInteger(projectSettingsToSave.size() + 1);
     final DateHolder dateHolder = new DateHolder();
+    final AtomicBoolean anyFailed = new AtomicBoolean(false);
     Command callAfterSavingCommand = new Command() {
       @Override
       public void execute() {
@@ -293,8 +304,10 @@ public final class EditorManager {
           // We get here when all save operations have completed, either
           // with success or not.
           pendingFileEditors.clear(); // Failed I/O will be back in dirtyFileEditors
-          // Execute the afterSaving command if one was given.
-          if (afterSaving != null) {
+          // Execute the afterSaving command if one was given (or afterFailure, when a file did not save).
+          if (anyFailed.get() && afterFailure != null) {
+            afterFailure.execute();
+          } else if (afterSaving != null) {
             afterSaving.execute();
           }
           // Set the project modification date to the returned date
@@ -307,7 +320,7 @@ public final class EditorManager {
     };
 
     // Save all files at once (asynchronously).
-    saveMultipleFilesAtOnce(filesToSave, callAfterSavingCommand, dateHolder);
+    saveMultipleFilesAtOnce(filesToSave, callAfterSavingCommand, dateHolder, anyFailed);
 
     // Save project settings one at a time (asynchronously).
     for (ProjectSettings projectSettings : projectSettingsToSave) {
@@ -389,8 +402,8 @@ public final class EditorManager {
    * @param afterSavingFiles  optional command to be executed after file
    *                          editors are saved.
    */
-  private void saveMultipleFilesAtOnce(
-      final List<FileDescriptorWithContent> filesWithContent, final Command afterSavingFiles, final DateHolder dateHolder) {
+  private void saveMultipleFilesAtOnce(final List<FileDescriptorWithContent> filesWithContent,
+      final Command afterSavingFiles, final DateHolder dateHolder, final AtomicBoolean anyFailed) {
     if (filesWithContent.isEmpty()) {
       // No files needed saving.
       // Execute the afterSavingFiles command if one was given.
@@ -424,6 +437,7 @@ public final class EditorManager {
             }
             @Override
             public void onFailure(Throwable caught) {
+              anyFailed.set(true);
               // Here is where we handle BlocksTruncatedException
               if (caught instanceof BlocksTruncatedException) {
                 Ode.getInstance().blocksTruncatedDialog(projectId, fileId, content, this);

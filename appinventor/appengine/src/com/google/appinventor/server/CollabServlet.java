@@ -177,8 +177,18 @@ public class CollabServlet extends OdeServlet {
             send(resp, HttpServletResponse.SC_BAD_REQUEST, error("bad backup id"));
             return;
           }
-          backups.backup(userId, projectId, System.currentTimeMillis());  // safety copy first
-          int n = backups.restore(userId, projectId, id);
+          int n;
+          synchronized (projectLock(projectId)) {
+            // A restore replaces everything, so it goes ahead only with a copy of the project as it is now to go back to.
+            try {
+              backups.backup(userId, projectId, System.currentTimeMillis());
+            } catch (IOException e) {
+              send(resp, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                  error("The project could not be copied first, so it was not restored."));
+              return;
+            }
+            n = backups.restore(userId, projectId, id);
+          }
           LOG.info("Project " + projectId + " restored to backup " + id);
           send(resp, 200, new JSONObject().put("ok", true).put("files", n));
           return;
@@ -218,7 +228,9 @@ public class CollabServlet extends OdeServlet {
           }
           long projectId = projectId(req);
           storageIo.assertUserHasProject(userId, projectId);
-          writeFiles(userId, projectId, req, resp);
+          synchronized (projectLock(projectId)) {
+            writeFiles(userId, projectId, req, resp);
+          }
           return;
         }
         case "/bundle": {
@@ -290,7 +302,9 @@ public class CollabServlet extends OdeServlet {
           }
           long projectId = projectId(req);
           storageIo.assertUserHasProject(userId, projectId);
-          writeMedia(userId, projectId, req, resp);
+          synchronized (projectLock(projectId)) {
+            writeMedia(userId, projectId, req, resp);
+          }
           return;
         }
         case "/teamcode":
@@ -345,7 +359,6 @@ public class CollabServlet extends OdeServlet {
       send(resp, HttpServletResponse.SC_BAD_REQUEST, error(problem));
       return;
     }
-    boolean saved = keepCode || TeamLogin.setCode(newCode);
     boolean signedOut = "true".equals(req.getParameter("signout"));
     if (signedOut) {
       OdeAuthFilter.UserInfo me = OdeAuthFilter.getUserInfo(req);
@@ -361,11 +374,34 @@ public class CollabServlet extends OdeServlet {
         }
       }
     }
+    // The code is saved last: if the sign-out marker above cannot be written, the code stays as it was.
+    boolean saved = keepCode || TeamLogin.setCode(newCode);
     TeamLogin.recordChange(userInfoProvider.getUserId(), signedOut);
     LOG.info("The team code was changed" + (signedOut ? " and everyone was signed out" : "")
         + (saved ? "" : " (not saved to a file: it lasts until the next restart)"));
     send(resp, 200, new JSONObject().put("ok", true).put("saved", saved)
         .put("signedOut", signedOut));
+  }
+
+  // One change to a project at a time: AI writes, picture writes and restores of the same project take turns, so that
+  // their files do not interleave.
+  private static final java.util.concurrent.ConcurrentHashMap<Long, Object> PROJECT_LOCKS =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  private static Object projectLock(long projectId) {
+    return PROJECT_LOCKS.computeIfAbsent(projectId, k -> new Object());
+  }
+
+  /**
+   * A copy of the project before an AI change. A project too big to copy does not stop the change (the hub reports the
+   * failed backups to the team instead), so the change is only logged here.
+   */
+  private void backupBeforeChange(String userId, long projectId) {
+    try {
+      backups.backup(userId, projectId, System.currentTimeMillis());
+    } catch (IOException e) {
+      LOG.log(Level.WARNING, "no backup before an AI change to project " + projectId, e);
+    }
   }
 
   private static final int MAX_WRITE_FILES = 3;
@@ -423,7 +459,7 @@ public class CollabServlet extends OdeServlet {
       send(resp, HttpServletResponse.SC_BAD_REQUEST, error(problem));
       return;
     }
-    backups.backup(userId, projectId, System.currentTimeMillis());
+    backupBeforeChange(userId, projectId);
     List<String> existing = storageIo.getProjectSourceFiles(userId, projectId);
     List<String> created = new ArrayList<>();
     for (String path : paths) {
@@ -585,7 +621,7 @@ public class CollabServlet extends OdeServlet {
       paths.add("assets/" + name);
       contents.add(bytes);
     }
-    backups.backup(userId, projectId, System.currentTimeMillis());
+    backupBeforeChange(userId, projectId);
     List<String> existing = storageIo.getProjectSourceFiles(userId, projectId);
     List<String> created = new ArrayList<>();
     for (String path : paths) {

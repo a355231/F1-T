@@ -477,18 +477,24 @@ public final class Collab {
    * finished. collab.js uses it to make sure nothing unsaved is left before an AI change goes in.
    */
   private static void saveNow(final com.google.gwt.core.client.JavaScriptObject done) {
+    // done(true) when everything was saved, done(false) when a file could not be: the change must not go in then.
     Ode.getInstance().getEditorManager().saveDirtyEditors(new com.google.gwt.user.client.Command() {
       @Override
       public void execute() {
-        if (done != null) {
-          callBack(done);
-        }
+        callBack(done, true);
+      }
+    }, new com.google.gwt.user.client.Command() {
+      @Override
+      public void execute() {
+        callBack(done, false);
       }
     });
   }
 
-  private static native void callBack(com.google.gwt.core.client.JavaScriptObject done) /*-{
-    done();
+  private static native void callBack(com.google.gwt.core.client.JavaScriptObject done, boolean saved) /*-{
+    if (done) {
+      done(saved);
+    }
   }-*/;
 
   /**

@@ -10,6 +10,7 @@
 // checked with App Inventor before a client may join a project's room.
 
 const fs = require('fs');
+const path = require('path');
 const http = require('http');
 const net = require('net');
 const os = require('os');
@@ -311,7 +312,7 @@ function isPiOnlyPath(path) {
   return path === '/_ah' || path.startsWith('/_ah/') || path.startsWith('/login/google');
 }
 
-const ai = new Assistant({ask: askAppInventor, hub});
+const ai = new Assistant({ask: askAppInventor, hub, dailyFile: path.join(DATA_DIR, 'ai-daily.json')});
 
 const server = http.createServer((req, res) => {
   req.socket.setNoDelay(true);

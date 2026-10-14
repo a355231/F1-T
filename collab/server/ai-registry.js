@@ -154,6 +154,19 @@ class Draft {
     return {bytes: Buffer.byteLength(String(text)), changed: this.changed.size};
   }
 
+  // Stores new text for several files at once. All are checked together first, so either every file goes in or none does.
+  async writeAll(entries) {
+    await this.load();
+    const next = new Map(this.changed);
+    for (const [path, text] of entries) next.set(path, String(text));
+    checkChange(this.base, next, this.full);
+    for (const [path, text] of entries) {
+      if (!this.origin.has(path)) this.origin.set(path, this.base.has(path) ? this.base.get(path) : null);
+      this.changed.set(path, String(text));
+    }
+    return {changed: this.changed.size};
+  }
+
   discard(path) {
     if (path) {
       this.changed.delete(path);
@@ -464,9 +477,11 @@ const TOOLS = [
       const obj = proj.parseScm(scm.text);
       const r = proj.renameComponent(obj, String(a.component || ''), String(a.new_name || ''));
       if (r.error) throw new Error(r.error);
-      await ctx.draft.write(scm.path, proj.writeScm(obj));
+      // Both files go in together, or neither: a rename that the limits refuse on the second file must not leave the first changed.
+      const entries = [[scm.path, proj.writeScm(obj)]];
       const bky = await ctx.draft.screenPath(screen, 'bky');
-      if (bky) await ctx.draft.write(bky, proj.renameInBlocks(await ctx.draft.text(bky), a.component, a.new_name));
+      if (bky) entries.push([bky, proj.renameInBlocks(await ctx.draft.text(bky), a.component, a.new_name)]);
+      await ctx.draft.writeAll(entries);
       return {text: 'Renamed ' + a.component + ' to ' + a.new_name + '.', detail: a.new_name};
     }},
   {name: 'scm_new_screen', mode: 'draft', needs: 'full', description: 'Create a new screen (its designer and blocks files). Only in full-app mode.',

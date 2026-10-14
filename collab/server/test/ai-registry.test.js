@@ -244,3 +244,12 @@ test('a statement written as a self-closing block keeps the statements after it 
   assert.strictEqual((bky.match(/controls_closeScreen/g) || []).length, 2, 'both statements are kept');
   assert.strictEqual((bky.match(/<next>/g) || []).length, 1, 'the second is chained after the first');
 });
+
+test('a draft change to several files goes in all or none: a limit on the last file leaves the others unchanged', async () => {
+  const c = ctx();
+  const before = c.draft.changed.size;
+  await assert.rejects(c.draft.writeAll([
+    ['src/a/One.scm', 'x'], ['src/a/Two.scm', 'x'], ['src/a/Three.scm', 'x'], ['src/a/Four.scm', 'x'],
+  ]), /at most 3 files/);
+  assert.strictEqual(c.draft.changed.size, before, 'nothing was written');
+});

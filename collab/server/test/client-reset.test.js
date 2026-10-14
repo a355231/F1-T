@@ -189,7 +189,7 @@ function openPage(options = {}) {
     body: new Elem('body'),
   };
   page.window = {addEventListener() {}, removeEventListener() {},
-    __aiHelperConfig: {silenceMs: 60000, reconnects: 0}};
+    __aiHelperConfig: Object.assign({silenceMs: 60000, reconnects: 0}, options.config || {})};
   const sandbox = {
     window: page.window,
     document: page.document,
@@ -215,6 +215,8 @@ function openPage(options = {}) {
         page.sent.push(JSON.parse(init.body));
         const next = page.answers.shift();
         if (!next) return Promise.reject(new Error('the window asked for an answer that was not set up'));
+        // A function is an answer that waits: it gets the window's signal, and decides what happens.
+        if (typeof next === 'function') return next(init);
         return Promise.resolve(next);
       }
       if (url === '/collab/ai/apply') {
@@ -870,4 +872,28 @@ test('(v) a model picked during the session is kept when the lists are read agai
   await second.end();
   assert.strictEqual(page.sent[0].preset, 'fast');
   assert.strictEqual(page.sent[1].preset, 'fast', 'the second question still uses the pick');
+});
+
+test('(w) a question the server did not take goes back in the box, and is not kept in the conversation', async () => {
+  const page = openPage({presets: OPENROUTER});
+  await flush();
+  page.answers.push({ok: false, status: 502, json: () => Promise.resolve({}), text: () => Promise.resolve('Bad Gateway')});
+  page.window.__aiHelper.send('Will this come back?');
+  await flush();
+  await flush();
+  assert.strictEqual(page.document.getElementById('input').value, 'Will this come back?');
+  const second = startAnswer(page, 'Second');
+  await second.end();
+  assert.deepStrictEqual(page.sent[1].messages, [{role: 'user', content: 'Second'}], 'the failed question is not sent again with the next one');
+});
+
+test('(x) a server that does not start its answer is given up on, and the question goes back in the box', async () => {
+  const page = openPage({presets: OPENROUTER, config: {silenceMs: 20}});
+  await flush();
+  page.answers.push(init => new Promise((resolve, reject) => {
+    init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), {name: 'AbortError'})));
+  }));
+  page.window.__aiHelper.send('Still there?');
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.strictEqual(page.document.getElementById('input').value, 'Still there?');
 });

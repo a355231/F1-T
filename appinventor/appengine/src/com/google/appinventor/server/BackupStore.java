@@ -78,7 +78,8 @@ final class BackupStore {
       }
     }
     if (bytes.size() > MAX_FILE_BYTES) {
-      return null;
+      // Not kept, and not reported as kept: the caller says the backup failed, so the hub does not count it as made.
+      throw new IOException("the project is too big to back up (" + (bytes.size() >> 20) + " MB zipped)");
     }
     String hash = hex(md.digest()).substring(0, 8);
     Path dir = folder(projectId);

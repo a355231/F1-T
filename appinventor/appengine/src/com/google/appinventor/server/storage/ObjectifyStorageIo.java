@@ -76,6 +76,7 @@ import java.io.ByteArrayOutputStream;
 
 // GCS imports
 import com.google.appengine.tools.cloudstorage.GcsFileOptions;
+import com.google.appengine.tools.cloudstorage.GcsFileMetadata;
 import com.google.appengine.tools.cloudstorage.GcsFilename;
 import com.google.appengine.tools.cloudstorage.GcsInputChannel;
 import com.google.appengine.tools.cloudstorage.GcsOutputChannel;
@@ -1727,51 +1728,49 @@ public class ObjectifyStorageIo implements StorageIo {
       if (isTrue(fileData.isGCS)) {     // It's in the Cloud Store
         try {
           int count;
-          boolean npfHappened = false;
-          boolean recovered = false;
           for (count = 0; count < 5; count++) {
             GcsFilename gcsFileName = new GcsFilename(getGcsBucketToUse(fileData.role), fileData.gcsName);
             int bytesRead = 0;
             int fileSize = 0;
             ByteBuffer resultBuffer;
             try {
-              fileSize = (int) gcsService.getMetadata(gcsFileName).getLength();
+              GcsFileMetadata metadata = gcsService.getMetadata(gcsFileName);
+              if (metadata == null) {
+                // The stored copy is gone. Empty bytes here would be saved over the real file, so the read fails instead.
+                throw new IOException("the stored copy of " + fileData.gcsName + " is missing");
+              }
+              fileSize = (int) metadata.getLength();
               resultBuffer = ByteBuffer.allocate(fileSize);
               GcsInputChannel readChannel = gcsService.openReadChannel(gcsFileName, 0);
               try {
                 while (bytesRead < fileSize) {
-                  bytesRead += readChannel.read(resultBuffer);
+                  int n = readChannel.read(resultBuffer);
+                  // End of the object before the length it had: it was replaced while it was being read. Looping on it
+                  // would never finish.
+                  if (n <= 0) {
+                    throw new IOException("the stored copy of " + fileData.gcsName + " changed while it was read");
+                  }
+                  bytesRead += n;
                   if (bytesRead < fileSize) {
                     if (DEBUG) {
                       LOG.log(Level.INFO, "readChannel: bytesRead = " + bytesRead + " fileSize = " + fileSize);
                     }
                   }
                 }
-                recovered = true;
+                // A copy that grew while it was read would be cut short here: that is a change too.
+                if (readChannel.read(ByteBuffer.allocate(1)) > 0) {
+                  throw new IOException("the stored copy of " + fileData.gcsName + " changed while it was read");
+                }
                 result.t = resultBuffer.array();
                 break;          // We got the data, break out of the loop!
               } finally {
                 readChannel.close();
               }
             } catch (NullPointerException e) {
-              // This happens if the object in GCS is non-existent, which would happen
-              // when people uploaded a zero length object. As of this change, we now
-              // store zero length objects into GCS, but there are plenty of older objects
-              // that are missing in GCS.
-              LOG.log(Level.WARNING, "downloadrawfile: NPF recorded for " + fileData.gcsName);
-              npfHappened = true;
-              resultBuffer = ByteBuffer.allocate(0);
-              result.t = resultBuffer.array();
-            }
-          }
-
-          // report out on how things went above
-          if (npfHappened) {    // We lost at least once
-            if (recovered) {
-              LOG.log(Level.WARNING, "recovered from NPF in downloadrawfile filename = " + fileData.gcsName +
-                " count = " + count);
-            } else {
-              LOG.log(Level.WARNING, "FATAL NPF in downloadrawfile filename = " + fileData.gcsName);
+              // Zero-length objects are stored in GCS, so a missing object is not an empty file. Reading one as empty
+              // would let a save write it over the real file, so it is reported.
+              LOG.log(Level.WARNING, "downloadrawfile: NPF for " + fileData.gcsName);
+              throw new IOException("the stored copy of " + fileData.gcsName + " is missing", e);
             }
           }
 

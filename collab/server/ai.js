@@ -665,7 +665,7 @@ function retryable(e) {
 }
 
 class Assistant {
-  constructor({ask, hub, fetchImpl, now, goalSteps, goalMs, searchImpl, idleMs, turnMs, retries, retryWaitMs, pingMs, orphanMs, keepMs, flushMs, log}) {
+  constructor({ask, hub, fetchImpl, now, goalSteps, goalMs, searchImpl, idleMs, turnMs, retries, retryWaitMs, pingMs, orphanMs, keepMs, flushMs, log, dailyFile}) {
     this.ask = ask;
     this.hub = hub;
     this.fetch = fetchImpl || ((...a) => fetch(...a));
@@ -689,7 +689,9 @@ class Assistant {
     this.artifacts = new Map();       // id -> {owner, kind, data|svg, mime, width, height, at, title}
     this.scratch = new Map();         // "user|project" -> {notes: Map, at}
     this.recent = new Map();          // user -> timestamps
-    this.day = {date: '', count: 0};
+    // The day's count is kept in a file when there is one, so that a restart of the hub does not give the team a new day.
+    this.dailyFile = dailyFile || null;
+    this.day = this.loadDay();
     this.full = new Map();            // "user|project" -> time full-app mode ends
     this.pinWrong = [];               // times of recent wrong PINs, team-wide
     this.pinLockedUntil = 0;
@@ -743,7 +745,27 @@ class Assistant {
     for (let i = 0; i < cost; i++) list.push(now);
     this.recent.set(userId, list);
     this.day.count += cost;
+    this.saveDay();
     return true;
+  }
+
+  loadDay() {
+    try {
+      const d = JSON.parse(fs.readFileSync(this.dailyFile, 'utf8'));
+      if (d && typeof d.date === 'string' && Number.isInteger(d.count) && d.count >= 0) return {date: d.date, count: d.count};
+    } catch (e) {
+      // no file yet, or one that cannot be read: the count starts again
+    }
+    return {date: '', count: 0};
+  }
+
+  saveDay() {
+    if (!this.dailyFile) return;
+    try {
+      fs.writeFileSync(this.dailyFile, JSON.stringify(this.day));
+    } catch (e) {
+      this.log("could not save the day's question count: " + e.message);
+    }
   }
 
   // What OpenRouter says about a model: whether it takes pictures, and how many tokens it can read. Each answer is
@@ -1951,7 +1973,22 @@ class Assistant {
       const headers = p.full ? {'x-collab-ai-mode': 'full'} : {};
       const out = await this.ask('/ode/collab/writefiles?projectId=' + projectId, cookie, 'POST',
         JSON.stringify({files: p.files}), headers);
-      if (!out || !out.ok) return refuse(APPLY_REFUSED);
+      if (!out || !out.ok) {
+        // The reply may have been lost after the write went in, or the write may have stopped part way. The project says
+        // which: a change that is all there is carried on as applied, a part is said to be only partly made.
+        let read;
+        try {
+          read = await this.projectNow(projectId, cookie, paths);
+        } catch (e) {
+          return refuse(APPLY_REFUSED);
+        }
+        const made = paths.filter(path => read.texts.get(path) === p.files[path]);
+        if (!made.length) return refuse(APPLY_REFUSED);
+        if (made.length < paths.length) {
+          return refuse('The change was only partly made: ' + made.join(', ') + ' changed, the others did not. ' +
+            'Ask for the change again to finish it.');
+        }
+      }
       let after;
       try {
         after = await this.projectNow(projectId, cookie, paths);

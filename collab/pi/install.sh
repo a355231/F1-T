@@ -85,6 +85,12 @@ echo "== Gentler on the SD card"
 IP="$(hostname -I | awk '{print $1}')"
 
 if [ "$BUILD_HERE" = 1 ]; then
+  # A build copies into the live App Inventor and hub folders, so two at once would mix their files. An update that runs
+  # this build holds the lock already (it says so with AI_UPDATE_LOCK_HELD).
+  if [ "${AI_UPDATE_LOCK_HELD:-0}" != 1 ]; then
+    exec 8>"${AI_LOCK:-/run/collab-update.lock}" || exit 1
+    flock -n 8 || { echo "An update is running on this Pi. Build again when it is done." >&2; exit 1; }
+  fi
   "$HERE/build-on-pi.sh"
   echo "== Waiting for the Cloudflare address"
   url=""

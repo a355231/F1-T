@@ -31,6 +31,7 @@ HEALTH_SECONDS=${AI_HEALTH_SECONDS:-600}
 HEALTH_STEP=${AI_HEALTH_STEP:-10}
 STABLE_SECONDS=${AI_STABLE_SECONDS:-120}
 ROLL="$BASE/rollback"
+MITSTATUS_PATH="${AI_MITSTATUS:-/usr/local/bin/MITSTATUS}"
 STATE="$BASE/update-state"
 NOTICE="$BASE/update-failed"
 LOG="$BASE/update.log"
@@ -103,8 +104,10 @@ snapshot() {
   mkdir -p "$ROLL.new/scripts" "$ROLL.new/units" || return 1
   rsync -a --exclude 'WEB-INF/appengine-generated' --link-dest="$BASE/war/" \
     "$BASE/war/" "$ROLL.new/war/" || return 1
-  rsync -a --exclude node_modules "$BASE/hub/" "$ROLL.new/hub/" || return 1
+  # The hub's packages are kept too: a rollback must not run the old hub with the new ones.
+  rsync -a --link-dest="$BASE/hub/" "$BASE/hub/" "$ROLL.new/hub/" || return 1
   cp -p "$BASE"/*.sh "$ROLL.new/scripts/" 2>/dev/null
+  cp -p "$MITSTATUS_PATH" "$ROLL.new/scripts/MITSTATUS" 2>/dev/null
   cp -p "$UNITS"/appinventor.service "$UNITS"/collab-hub.service "$UNITS"/cloudflared-quick.service \
     "$UNITS"/collab-update.service "$UNITS"/collab-update.timer "$UNITS"/collab-watchdog.service \
     "$UNITS"/collab-watchdog.timer "$ROLL.new/units/" 2>/dev/null
@@ -120,7 +123,8 @@ restore_previous() {
   systemctl stop collab-hub appinventor 2>/dev/null
   # A copy that fails leaves the old version only partly back: that is reported (fail), not called a success.
   rsync -a --delete --exclude 'WEB-INF/appengine-generated' "$ROLL/war/" "$BASE/war/" || return 1
-  rsync -a --delete --exclude node_modules "$ROLL/hub/" "$BASE/hub/" || return 1
+  rsync -a --delete "$ROLL/hub/" "$BASE/hub/" || return 1
+  if [ -f "$ROLL/scripts/MITSTATUS" ]; then cp -p "$ROLL/scripts/MITSTATUS" "$MITSTATUS_PATH" || return 1; fi
   cp -p "$ROLL"/scripts/*.sh "$BASE/" 2>/dev/null
   cp -p "$ROLL"/units/* "$UNITS/" 2>/dev/null
   cp -p "$ROLL/version" "$BASE/version" 2>/dev/null
@@ -185,7 +189,14 @@ main() {
   if [ "$mode" = off ] && [ "$now$check$rollback" = 000 ]; then exit 0; fi
 
   exec 9>"$LOCK" || exit 1
-  if ! flock -n 9; then log "Another update is already running."; exit 0; fi
+  if ! flock -n 9; then
+    log "Another update is already running."
+    # A request made by hand is refused with a code that says so. The timer, finding the lock busy, is not an error.
+    if [ "$now$check$rollback" = 000 ]; then exit 0; fi
+    exit 75
+  fi
+  # install.sh is run by this update, and must not wait for the lock this update holds.
+  export AI_UPDATE_LOCK_HELD=1
   if [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 400 ]; then
     tail -n 300 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
   fi

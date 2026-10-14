@@ -262,5 +262,22 @@ unset FAKE_INSTALL_RC FAKE_RSYNC_DELETE_FAIL
 check "a restore that fails is an error" [ "$rc" = 1 ]
 check "the notice says the old version could not be put back in full" grep -q "could not be put back in full" "$AI_BASE/update-failed"
 
+# 14. A request made by hand while an update holds the lock is refused with exit 75, not reported as done.
+exec 7>"$AI_LOCK"
+flock -n 7
+run --now; rc=$?
+exec 7>&-
+check "a request made by hand while an update runs is refused with exit 75" [ "$rc" = 75 ]
+
+# 15. The menu (MITSTATUS) is kept with the version, so that a rollback puts back the menu of the version before it.
+export AI_MITSTATUS="$T/MITSTATUS-live"
+publish fourteen
+echo "menu-before" > "$AI_MITSTATUS"
+run --now; rc=$?
+check "a new version is installed with the menu saved" [ "$rc" = 0 ] && grep -qx fourteen "$AI_BASE/war/marker.txt"
+echo "menu-after" > "$AI_MITSTATUS"
+run --rollback; rc=$?
+check "a rollback puts back the menu of the version before it" [ "$rc" = 0 ] && [ "$(cat "$AI_MITSTATUS")" = "menu-before" ]
+
 echo "$pass passed, $failed failed"
 [ "$failed" = 0 ]
