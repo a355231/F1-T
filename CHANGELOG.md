@@ -224,9 +224,6 @@ These were found while reviewing, and are not fixed here. Some need a design dec
 - A systemd restart loop has no limit (a start limit would also stop a fault that clears by itself; this needs a decision).
 - Stale GWT output accumulates on the card with each build.
 - MITSTATUS's restart options do not wait for an update that is running.
-- The build that failed at compile on `fabd525` is still unexplained. The update keeps the end of the build's output
-  in its log. To find the cause, send the output of `journalctl -u collab-update.service -u collab-update-now.service`
-  from that night.
 
 ## Earlier history (2026-10-06 to 2026-10-14)
 
