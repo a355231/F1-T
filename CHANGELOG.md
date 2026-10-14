@@ -12,6 +12,23 @@ known to be wrong is listed at the end of this section.
 **After this update, reload every open App Inventor tab once.** The team page's scripts changed, and a tab opened before
 the update keeps the old scripts until it is reloaded.
 
+### Updater: retries, the failure bar, and nobody cut off
+
+* A failed update is tried six times in all: the first try, then five retries, with 10 minutes, then 20, 30, 40 and 50
+  minutes between them. The notice says when the next try is, or that the tries are used up for tonight.
+* Before the fourth try, what the failed builds left behind is given back: a build process left running from an earlier
+  try is stopped, the build's swap file is removed, and the page cache is dropped. App Inventor, the hub and the tunnel
+  are not stopped or restarted for it, so nobody is cut off. Nothing on the phones is touched either.
+* A try waits until nobody is using App Inventor. If people are still there two hours later, the update stops until the
+  next night.
+* A build that fails before its files are copied into `/opt/appinventor` no longer puts the old version back. Before, every
+  failed build restarted App Inventor and the hub, which cut people off even though nothing had changed.
+* A build that takes longer than three hours is stopped, and counts as a failed try. A download from GitHub is tried three
+  times, and putting the old version back is tried three times.
+* The watchdog leaves App Inventor and the hub alone while a new version is being put in or back.
+* The failure bar at the top of every App Inventor page shows when the update failed: the 12-hour clock in Eastern time,
+  and the date. It has a Dismiss button; dismissing is kept in that browser, for that failure only.
+
 ### Fixed
 
 **Security**

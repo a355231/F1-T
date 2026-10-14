@@ -100,24 +100,67 @@ function clientAddress(req) {
   return addr.startsWith('::ffff:') ? addr.slice(7) : addr;
 }
 
-// After a failed update, update.sh leaves a notice in DATA_DIR/update-failed. Every page of App
-// Inventor shows it, to whoever opens the link, until a later update succeeds.
+// After a failed update, update.sh leaves a notice in DATA_DIR/update-failed, and the time it failed
+// (seconds since 1970) in DATA_DIR/update-failed-meta. Every page of App Inventor shows it, to whoever
+// opens the link, until a later update succeeds. A new failure shows it again, even to someone who
+// dismissed the last one.
 function updateNotice() {
+  let text;
   try {
-    return fs.readFileSync(DATA_DIR + '/update-failed', 'utf8').trim();
+    text = fs.readFileSync(DATA_DIR + '/update-failed', 'utf8').trim();
   } catch (e) {
-    return '';
+    return null;
   }
+  if (!text) return null;
+  let failedAt = null;
+  try {
+    const m = /^failed=(\d+)$/m.exec(fs.readFileSync(DATA_DIR + '/update-failed-meta', 'utf8'));
+    if (m) failedAt = Number(m[1]);
+  } catch (e) {
+    // No time was written: the time the notice was written is used.
+  }
+  if (failedAt === null) {
+    try {
+      failedAt = Math.floor(fs.statSync(DATA_DIR + '/update-failed').mtimeMs / 1000);
+    } catch (e) {
+      failedAt = 0;
+    }
+  }
+  return {text, failedAt, key: String(failedAt)};
+}
+
+const EASTERN_TIME = {timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'};
+const EASTERN_DATE = {timeZone: 'America/New_York', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'};
+
+// "2:35 PM EDT on Wednesday, October 14, 2026": the 12-hour clock in Eastern time, then the date.
+function failedAtText(seconds) {
+  if (!seconds) return 'an unknown time';
+  const at = new Date(seconds * 1000);
+  // Newer versions of Node put a narrow no-break space before AM and PM: a plain space is used instead.
+  const clock = new Intl.DateTimeFormat('en-US', EASTERN_TIME).format(at).replace(/[  ]/g, ' ');
+  return clock + ' on ' + new Intl.DateTimeFormat('en-US', EASTERN_DATE).format(at);
 }
 
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 }
 
-function withNotice(html, text) {
-  const banner = '<div id="aicollab-update-notice" style="position:fixed;left:0;right:0;top:0;z-index:99999;' +
-    'background:#b00020;color:#fff;padding:10px 14px;font:14px/1.4 sans-serif;text-align:center;' +
-    'box-shadow:0 2px 8px rgba(0,0,0,.3)">' + escapeHtml(text) + '</div>';
+// The bar goes at the end of the page. Dismissing it is kept in this browser (localStorage), for this
+// failure only: the key is the time it failed. The script is inline, and runs as the bar is read.
+function withNotice(html, notice) {
+  const script = "(function(){var b=document.getElementById('aicollab-update-notice');" +
+    "try{if(localStorage.getItem('aicollab-update-dismissed')===b.getAttribute('data-key')){" +
+    "b.parentNode.removeChild(b);return;}}catch(e){}" +
+    "document.getElementById('aicollab-update-dismiss').onclick=function(){" +
+    "try{localStorage.setItem('aicollab-update-dismissed',b.getAttribute('data-key'));}catch(e){}" +
+    "b.parentNode.removeChild(b);};})();";
+  const banner = '<div id="aicollab-update-notice" data-key="' + escapeHtml(notice.key) +
+    '" style="position:fixed;left:0;right:0;top:0;z-index:99999;background:#b00020;color:#fff;' +
+    'padding:10px 14px;font:14px/1.4 sans-serif;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.3)">' +
+    '<b>Failed at ' + escapeHtml(failedAtText(notice.failedAt)) + '.</b> ' + escapeHtml(notice.text) +
+    ' <button type="button" id="aicollab-update-dismiss" style="margin-left:10px;padding:2px 10px;font:inherit;' +
+    'color:#b00020;background:#fff;border:0;border-radius:3px;cursor:pointer">Dismiss</button>' +
+    '<script>' + script + '</script></div>';
   return /<\/body>/i.test(html) ? html.replace(/<\/body>/i, () => banner + '</body>') : html + banner;
 }
 
@@ -181,7 +224,7 @@ function proxy(req, res) {
       return;
     }
     const notice = upstreamRes.statusCode === 200 && /text\/html/i.test(String(outHeaders['content-type'] || ''))
-      ? updateNotice() : '';
+      ? updateNotice() : null;
     if (notice) {
       const chunks = [];
       upstreamRes.on('data', c => chunks.push(c));
@@ -330,6 +373,7 @@ const server = http.createServer((req, res) => {
   if (req.url === '/collab/status') {
     res.writeHead(200, {'content-type': 'application/json', 'cache-control': 'no-store'});
     const s = hub.status();
+    const notice = updateNotice();
     // Room logs and emails stay private; this page is reachable through the tunnel.
     res.end(JSON.stringify({
       online: s.clients.map(c => ({name: c.name, projectName: c.projectName, screen: c.screen,
@@ -340,7 +384,8 @@ const server = http.createServer((req, res) => {
         hits: staticCache.hits, misses: staticCache.misses},
       uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
       alerts,
-      updateFailed: updateNotice() || null,
+      updateFailed: notice ? notice.text : null,
+      updateFailedAt: notice ? new Date(notice.failedAt * 1000).toISOString() : null,
     }, null, 2));
     return;
   }

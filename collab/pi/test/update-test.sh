@@ -15,6 +15,9 @@ trap 'rm -rf "$T"' EXIT
 
 export AI_BASE="$T/opt" AI_UNIT_DIR="$T/units" AI_LOCK="$T/lock"
 export AI_HEALTH_SECONDS=2 AI_HEALTH_STEP=1 AI_STABLE_SECONDS=0
+# The waits between tries, retries and checks are zero here, so that six tries run at once.
+export AI_RETRY_BASE=0 AI_FETCH_WAIT=0 AI_RESTORE_WAIT=0 AI_QUIET_STEP=0 AI_QUIET_SECONDS=0
+export AI_SWAP_FILE="$T/swap"
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.org
 export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.org
 mkdir -p "$AI_BASE" "$AI_UNIT_DIR" "$T/bin" "$T/author"
@@ -60,13 +63,19 @@ mkdir -p "$T/author/collab/pi"
 cat > "$T/author/collab/pi/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
 root="$(cd "$(dirname "$0")/../.." && pwd)"
+# FAKE_BUILD_FAIL: a build that fails before anything is put in place. FAKE_INSTALL_SLEEP: a build that takes a while.
+if [ -n "${FAKE_BUILD_FAIL:-}" ]; then echo "BUILD FAILED before the copy"; exit 1; fi
+[ -n "${FAKE_INSTALL_SLEEP:-}" ] && sleep "$FAKE_INSTALL_SLEEP"
+# From here until the copy is finished, a failure means the old version is put back (build-on-pi.sh does the same).
+touch "$AI_BASE/install-in-progress"
 mkdir -p "$AI_BASE/war"
 cp "$root/marker.txt" "$AI_BASE/war/marker.tmp" && mv "$AI_BASE/war/marker.tmp" "$AI_BASE/war/marker.txt"
 git -C "$root" rev-parse --short HEAD > "$AI_BASE/version.tmp" && mv "$AI_BASE/version.tmp" "$AI_BASE/version"
 echo "installed $(cat "$root/marker.txt")" >> "$AI_BASE/calls.log"
 echo "progress: $(grep '^stage=' "$AI_BASE/update-progress" 2>/dev/null)" >> "$AI_BASE/calls.log"
-[ "${FAKE_INSTALL_RC:-0}" = 0 ] || echo "BUILD FAILED: a test error"
-exit "${FAKE_INSTALL_RC:-0}"
+if [ "${FAKE_INSTALL_RC:-0}" != 0 ]; then echo "BUILD FAILED: a test error"; exit "$FAKE_INSTALL_RC"; fi
+rm -f "$AI_BASE/install-in-progress"
+exit 0
 INSTALL
 chmod +x "$T/author/collab/pi/install.sh"
 
@@ -278,6 +287,67 @@ check "a new version is installed with the menu saved" [ "$rc" = 0 ] && grep -qx
 echo "menu-after" > "$AI_MITSTATUS"
 run --rollback; rc=$?
 check "a rollback puts back the menu of the version before it" [ "$rc" = 0 ] && [ "$(cat "$AI_MITSTATUS")" = "menu-before" ]
+
+# 16. A failed update is tried six times in all. After the third failure, the resources the failed builds left behind are
+# given back before the fourth try: a build left running in the build's folder is stopped, and the build's swap file is
+# removed. Nothing else is stopped: a process outside the build's folder keeps running.
+gone() { local s; s="$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null)"; [ -z "$s" ] || [ "$s" = Z ]; }
+alive() { kill -0 "$1" 2>/dev/null; }
+mkdir -p "$REPO/appinventor"
+(cd "$REPO/appinventor" && exec sleep 300) &
+LEFT_OVER=$!
+(cd "$T" && exec sleep 300) &
+ELSEWHERE=$!
+echo "swap left by a build" > "$AI_SWAP_FILE"
+running="$(cat "$AI_BASE/war/marker.txt")"
+publish sixteen
+before="$(installs)"
+export FAKE_INSTALL_RC=1
+run --now; rc=$?
+unset FAKE_INSTALL_RC
+check "a failed update is a failed update" [ "$rc" = 1 ]
+check "a failed update is tried six times in all" [ "$(installs)" = "$((before + 6))" ]
+check "the sixth try is logged" grep -q "Trying again: try 6 of 6" "$AI_BASE/update.log"
+check "the notice says the tries are used up for tonight" grep -q "tomorrow night" "$AI_BASE/update-failed"
+check "the third failure frees system resources before the fourth try" grep -q "Freed system resources before try 4 of 6" "$AI_BASE/update.log"
+check "a build left running from an earlier try is stopped" gone "$LEFT_OVER"
+check "a process outside the build's folder keeps running" alive "$ELSEWHERE"
+check "the build's swap file is removed" [ ! -e "$AI_SWAP_FILE" ]
+check "the old version is running again" grep -qx "$running" "$AI_BASE/war/marker.txt"
+kill -9 "$ELSEWHERE" 2>/dev/null
+wait "$ELSEWHERE" "$LEFT_OVER" 2>/dev/null
+
+# 17. A build that takes too long is stopped, and that counts as a failed try.
+publish seventeen
+export FAKE_INSTALL_SLEEP=5 AI_BUILD_TIMEOUT=1 AI_MAX_RETRIES=0
+run --now; rc=$?
+unset FAKE_INSTALL_SLEEP AI_BUILD_TIMEOUT AI_MAX_RETRIES
+check "a build that takes too long is a failed update" [ "$rc" = 1 ]
+check "the notice says the build took too long" grep -q "took too long" "$AI_BASE/update-failed"
+check "the version that runs is not changed" grep -qx "$running" "$AI_BASE/war/marker.txt"
+
+# 18. A build that fails before anything is put in place changes nothing that runs, and restarts nothing.
+publish eighteen
+export FAKE_BUILD_FAIL=1
+lines_before="$(wc -l < "$AI_BASE/calls.log")"
+run --now; rc=$?
+unset FAKE_BUILD_FAIL
+no_restart_after() { ! tail -n +"$(( $1 + 1 ))" "$AI_BASE/calls.log" | grep -q '^systemctl'; }
+check "a build that fails before the copy is a failed update" [ "$rc" = 1 ]
+check "the version that runs is not changed" grep -qx "$running" "$AI_BASE/war/marker.txt"
+check "nothing is stopped or started for it, on any try" no_restart_after "$lines_before"
+check "the notice says the version that is running was not changed" grep -q "was not changed" "$AI_BASE/update-failed"
+
+# 19. A retry does not start while people are using App Inventor. If they are still there after the wait, the update
+# stops until tomorrow night, and the first try (which was asked for by hand) is the only one that ran.
+publish nineteen
+export FAKE_INSTALL_RC=1 FAKE_ONLINE='[{"name":"someone"}]'
+before="$(installs)"
+run --now; rc=$?
+unset FAKE_INSTALL_RC FAKE_ONLINE
+check "the update stops when people are still there after the wait" [ "$rc" = 1 ]
+check "only the first try ran while people were there" [ "$(installs)" = "$((before + 1))" ]
+check "the notice says the update did not run again" grep -q "did not run again" "$AI_BASE/update-failed"
 
 echo "$pass passed, $failed failed"
 [ "$failed" = 0 ]

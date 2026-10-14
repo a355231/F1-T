@@ -66,6 +66,8 @@ sudo -u "$RUN_AS" -H env JAVA_HOME="$JDK" PATH="$JDK/bin:$PATH" \
 
 echo "== Installing into $BASE"
 mkdir -p "$BASE/war" "$BASE/hub" "$BASE/tools"
+# Until the install is finished, a failure makes the updater put the old version back (see update.sh).
+touch "$BASE/install-in-progress"
 rsync -a --delete --exclude 'WEB-INF/appengine-generated' \
   "$ROOT/appinventor/appengine/build/war/" "$BASE/war/"
 rsync -a --delete --exclude node_modules "$ROOT/collab/server/" "$BASE/hub/"
@@ -86,3 +88,4 @@ systemctl enable appinventor collab-hub cloudflared-quick
 systemctl restart appinventor collab-hub
 # Left running if it already is, so the internet address stays the same across updates.
 systemctl start cloudflared-quick
+rm -f "$BASE/install-in-progress"

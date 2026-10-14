@@ -348,10 +348,15 @@ manual `git pull`, say), it gets that code and **builds it while the current ver
 started. If people are online at 3 AM, it tries again every half hour until 6 AM, and it never
 interrupts a session. Your projects, backups, team code and OpenRouter settings are never touched.
 
-**If the new version fails, it goes back.** A failed build, or a new version that does not answer
+**If the new version fails, it goes back, and is tried again.** A failed build, or a new version that does not answer
 within 10 minutes, puts the previous version back automatically. Everyone who opens the link then
-sees a red notice at the top of the page, saying which step failed and that the previous version
-is running again. The notice goes away after the next update that works. The log is
+sees a red bar at the top of the page: it says when the update failed (the 12-hour clock in Eastern time, and the date),
+which step failed, that the previous version is running again, and when the next try is. Anybody can dismiss the bar,
+and a new failure shows it again. An update is tried six times in all: the first try, then five more, with 10 minutes,
+20, 30, 40 and 50 minutes between them. Before the fourth try, the memory and disk space that the failed builds left
+behind are given back. App Inventor, the hub and the tunnel are not stopped for that. A try waits until nobody is using
+App Inventor, and if people are still there two hours later, the update stops until the next night. A build that fails
+before anything is copied into `/opt/appinventor` restarts nothing. The notice goes away after the next update that works. The log is
 `/opt/appinventor/update.log` (`sudo tail -n 60 /opt/appinventor/update.log`). When a build fails, the end of its output
 is copied into that log too; the whole output is in `/opt/appinventor/build.log`.
 

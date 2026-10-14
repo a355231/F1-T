@@ -3,7 +3,16 @@
 # every minute. Counters live in /run (memory), so this never writes to the SD card.
 set -u
 STATE=/run/appinventor-watchdog
+BASE=/opt/appinventor
+LOCK=/run/collab-update.lock
 mkdir -p "$STATE"
+
+# While an update is putting a new version in, or putting the old one back, the services are restarted on purpose,
+# so this leaves them alone. A stale progress file (after a power cut, say) does not count: the lock must be held too.
+if ! flock -n "$LOCK" true 2>/dev/null; then
+  stage="$(sed -n 's/^stage=//p' "$BASE/update-progress" 2>/dev/null | tail -n 1)"
+  if [ -e "$BASE/install-in-progress" ] || [ "$stage" = start ] || [ "$stage" = restoring ]; then exit 0; fi
+fi
 
 check() {  # name url
   local name="$1" url="$2" n

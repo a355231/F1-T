@@ -326,6 +326,23 @@ test('after a failed update every page shows the notice, until the file is remov
   assert.doesNotMatch((await fetchRaw('/html-page')).body.toString(), /aicollab-update-notice/);
 });
 
+test('the notice says when the update failed, in Eastern time, and can be dismissed', async () => {
+  const file = path.join(dataDir, 'update-failed');
+  const meta = path.join(dataDir, 'update-failed-meta');
+  // 18:35 UTC on 14 October 2026 is 2:35 PM in New York, on daylight time.
+  const failedAt = Date.UTC(2026, 9, 14, 18, 35) / 1000;
+  fs.writeFileSync(file, 'The automatic update failed <test>.');
+  fs.writeFileSync(meta, 'failed=' + failedAt + '\n');
+  const shown = (await fetchRaw('/html-page')).body.toString();
+  assert.match(shown, /Failed at 2:35 PM EDT on Wednesday, October 14, 2026\./);
+  assert.match(shown, /id="aicollab-update-dismiss"/, 'there is a Dismiss button');
+  assert.ok(shown.includes('data-key="' + failedAt + '"'), 'the key is the time of the failure');
+  const status = JSON.parse((await fetchRaw('/collab/status')).body.toString());
+  assert.strictEqual(status.updateFailedAt, '2026-10-14T18:35:00.000Z');
+  fs.unlinkSync(file);
+  fs.unlinkSync(meta);
+});
+
 test('a restored backup moves the write count, so a tab that joins afterwards knows the project changed', async () => {
   const ann = await connect('ann');
   const bob = await connect('bob' + Date.now().toString(36));
